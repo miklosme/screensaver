@@ -1,23 +1,32 @@
 # screensaver
 
-To install dependencies:
+An endless camera journey through four impossible, curvy worlds. Each scene ends by flying
+through a doorway that is a live window into the next one. No UI, just WebGL
+(Vite + React + react-three-fiber).
 
 ```bash
 bun install
+bun run dev      # http://localhost:5173
+bun run build    # static build in dist/
 ```
 
-To run:
+## How it works
 
-```bash
-bun run index.ts
-```
+- `src/director/Director.tsx` keeps two scenes mounted: the current one and the next one. The
+  next scene is rendered into a render target, and the current scene's exit portal samples that
+  target in screen space (`portalMaterial.ts`). When the portal fills the screen the scenes swap,
+  which is invisible because both images are pixel-identical at that moment.
+- Every scene runs on the same 25 s local timeline, documented in `src/scenes/types.ts`. A new
+  scene takes over the screen every 20 s.
+- Scenes are listed in `src/scenes/index.ts` and loop in that order. To add one, write a component
+  that takes `SceneProps`, put `portalMaterial` on its exit opening, and register it.
 
-To type check:
+## Debugging
 
-```bash
-bun check
-```
+There is no UI, only query params:
 
-Run `bun fmt` to format the code.
+- `?scene=<id>` start at that scene (`helix`, `burrow`, `dollhouse`, `orbit`)
+- `?t=<seconds>` freeze the scene clock at a local time
+- `?speed=<n>` time multiplier
 
-This project was created using `bun init` in bun v1.4.4. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+`scripts/shot.sh <scene> <t> <out.png>` takes a headless Chrome screenshot of a frozen frame.
