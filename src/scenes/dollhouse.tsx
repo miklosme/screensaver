@@ -24,6 +24,7 @@ import {
   Vector3,
   type Group,
 } from "three";
+import { RAIL, RAIL_LEAD_IN, RAIL_LEAD_OUT, createRide } from "./rail";
 import type { SceneProps } from "./types";
 
 /**
@@ -141,19 +142,30 @@ const PLINTH = 0.3;
 const HERO_Y = ground(0, 0);
 const EXIT_Y = HERO_Y + PLINTH + 2.2;
 
-// Camera keys, one every 2.5 s (uniform Catmull-Rom => C1 in time).
-const CAM_KEYS: [number, number, number][] = [
-  [3.0, 5.2, 9.0],
-  [7.2, 4.4, 15.5],
-  [10.8, 3.7, 23.0],
-  [11.6, 3.25, 31.5],
-  [7.0, 2.95, 38.6],
-  [1.2, 2.75, 41.0],
-  [0.0, 2.65, 34.5],
-  [1.0, 2.6, 25.0],
-  [3.6, 2.55, 14.5],
-  [0.25, EXIT_Y, 5.5],
-  [0.0, EXIT_Y, 0.0],
+// The camera track. It opens with a dead straight glide at the thin doorway (the arriving camera
+// may not turn, see rail.ts), peels off to the right, rounds the doorway, comes back through its
+// empty frame and ends on a straight run into the stele.
+const LEAD_FROM = new Vector3(8.5, 5.9, 0.5);
+const LEAD_DIR = new Vector3(5.2, 2.9, D1.z).sub(LEAD_FROM).normalize(); // passes right of the doorway
+const lead = (dist: number) => LEAD_FROM.clone().addScaledVector(LEAD_DIR, dist);
+const CAM_KEYS: Vector3[] = [
+  // collinear: the curve stays exactly on the line up to the third key
+  lead(0),
+  lead(10),
+  lead(RAIL_LEAD_IN + 1),
+  lead(RAIL_LEAD_IN + 3),
+  new Vector3(9.2, 3.5, 26.4),
+  new Vector3(11.6, 3.25, 31.2),
+  new Vector3(11.0, 3.1, 35.6),
+  new Vector3(7.2, 2.95, 39.8),
+  new Vector3(1.2, 2.75, 41.0),
+  new Vector3(0.0, 2.65, 34.5),
+  new Vector3(1.0, 2.6, 25.0),
+  new Vector3(2.6, 2.55, 16.5),
+  // collinear again: straight through the stele's doors
+  new Vector3(0, EXIT_Y, 2 * RAIL_LEAD_OUT + 0.4),
+  new Vector3(0, EXIT_Y, RAIL_LEAD_OUT + 0.2),
+  new Vector3(0, EXIT_Y, 0),
 ];
 
 interface DoorDef {
@@ -420,14 +432,19 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
   const loopShadows = useRef<InstancedMesh>(null);
 
   const cam = useMemo(() => {
-    const curve = new CatmullRomCurve3(
-      CAM_KEYS.map((k) => new Vector3(k[0], k[1], k[2])),
-      false,
-      "catmullrom",
-      0.5,
-    );
+    const curve = new CatmullRomCurve3(CAM_KEYS, false, "centripetal");
+    curve.arcLengthDivisions = 4000;
+    const length = curve.getLength();
     return {
       curve,
+      length,
+      // brisk on the way in and out, lingering while it rounds the back of the doorway; the
+      // profile is scaled so that it uses up the track exactly
+      ride: createRide({
+        cruise: (t) => 4.6 - 1.7 * smoothstep(8, 11, t) * (1 - smoothstep(12.5, 15.5, t)),
+        length,
+        rampIn: 4,
+      }),
       look: new Vector3(),
       lookA: new Vector3(D1.x, 2.9, D1.z),
       lookB: new Vector3(0, EXIT_Y, -40),
@@ -771,20 +788,23 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
   useFrame(() => {
     const t = Math.min(25, Math.max(0, clock.t));
-    cam.curve.getPoint(t / 25, camera.position);
-    const s = smoothstep(9, 15.5, t);
-    cam.look.lerpVectors(cam.lookA, cam.lookB, s);
+    cam.curve.getPointAt(Math.min(1, cam.ride.at(t) / cam.length), camera.position);
+    // straight ahead while arriving, then the eye is drawn to the doorway, then on to the stele
+    const free = smoothstep(RAIL.release, RAIL.release + 4.8, t);
+    const s = smoothstep(10.8, 16.8, t);
+    cam.look.lerpVectors(cam.lookA, cam.lookB, s).sub(camera.position).normalize();
+    cam.look.lerp(LEAD_DIR, 1 - free).add(camera.position);
     camera.up.set(0, 1, 0);
     camera.lookAt(cam.look);
     // a breath of roll while orbiting
-    camera.rotateZ(Math.sin((t / 25) * Math.PI * 2) * 0.02 * (1 - smoothstep(20, 24, t)));
-    const fov = 50 + 8 * smoothstep(15, 23, t);
+    camera.rotateZ(Math.sin((t / 25) * Math.PI * 2) * 0.02 * free * (1 - smoothstep(20, RAIL.settle, t)));
+    const fov = 50 + 8 * smoothstep(16, 23.5, t);
     if (camera.fov !== fov) {
       camera.fov = fov;
       camera.updateProjectionMatrix();
     }
     // double doors swing open towards us
-    const k = smoothstep(12.2, 17.5, t);
+    const k = smoothstep(13.2, 18.5, t);
     const open = k * 1.95;
     if (leafR.current) leafR.current.rotation.y = open;
     if (leafL.current) leafL.current.rotation.y = -open;

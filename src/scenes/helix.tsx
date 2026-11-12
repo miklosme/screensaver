@@ -26,6 +26,7 @@ import {
   type Material,
 } from "three";
 import { TIMING, type SceneProps } from "./types";
+import { RAIL, RAIL_LEAD_OUT, createRide, type Ride } from "./rail";
 
 /**
  * HELIX — the endless staircase.
@@ -55,7 +56,9 @@ const WALL_R = 38;
 const WALL_N = 26; // arcade modules per turn
 const WALL_H = 13;
 const WALL_PITCH = -13; // counter-wound
-const SPEED = 3.35; // camera speed along the path
+const CRUISE = 3.6; // camera speed on the stair; RAIL.speed at both seams
+const LEAD_EASE = 20; // track over which the fly-in bends from dead straight onto the helix
+const LAND_EASE = 12; // track over which the flare straightens out into the landing
 const END_GAP = 0.22; // camera stops this far in front of the portal plane
 const EYE = 2.6;
 const EYE_RISE = 2.5; // the camera floats up to the keyhole's centre at the end
@@ -74,6 +77,11 @@ const AMBER: [number, number, number] = [0.8, 0.47, 0.2];
 const smooth = (a: number, b: number, x: number) => {
   const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return k * k * (3 - 2 * k);
+};
+/** like smooth, but its second derivative also vanishes at both ends */
+const smoother = (a: number, b: number, x: number) => {
+  const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return k * k * k * (k * (6 * k - 15) + 10);
 };
 
 function rng(seed: number) {
@@ -117,10 +125,30 @@ function buildPath(main: boolean): PathTable {
     ff[i] = k;
     fs[i] = i === 0 ? 0 : fs[i - 1]! + Math.hypot(fx[i]! - fx[i - 1]!, fz[i]! - fz[i - 1]!);
   }
-  const end = fs[count - 1]!;
+  if (main) {
+    // The flare would arrive at the door still turning. Fade its curvature out instead, so that
+    // the landing (and the camera on it) runs dead straight into the keyhole.
+    const straight = RAIL_LEAD_OUT + END_GAP + 0.8;
+    const total = fs[count - 1]!;
+    const ox = fx.slice();
+    const oz = fz.slice();
+    const heading = (i: number) => Math.atan2(oz[i]! - oz[i - 1]!, ox[i]! - ox[i - 1]!);
+    let i = count - 1;
+    while (i > 2 && total - fs[i]! < straight + LAND_EASE) i--;
+    let psi = heading(i);
+    for (i++; i < count; i++) {
+      const bend = heading(i) - heading(i - 1);
+      const keep = 1 - smoother(straight + LAND_EASE, straight, total - fs[i]!);
+      psi += Math.atan2(Math.sin(bend), Math.cos(bend)) * keep;
+      const step = fs[i]! - fs[i - 1]!;
+      fx[i] = fx[i - 1]! + Math.cos(psi) * step;
+      fz[i] = fz[i - 1]! + Math.sin(psi) * step;
+    }
+  }
   const tx = fx[count - 1]! - fx[count - 6]!;
   const tz = fz[count - 1]! - fz[count - 6]!;
   const tl = Math.hypot(tx, tz);
+  const end = fs[count - 1]!;
   const n = Math.ceil((end + EXT) / DS) + 1;
   const x = new Float32Array(n);
   const z = new Float32Array(n);
@@ -167,6 +195,57 @@ function pathTangent(p: PathTable, s: number, out: Vector3): Vector3 {
   pathAt(p, s + 0.5, _b);
   out.set(_b.x - _a.x, 0, _b.z - _a.z);
   return out.normalize();
+}
+
+/**
+ * The camera's own track. It is the stair's centre line, except that the camera cannot start out
+ * on a spiral (see rail.ts): it flies in from the void along a straight line that climbs at the
+ * stair's slope, and a transition curve then winds that line onto the helix.
+ */
+interface CameraTrack {
+  path: PathTable;
+  /** true (sloped) distance travelled at each table entry; the path itself is indexed by plan length */
+  dist: Float32Array;
+  ride: Ride;
+  /** value of `dist` where the camera stops, END_GAP short of the door */
+  stop: number;
+}
+
+function buildCameraTrack(path: PathTable): CameraTrack {
+  const cam: PathTable = { ...path, x: path.x.slice(), z: path.z.slice(), h: path.h.slice() };
+  const dist = new Float32Array(path.n);
+  for (let k = 1; k < path.n; k++) dist[k] = dist[k - 1]! + Math.hypot(DS, path.h[k]! - path.h[k - 1]!);
+  const track: CameraTrack = { path: cam, dist, ride: createRide({ cruise: CRUISE }), stop: 0 };
+  const kStop = (path.end - END_GAP) / DS;
+  track.stop = dist[Math.floor(kStop)]! + (kStop % 1) * (dist[Math.floor(kStop) + 1]! - dist[Math.floor(kStop)]!);
+
+  // the straight outlasts the seam by the look-ahead
+  const bend0 = trackS(track, RAIL.release) + 2.2;
+  const join = Math.round((bend0 + LEAD_EASE) / DS);
+  const heading = (k: number) => Math.atan2(path.z[k + 1]! - path.z[k]!, path.x[k + 1]! - path.x[k]!);
+  let psi = heading(join);
+  let turn = heading(join + 5) - heading(join - 5);
+  turn = Math.atan2(Math.sin(turn), Math.cos(turn)) / 10; // the helix's heading change per table step
+  for (let k = join - 1; k >= 0; k--) {
+    psi -= turn * smooth(bend0, bend0 + LEAD_EASE, (k + 0.5) * DS);
+    cam.x[k] = cam.x[k + 1]! - Math.cos(psi) * DS;
+    cam.z[k] = cam.z[k + 1]! - Math.sin(psi) * DS;
+    cam.h[k] = cam.h[k + 1]! - SLOPE * DS; // same slope as the stair, so `dist` still holds
+  }
+  return track;
+}
+
+/** plan length along the track at local time t */
+function trackS({ dist, ride, stop }: CameraTrack, t: number): number {
+  const d = stop - ride.length + ride.at(t);
+  let lo = 0;
+  let hi = dist.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (dist[mid]! <= d) lo = mid;
+    else hi = mid;
+  }
+  return (lo + (d - dist[lo]!) / (dist[hi]! - dist[lo]!)) * DS;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -277,6 +356,7 @@ interface Satellite { pos: Vector3; tilt: Quaternion; scale: number; spin: numbe
 
 interface Assets {
   path: PathTable;
+  track: CameraTrack;
   stairs: BufferGeometry;
   rails: BufferGeometry;
   column: BufferGeometry;
@@ -567,7 +647,7 @@ function getAssets(): Assets {
     phase: rand() * TAU,
   });
   const satellites = [
-    sat(-23, -22, 8, 1.3, 0.1, 0.55, 0.16),
+    sat(-17, -11, -20, 1.3, 0.1, 0.55, 0.16), // hangs beside the fly-in
     sat(8, -52, -25, 0.2, 1.2, 0.5, -0.14),
     sat(14, 27, 27, 0.15, Math.PI / 2 - 0.12, 0.5, 0.18),
     sat(74, 6, 44, 0.5, 0.45, 1.5, -0.07),
@@ -695,7 +775,7 @@ function getAssets(): Assets {
   });
 
   cache = {
-    path, stairs, rails, column, wall, satellite,
+    path, track: buildCameraTrack(path), stairs, rails, column, wall, satellite,
     baluster: tint(new CylinderGeometry(0.055, 0.075, 1, 5, 1, true).translate(0, 0.5, 0), () => AMBER),
     lantern: new SphereGeometry(0.22, 10, 8),
     sky: new SphereGeometry(1200, 24, 16),
@@ -757,27 +837,30 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
 
   useFrame((state) => {
     const { A, sky, column, sats } = rig;
-    const { path } = A;
+    const { path } = A.track;
     const t = Math.min(TIMING.total, Math.max(0, clock.t));
     const { pos, tan, look, q, o } = tmp;
 
-    // --- camera: constant glide up the stair, then straight into the keyhole ---
-    const s = path.end - END_GAP - SPEED * (TIMING.total - t);
-    const settle = smooth(path.end - 26, path.end - 4, s); // 0 on the helix, 1 on the final approach
+    // --- camera: in from the void, a glide up the stair, then straight into the keyhole ---
+    const s = trackS(A.track, t);
+    const settle = smooth(path.end - 28, path.end - 6.5, s); // 0 on the helix, 1 on the final approach
     pathAt(path, s, pos);
-    pos.y += EYE + EYE_RISE * smooth(path.end - 20, path.end - 1.5, s);
+    pos.y += EYE + EYE_RISE * smooth(path.end - 25, path.end - 6.5, s);
     pathTangent(path, s, tan);
     const side = 0.7 * (1 - settle);
     pos.x += tan.z * side;
     pos.z -= tan.x * side;
     pathTangent(path, s + 1.6, tan);
     const out = 0.0 * (1 - settle);
-    const up = 0.24 * (1 - settle) + 0.02 * Math.sin(t * 0.45);
+    // on the fly-in the eye points exactly where the camera is going, i.e. up the stair's slope
+    const freed = smooth(RAIL.release, RAIL.release + 4, t);
+    const sway = freed * (1 - settle); // the idle drift stops for both seams
+    const up = (SLOPE + (0.24 - SLOPE) * freed) * (1 - settle) + 0.02 * Math.sin(t * 0.45) * sway;
     look.set(pos.x + (tan.x + tan.z * out) * 10, pos.y + up * 10, pos.z + (tan.z - tan.x * out) * 10);
     camera.position.copy(pos);
     camera.up.set(0, 1, 0);
     camera.lookAt(look);
-    camera.rotateZ(-0.055 * (1 - settle) + 0.012 * Math.sin(t * 0.37 + 1));
+    camera.rotateZ(-0.055 * (1 - settle) + 0.012 * Math.sin(t * 0.37 + 1) * sway);
     camera.fov = 72 - 8 * settle;
 
     // --- the world turns ---

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { Vector2, Vector3, type Group, type Mesh } from "three";
 import { TIMING, type SceneProps } from "./types";
+import { createRide } from "./rail";
 import { EYE, HOOP, buildWorld } from "./burrow/build";
 import {
   FOG_COLOR,
@@ -24,14 +25,6 @@ import {
 
 const FOV = 66;
 const LOOK_AHEAD = 4.6;
-// speed profile: cruise at v0, ease down to V_END between T_SLOW0 and T_SLOW1
-const V_END = 1.9;
-const T_SLOW0 = 18;
-const T_SLOW1 = 22;
-const SLOW_W = T_SLOW1 - T_SLOW0;
-/** integral of smoothstep, continued linearly past 1 */
-const easeInt = (x: number) => (x <= 0 ? 0 : x < 1 ? x * x * x - (x * x * x * x) / 2 : x - 0.5);
-const SLOW_END = easeInt((TIMING.total - T_SLOW0) / SLOW_W) * SLOW_W;
 
 const smooth = (a: number, b: number, x: number) => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
@@ -85,11 +78,8 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
     () => ({ look: new Vector3(), near: new Vector3(), far: new Vector3(), to: new Vector3(), size: new Vector2() }),
     [],
   );
-  const journey = useMemo(() => {
-    const length = world.sHoop - world.sStart;
-    const v0 = (length - V_END * SLOW_END) / (TIMING.total - SLOW_END);
-    return { v0 };
-  }, [world]);
+  // one even cruise through the corridors, at whatever speed uses up the route exactly
+  const ride = useMemo(() => createRide({ cruise: 5, length: world.sHoop - world.sStart, rampIn: 2, rampOut: 2.5 }), [world]);
   const sights = useMemo(
     () => [0, 1].map((i) => ({ p: new Vector3(world.chambers[i]!.c.x, 2.8, world.chambers[i]!.c.z), R: world.chambers[i]!.R })),
     [world],
@@ -102,8 +92,7 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
     mats.motes.uniforms.uViewH!.value = tmp.size.y;
 
     // --- camera: a pure function of t ---------------------------------------------------------
-    const { v0 } = journey;
-    const s = world.sStart + v0 * t + (V_END - v0) * SLOW_W * easeInt((t - T_SLOW0) / SLOW_W);
+    const s = world.sStart + ride.at(t);
     const pos = camera.position;
     world.table.at(s, pos);
     world.table.at(s + LOOK_AHEAD, tmp.look);

@@ -18,8 +18,13 @@ bun run build    # static build in dist/
   which is invisible because both images are pixel-identical at that moment.
 - Every scene runs on the same 25 s local timeline, documented in `src/scenes/types.ts`. A new
   scene takes over the screen every 20 s.
+- The cut only hides if the *motion* matches too, so all cameras share one rail
+  (`src/scenes/rail.ts`): around both ends of its timeline every scene travels dead straight along
+  its view axis, without rotating, at one common speed, and eases in and out of that state like a
+  railway transition curve.
 - Scenes are listed in `src/scenes/index.ts` and loop in that order. To add one, write a component
-  that takes `SceneProps`, put `portalMaterial` on its exit opening, and register it.
+  that takes `SceneProps`, put `portalMaterial` on its exit opening, drive its camera with
+  `createRide` from a track that starts and ends straight, and register it.
 
 ## Debugging
 

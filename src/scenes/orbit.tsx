@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
+import { RAIL, createRide } from "./rail";
 import { TIMING, type SceneProps } from "./types";
 
 /**
@@ -30,8 +31,8 @@ const PLAZA_R = 14;
 const WAY: [number, number, number][] = [
   [-125, -85, 28],
   [-106, -58, 21],
-  [-88, -36, 12],
-  [-72, -18, 6.2],
+  [-88, -36, 15],
+  [-72, -18, 9.2],
   [-56, -5, 4.2],
   [-42, 10, 3.7],
   [-30, 27, 4.2],
@@ -955,7 +956,91 @@ function buildObjects(w: World, portalMaterial: THREE.Material) {
 }
 
 const LOOK_AHEAD = 0.05;
+/** fraction of the track the camera has behind it when it takes over the screen (t = TIMING.arrival) */
+const TAKEOVER_AT = 0.32;
+/** seconds over which the arriving camera is handed from its straight lead-in to the winding path */
+const HAND_OVER = 3.5;
 const _pt = new THREE.Vector3();
+
+interface Pose {
+  pos: THREE.Vector3;
+  look: THREE.Vector3;
+  up: THREE.Vector3;
+}
+const newPose = (): Pose => ({ pos: new THREE.Vector3(), look: new THREE.Vector3(), up: new THREE.Vector3() });
+
+/**
+ * The camera track. `world.path` lives in unrolled coordinates, where lengths are not true once
+ * bent onto the cylinder, so the ride is laid out over a table of real world distances.
+ */
+function createTrack({ path, pathLen }: World) {
+  const N = 4000;
+  const dist = new Float32Array(N + 1);
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  for (let i = 0; i <= N; i++) {
+    path.getPointAt(i / N, _pt);
+    toWorld(_pt.x, _pt.z, _pt.y, b);
+    if (i > 0) dist[i] = dist[i - 1]! + a.distanceTo(b);
+    a.copy(b);
+  }
+  const total = dist[N]!;
+  // Released from the seam the camera swoops: it picks up a brisk glide that winds down again as
+  // it nears the hut. The profile is scaled so that the takeover still happens in mid-air.
+  const ride = createRide({
+    cruise: (t) => (total / TIMING.total) * (1.4 - 1.2 * (t / TIMING.total) ** 2),
+    length: total * (1 - TAKEOVER_AT) + RAIL.speed * TIMING.arrival,
+    rampIn: 4.5,
+    rampOut: 3.5,
+  });
+  /** path parameter (0..1, may run past 1) at local time t */
+  const uAt = (t: number) => {
+    const d = total - ride.length + ride.at(t);
+    let lo = 0;
+    let hi = N;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (dist[mid]! <= d) lo = mid;
+      else hi = mid;
+    }
+    return (lo + (d - dist[lo]!) / (dist[hi]! - dist[lo]!)) / N;
+  };
+  /** where the winding path alone would put the camera */
+  const onPath = (t: number, out: Pose) => {
+    const u = uAt(t);
+    path.getPointAt(Math.min(1, u), _pt);
+    const th = _pt.x / R;
+    toWorld(_pt.x, _pt.z, _pt.y, out.pos);
+    const ul = u + LOOK_AHEAD;
+    if (ul <= 1) {
+      path.getPointAt(ul, _pt);
+      toWorld(_pt.x, _pt.z, _pt.y, out.look);
+    } else {
+      toWorld(0, PORTAL_Z + (ul - 1) * pathLen, DOOR_H, out.look);
+    }
+    out.up.set(-Math.sin(th), Math.cos(th), 0);
+    return out;
+  };
+
+  // The arriving camera may not turn (see rail.ts), and nothing on a cylinder is straight. So it
+  // comes in on the tangent to the path at the moment of release, and is then handed over.
+  const anchor = onPath(RAIL.release, newPose());
+  const ahead = onPath(RAIL.release + 0.05, newPose()).pos.sub(onPath(RAIL.release - 0.05, newPose()).pos).normalize();
+  const reach = anchor.pos.distanceTo(anchor.look);
+  const line = newPose();
+  const pose = (t: number, out: Pose) => {
+    onPath(t, out);
+    if (t >= RAIL.release + HAND_OVER) return out;
+    const w = smooth((t - RAIL.release) / HAND_OVER);
+    line.pos.copy(anchor.pos).addScaledVector(ahead, ride.at(t) - ride.at(RAIL.release));
+    line.look.copy(line.pos).addScaledVector(ahead, reach);
+    out.pos.lerpVectors(line.pos, out.pos, w);
+    out.look.lerpVectors(line.look, out.look, w);
+    out.up.lerpVectors(anchor.up, out.up, w).normalize();
+    return out;
+  };
+  return { pose };
+}
 
 export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
   const world = getWorld();
@@ -966,29 +1051,14 @@ export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
     },
     [objs],
   );
-  const tmp = useMemo(() => ({ pos: new THREE.Vector3(), look: new THREE.Vector3() }), []);
+  const track = useMemo(() => createTrack(world), [world]);
+  const tmp = useMemo(newPose, []);
 
   useFrame((state) => {
-    const { path, pathLen } = world;
     const t = Math.min(TIMING.total, Math.max(0, clock.t));
-    const p = t / TIMING.total;
-    // decelerating: brisk glide in mid-air, slow drift through the door (u(1) = 1)
-    const u = 1.4 * p - 0.4 * p * p * p;
-
-    path.getPointAt(Math.min(1, u), _pt);
-    const camS = _pt.x;
-    toWorld(_pt.x, _pt.z, _pt.y, tmp.pos);
-    const ul = u + LOOK_AHEAD;
-    if (ul <= 1) {
-      path.getPointAt(ul, _pt);
-      toWorld(_pt.x, _pt.z, _pt.y, tmp.look);
-    } else {
-      toWorld(0, PORTAL_Z + (ul - 1) * pathLen, DOOR_H, tmp.look);
-    }
-
-    const th = camS / R;
+    track.pose(t, tmp);
     camera.position.copy(tmp.pos);
-    camera.up.set(-Math.sin(th), Math.cos(th), 0);
+    camera.up.copy(tmp.up);
     camera.lookAt(tmp.look);
     camera.fov = 62;
     camera.near = 0.05;

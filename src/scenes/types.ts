@@ -10,6 +10,9 @@ import type { Material, PerspectiveCamera } from "three";
  *  12 .. 25  PORTAL    `portalMaterial` shows the next scene (a still frame of it until t = 20,
  *                      live after). Before t = 12 the material is plain black.
  *  20 .. 25  EXIT      the camera must travel into the portal so that it fills the screen at t = 25.
+ *
+ * How the camera has to be moving at both ends of that timeline, so that a takeover does not
+ * jolt, is laid down in rail.ts.
  */
 export const TIMING = {
   /** seconds between two takeovers */

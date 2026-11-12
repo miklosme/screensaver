@@ -418,8 +418,10 @@ export function buildWorld() {
   const d2out = dir(0.85, -0.527);
   const d2a = dir(0.1, -0.995);
   const d2b = dir(-0.9, -0.44);
-  const cc2 = v(15.5, -26.6);
-  const d3in = dir(cc2.x - c3.x, cc2.z - c3.z);
+  // The last corridor swings round so that it meets its chamber already aimed at the hoop in the
+  // middle: from the doorway on, the camera only has to go straight.
+  const cc2 = v(15.8, -24);
+  const d3in = dir(-1, 0);
 
   const chambers: Chamber[] = [
     { c: c1, R: 6, H: 6.5, yc: 2, ridges: 14, oculus: 1.0, doors: [d1in, d1out, d1ahead, d1right] },
@@ -432,20 +434,17 @@ export function buildWorld() {
   const IN = 1.5; // how far inside the chamber wall a corridor centreline starts
   const OUT = 2.5;
   // final straight run into the hoop
-  const h3 = d3in.clone().negate(); // heading into the last chamber
-  const r3 = new Vector3(-h3.z, 0, h3.x); // its right-hand side
-  const ang = 0.26;
-  const approach = new Vector3() // unit vector from the hoop towards the arriving camera
-    .addScaledVector(h3, -Math.cos(ang))
-    .addScaledVector(r3, Math.sin(ang));
+  const approach = d3in; // unit vector from the hoop towards the arriving camera
   const rise = (HOOP.y - EYE - 0.3) / 5.5;
   const onLine = (dist: number) => along(c3, approach, dist, HOOP.y - EYE - dist * rise);
 
   const route: Vector3[] = [
-    v(10, 34),
-    v(7.5, 27),
-    v(1.5, 21.5), // 2: camera start
-    v(-2.5, 15.5),
+    // Corridor A is the one place the burrow runs straight: the camera arrives in it, and has to
+    // hold a dead straight line until it is released (see ../rail.ts). Points 1..5 are collinear.
+    v(2.5, 53),
+    v(0, 45),
+    v(0, 36.5), // 2: camera start
+    v(0, 22),
     along(c1, d1in, ch1.R + OUT), // 4
     along(c1, d1in, ch1.R - IN), // 5: corridor A ends
     v(-2.5, 1.5),
@@ -465,9 +464,9 @@ export function buildWorld() {
     cc2,
     along(c3, d3in, ch3.R + OUT),
     along(c3, d3in, ch3.R - IN), // 22: corridor C ends
-    onLine(5.5),
-    onLine(3.5),
-    onLine(1.75),
+    onLine(7.5),
+    onLine(5),
+    onLine(2.5),
     onLine(0), // 26: the hoop
     onLine(-3),
     onLine(-6),
