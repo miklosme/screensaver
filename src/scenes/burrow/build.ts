@@ -30,23 +30,6 @@ function profilePoint(phi: number, k = 1): [number, number] {
   return [x * k, y * k];
 }
 
-/** cumulative arc length round the profile at each of the PROFILE_SEGS + 1 columns, as a fraction */
-const PROFILE_ARC = (() => {
-  const out = [0];
-  let [px, py] = profilePoint(0);
-  let total = 0;
-  for (let j = 1; j <= PROFILE_SEGS; j++) {
-    const [x, y] = profilePoint((j / PROFILE_SEGS) * Math.PI * 2);
-    total += Math.hypot(x - px, y - py);
-    out.push(total);
-    px = x;
-    py = y;
-  }
-  return { frac: out.map((d) => d / total), total };
-})();
-/** world length of one trip round the corridor profile (pattern v runs 0..1 over it by arc length) */
-export const PROFILE_LEN = PROFILE_ARC.total;
-
 const smoothstep = (a: number, b: number, x: number) => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
@@ -237,7 +220,7 @@ function buildCorridor(pts: Vector3[]): BufferGeometry {
       position[o++] = y;
       position[o++] = p.z + side.z * x;
       pat[q++] = s;
-      pat[q++] = PROFILE_ARC.frac[j]!;
+      pat[q++] = j / cols;
     }
   }
   const geo = new BufferGeometry();
