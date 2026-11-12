@@ -68,37 +68,6 @@ const smooth = (x: number) => {
   return c * c * (3 - 2 * c);
 };
 
-// ---------------------------------------------------------------- depth: air between the layers
-/** the indigo the far town sinks into (mixed after the colour-space step, like three's fog) */
-const AIR = new THREE.Color("#272c78");
-const AIR_GLSL = `vec3(${AIR.r.toFixed(4)}, ${AIR.g.toFixed(4)}, ${AIR.b.toFixed(4)})`;
-/** 0 near the camera, ~0.4 at the middle towers, ~0.8 for the town overhead */
-const EXT_GLSL = "(1.0 - exp(-max(vFogDepth - 16.0, 0.0) * 0.0135))";
-const LAMP_PARS = /* glsl */ `
-uniform sampler2D uLamp;
-/** lamp light at the foot of a world point, from the baked map in unrolled (s, z) */
-vec3 lampAt(vec3 p) {
-  return texture2D(uLamp, vec2(atan(p.x, -p.y) * ${(1 / (2 * Math.PI)).toFixed(6)}, p.z / ${(2 * ZH).toFixed(1)} + 0.5)).rgb;
-}`;
-
-/**
- * Chains a material's own shader patch with distance extinction: the colour sinks into AIR by
- * `k` times the extinction factor. Every patched material gets its own program key.
- */
-function withAir(mat: THREE.Material, key: string, k: number, patch?: (sh: THREE.WebGLProgramParametersWithUniforms) => void) {
-  mat.onBeforeCompile = (sh) => {
-    patch?.(sh);
-    sh.fragmentShader = sh.fragmentShader.replace(
-      "#include <fog_fragment>",
-      `#include <fog_fragment>
-      #ifdef USE_FOG
-        gl_FragColor.rgb = mix(gl_FragColor.rgb, ${AIR_GLSL}, clamp(${EXT_GLSL} * ${k.toFixed(3)}, 0.0, 1.0));
-      #endif`,
-    );
-  };
-  mat.customProgramCacheKey = () => `orbit-${key}`;
-}
-
 function toWorld(s: number, z: number, h: number, out: THREE.Vector3) {
   const th = s / R;
   const r = R - h;
@@ -278,9 +247,6 @@ function buildWorld() {
   const by = new THREE.Vector3();
   const bz = new THREE.Vector3();
   const MAX_WINDOWS = 15000;
-  // Occupancy has its own stream so the town's layout (drawn from `rnd`) stays as it was.
-  const occRnd = mulberry32(7741);
-  const doorPools: { s: number; z: number }[] = [];
 
   const addWindow = (b: { s: number; z: number; rad: number; H: number }, phi: number, y: number, w: number, hh: number, c: THREE.Color, mul: number) => {
     const rr = b.rad * (1 - 0.12 * (y / b.H)) + 0.05;
@@ -338,9 +304,6 @@ function buildWorld() {
     if (windows.count < MAX_WINDOWS) {
       const cyanHouse = rnd() < 0.06;
       const lit = 0.3 + litRoll * 0.45;
-      // who is home tonight: a few houses dark, most half asleep, the odd one blazing
-      const oRoll = occRnd();
-      const occ = oRoll < 0.18 ? 0.08 : oRoll < 0.85 ? 0.3 + occRnd() * 0.4 : 1;
       const cols = Math.max(4, Math.floor((6.283 * rad) / 2.1));
       const phi0 = rnd() * 6.283;
       let row = 0;
@@ -349,18 +312,14 @@ function buildWorld() {
           if (rnd() > lit) continue;
           if (cyanHouse) col.copy(CYAN);
           else col.setHSL(0.06 + rnd() * 0.045, 1, 0.5 + rnd() * 0.06);
-          const mul = 0.45 + rnd() * 0.75;
-          if (occRnd() > occ) continue;
-          addWindow(b, phi0 + ((k + (row % 2) * 0.5) / cols) * 6.283, y, 0.5, 1.0, col, mul);
+          addWindow(b, phi0 + ((k + (row % 2) * 0.5) / cols) * 6.283, y, 0.5, 1.0, col, 0.45 + rnd() * 0.75);
         }
       }
       // a lit doorway at street level
       const doors = tall ? 3 : 1;
       for (let k = 0; k < doors; k++) {
         col.setHSL(0.075, 1, 0.52);
-        const phi = phi0 + 1 + (k / doors) * 6.283;
-        addWindow(b, phi, 0, 0.85, 1.7, col, 1.1);
-        doorPools.push({ s: s + Math.cos(phi) * (rad + 1.2), z: z + Math.sin(phi) * (rad + 1.2) });
+        addWindow(b, phi0 + 1 + (k / doors) * 6.283, 0, 0.85, 1.7, col, 1.1);
       }
     }
   }
@@ -465,7 +424,6 @@ function buildWorld() {
   const arches = new Inst();
   const pillars = new Inst();
   const stone = new THREE.Color().setHSL(0.66, 0.3, 0.42);
-  const arcadeLamps: { s: number; z: number }[] = [];
   for (let d = 108; d <= 172; d += 9.2) {
     const u = d / pathLen;
     path.getPointAt(u, v);
@@ -475,7 +433,6 @@ function buildWorld() {
     pillars.add(v.x, v.z, alpha, 5.4, 0, 0, 1, 1, 1, stone);
     pillars.add(v.x, v.z, alpha, -5.4, 0, 0, 1, 1, 1, stone);
     addPoint(v.x, v.z, 7.35, 3.0, GOLD, 0.9);
-    arcadeLamps.push({ s: v.x, z: v.z });
     bulbs.add(v.x, v.z, 0, 0, 7.35, 0, 1, 1.3, 1, GOLD, 1.6);
   }
 
@@ -549,64 +506,13 @@ function buildWorld() {
   ctx.arc(0, HUT_Z, PLAZA_R, 0, 6.3);
   ctx.arc(C, HUT_Z, PLAZA_R, 0, 6.3);
   ctx.fill();
-  // contact shadows: every tower sits in a soft dark ring where it meets the cobbles
-  for (const b of buildings) blob(b.s, b.z, b.rad + 2.4, "3,4,16", 0.75);
-  // light pools: lamps and doorways pour soft light onto the street (a falloff, not a disc)
-  const pool = (s: number, z: number, r: number, rgb: string, a: number) => {
-    const s0 = ((s % C) + C) % C;
-    for (let k = -1; k <= 1; k++) {
-      const cx = s0 + k * C;
-      if (cx + r < 0 || cx - r > C) continue;
-      const g = ctx.createRadialGradient(cx, z, 0, cx, z, r);
-      for (let i = 0; i <= 6; i++) {
-        const x = i / 6;
-        g.addColorStop(x, `rgba(${rgb},${(a * Math.exp(-4.2 * x * x) * (1 - x)).toFixed(3)})`);
-      }
-      ctx.fillStyle = g;
-      ctx.fillRect(cx - r, z - r, 2 * r, 2 * r);
-    }
-  };
+  // light pools
   ctx.globalCompositeOperation = "lighter";
-  for (const d of doorPools) pool(d.s, d.z, 3.6, "255,150,60", 0.4);
-  for (const l of lanterns) pool(l.s, l.z, l.cyan ? 6 : 6.5, l.cyan ? "60,220,255" : "255,168,72", l.cyan ? 0.8 : 0.75);
-  blob(0, HUT_Z, 24, "90,170,255", 0.14);
+  for (const b of buildings) blob(b.s, b.z, b.rad + 4.5, "255,140,50", 0.3);
+  for (const l of lanterns) blob(l.s, l.z, 5.2, l.cyan ? "60,220,255" : "255,170,70", l.cyan ? 0.3 : 0.5);
+  blob(0, HUT_Z, 24, "90,170,255", 0.22);
   blob(0, HUT_Z - 9, 9, "255,190,110", 0.4);
   ctx.globalCompositeOperation = "source-over";
-
-  // ---------------------------------------------------------------- lamp light map
-  // What the lamps throw on the walls and the plaza, in the same unrolled (s, z) layout as the
-  // ground texture. Shaders look it up at a surface's foot and fade it with height.
-  const LW = 1024;
-  const lightCanvas = document.createElement("canvas");
-  lightCanvas.width = lightCanvas.height = LW;
-  const lctx = lightCanvas.getContext("2d")!;
-  lctx.fillStyle = "#000";
-  lctx.fillRect(0, 0, LW, LW);
-  lctx.setTransform(LW / C, 0, 0, LW / (2 * ZH), 0, LW / 2);
-  lctx.globalCompositeOperation = "lighter";
-  const glow = (s: number, z: number, r: number, rgb: string, a: number) => {
-    const s0 = ((s % C) + C) % C;
-    for (let k = -1; k <= 1; k++) {
-      const cx = s0 + k * C;
-      if (cx + r < 0 || cx - r > C) continue;
-      const g = lctx.createRadialGradient(cx, z, 0, cx, z, r);
-      for (let i = 0; i <= 6; i++) {
-        const x = i / 6;
-        g.addColorStop(x, `rgba(${rgb},${(a * Math.exp(-3.5 * x * x) * (1 - x)).toFixed(3)})`);
-      }
-      lctx.fillStyle = g;
-      lctx.fillRect(cx - r, z - r, 2 * r, 2 * r);
-    }
-  };
-  for (const l of lanterns) glow(l.s, l.z, 6.5, l.cyan ? "70,225,255" : "255,165,70", 1);
-  for (const d of doorPools) glow(d.s, d.z, 3.5, "255,140,50", 0.5);
-  for (const a of arcadeLamps) glow(a.s, a.z, 9, "255,175,85", 0.7);
-  const lightTex = new THREE.CanvasTexture(lightCanvas);
-  lightTex.colorSpace = THREE.SRGBColorSpace;
-  lightTex.flipY = false;
-  lightTex.generateMipmaps = false;
-  lightTex.minFilter = THREE.LinearFilter;
-  lightTex.wrapS = THREE.RepeatWrapping;
 
   // a light blur hides the canvas' gradient dithering when the texture is magnified
   const soft = document.createElement("canvas");
@@ -798,10 +704,9 @@ function buildWorld() {
     const c = new Float32Array(p.count * 3);
     for (let i = 0; i < p.count; i++) {
       const top = p.getY(i) > 0.5;
-      // a faint warm wash from the street; the lamps' own pools do the rest
-      c[i * 3] = top ? 0.72 : 1.3;
-      c[i * 3 + 1] = top ? 0.8 : 1.0;
-      c[i * 3 + 2] = top ? 1.05 : 0.85;
+      c[i * 3] = top ? 0.72 : 1.7;
+      c[i * 3 + 1] = top ? 0.8 : 1.15;
+      c[i * 3 + 2] = top ? 1.05 : 0.8;
     }
     bodyGeo.setAttribute("color", new THREE.BufferAttribute(c, 3));
   }
@@ -866,7 +771,7 @@ function buildWorld() {
     emissiveIntensity: 0.85,
   });
   // Cobbles: fans of setts in the unrolled ground coordinates, fading out where they would shimmer.
-  withAir(groundMat, "ground", 0.8, (sh) => {
+  groundMat.onBeforeCompile = (sh) => {
     sh.vertexShader = sh.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec2 vGs;")
       .replace("#include <begin_vertex>", `#include <begin_vertex>\nvGs = uv * vec2(${C.toFixed(3)}, ${(2 * ZH).toFixed(1)});`);
@@ -889,49 +794,18 @@ function buildWorld() {
           totalEmissiveRadiance *= cob;
         }`,
       );
-  });
+  };
   const overlay = { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -6, side: THREE.DoubleSide };
   const roadMat = new THREE.MeshBasicMaterial({ vertexColors: true, ...overlay });
-  withAir(roadMat, "road", 0.8);
-  const lampUniform = { value: lightTex };
   const plazaMat = new THREE.MeshBasicMaterial({ map: plazaTex, ...overlay });
-  // the cyan ring of plaza lamps lights the paving under it
-  withAir(plazaMat, "plaza", 0.8, (sh) => {
-    sh.uniforms.uLamp = lampUniform;
-    sh.vertexShader = sh.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vWp;")
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz;");
-    sh.fragmentShader = sh.fragmentShader
-      .replace("#include <common>", `#include <common>\nvarying vec3 vWp;\n${LAMP_PARS}`)
-      .replace("#include <map_fragment>", "#include <map_fragment>\n{ vec3 L = lampAt(vWp); diffuseColor.rgb += diffuseColor.rgb * L * 2.0 + L * 0.32; }");
-  });
   const bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true });
   // Towers: brick courses, a string course under every row of windows, a plinth and a cornice.
-  // Far towers lose their masonry into the air; lamps light the foot of the nearest walls.
-  withAir(bodyMat, "body", 0.85, (sh) => {
-    sh.uniforms.uLamp = lampUniform;
+  bodyMat.onBeforeCompile = (sh) => {
     sh.vertexShader = sh.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vTw;\nvarying vec3 vLp;")
-      .replace(
-        "#include <begin_vertex>",
-        `#include <begin_vertex>
-        vTw = vec3(atan(position.z, position.x), position.y * length(instanceMatrix[1].xyz), length(instanceMatrix[1].xyz));
-        {
-          mat4 iw = modelMatrix * instanceMatrix;
-          // the light map is read a step out from the wall, so a lamp lights the face that sees it
-          vLp = (iw * vec4(transformed, 1.0)).xyz + normalize(mat3(iw) * vec3(position.x, 0.0, position.z)) * 1.3;
-        }`,
-      );
+      .replace("#include <common>", "#include <common>\nvarying vec3 vTw;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvTw = vec3(atan(position.z, position.x), position.y * length(instanceMatrix[1].xyz), length(instanceMatrix[1].xyz));");
     sh.fragmentShader = sh.fragmentShader
-      .replace("#include <common>", `#include <common>\nvarying vec3 vTw;\nvarying vec3 vLp;\n${LAMP_PARS}`)
-      .replace(
-        "#include <emissivemap_fragment>",
-        `#include <emissivemap_fragment>
-        {
-          vec3 L = lampAt(vLp) * (1.0 - smoothstep(0.3, 7.0, vTw.y));
-          totalEmissiveRadiance += (diffuseColor.rgb * 1.8 + 0.05) * L;
-        }`,
-      )
+      .replace("#include <common>", "#include <common>\nvarying vec3 vTw;")
       .replace(
         "#include <color_fragment>",
         /* glsl */ `#include <color_fragment>
@@ -952,27 +826,20 @@ function buildWorld() {
           float dentil = step(0.5, fract(vTw.x * 7.0)) * step(vTw.z - 0.38, h);
           m = mix(m, 1.5, max(course * step(1.0, h), crown * (1.0 - 0.3 * dentil)));
           m *= mix(0.7, 1.0, smoothstep(0.62, 0.68, h));
-          #ifdef USE_FOG
-            fade *= 1.0 - 0.9 * smoothstep(0.0, 0.55, ${EXT_GLSL});
-          #endif
           diffuseColor.rgb *= mix(1.0, m, fade);
-          diffuseColor.rgb *= mix(0.3, 1.0, smoothstep(0.0, 2.2, h)); // contact shade at the foot
         }`,
       );
-  });
+  };
   const domeMat = new THREE.MeshLambertMaterial({ emissive: "#0a0d30" });
   // Roofs: overlapping round shingles, a pale ridge at every hem.
   domeMat.defines = { USE_UV: "" };
-  withAir(domeMat, "dome", 0.85, (sh) => {
+  domeMat.onBeforeCompile = (sh) => {
     sh.fragmentShader = sh.fragmentShader.replace(
       "#include <color_fragment>",
       /* glsl */ `#include <color_fragment>
       {
         vec2 sv = vec2(vUv.x * 20.0, vUv.y * 11.0);
         float fade = 1.0 - smoothstep(0.1, 0.6, length(fwidth(sv)));
-        #ifdef USE_FOG
-          fade *= 1.0 - 0.85 * smoothstep(0.0, 0.55, ${EXT_GLSL});
-        #endif
         sv.x += 0.5 * mod(floor(sv.y), 2.0);
         vec2 f = fract(sv);
         float d = length(vec2(f.x - 0.5, max(0.5 - f.y, 0.0)));
@@ -982,17 +849,12 @@ function buildWorld() {
         diffuseColor.rgb *= mix(1.0, mix(0.5, (0.8 + 0.5 * f.y) * (0.88 + 0.24 * tone), tile) + 0.5 * hem, fade);
       }`,
     );
-  });
+  };
   const windowMat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
-  withAir(windowMat, "window", 1.05);
   const treeMat = new THREE.MeshLambertMaterial({ emissive: "#03141a" });
-  withAir(treeMat, "tree", 0.85);
   const postMat = new THREE.MeshLambertMaterial({ color: "#3a3f78" });
-  withAir(postMat, "post", 0.85);
   const bulbMat = new THREE.MeshBasicMaterial();
-  withAir(bulbMat, "bulb", 0.6);
   const stoneMat = new THREE.MeshLambertMaterial({ emissive: "#0c0f33" });
-  withAir(stoneMat, "stone", 0.85);
   const hutMat = new THREE.MeshLambertMaterial({ color: "#c9cdf2", emissive: "#1c2256" });
   const goldMat = new THREE.MeshLambertMaterial({ color: "#ffc66a", emissive: "#d98a25", emissiveIntensity: 0.9 });
   const leafMat = new THREE.MeshLambertMaterial({ color: "#3b2f7d", emissive: "#120c3a" });
@@ -1166,7 +1028,7 @@ function buildObjects(w: World, portalMaterial: THREE.Material) {
   mesh(geo.beamGeo, mat.beamMat, hut).position.y = 10.4;
   mesh(geo.beamGeo2, mat.beamMat2, hut).position.y = 10.4;
 
-  const lamp = new THREE.PointLight("#ffb46a", 75, 80, 2);
+  const lamp = new THREE.PointLight("#ffb46a", 110, 80, 2);
   root.add(lamp);
 
   return { root, instanced, leafL, leafR, lamp };
