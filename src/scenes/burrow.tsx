@@ -4,6 +4,7 @@ import { Vector2, Vector3, type Group, type Mesh } from "three";
 import { TIMING, type SceneProps } from "./types";
 import { createRide } from "./rail";
 import { EYE, HOOP, buildWorld } from "./burrow/build";
+import { buildCreatures } from "./burrow/creatures";
 import {
   FOG_COLOR,
   createChamberMaterial,
@@ -55,9 +56,11 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
       motes: createMoteMaterial(shared),
     };
   }, [world]);
+  const creatures = useMemo(() => buildCreatures(world, mats.shared), [world, mats]);
 
   useEffect(
     () => () => {
+      creatures.dispose();
       for (const g of [...world.corridors, ...world.shells, ...world.floors, ...world.frames]) g.dispose();
       world.thread.dispose();
       world.hoop.dispose();
@@ -65,7 +68,7 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
       const { shared, shells, ...rest } = mats;
       for (const m of [...shells, ...Object.values(rest)]) m.dispose();
     },
-    [world, mats],
+    [world, mats, creatures],
   );
 
   const knot = useRef<Mesh>(null);
@@ -169,6 +172,8 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
       ))}
       <mesh geometry={world.thread} material={mats.thread} frustumCulled={false} />
       <points geometry={world.motes} material={mats.motes} frustumCulled={false} />
+      <primitive object={creatures.eyes} />
+      <primitive object={creatures.shrooms} />
 
       {/* skylights */}
       {world.chambers.map((ch, i) => (

@@ -27,6 +27,7 @@ import {
 } from "three";
 import { TIMING, type SceneProps } from "./types";
 import { RAIL, RAIL_LEAD_OUT, createRide, type Ride } from "./rail";
+import { createKoi, type Koi } from "./helix/koi";
 
 /**
  * HELIX — the endless staircase.
@@ -256,8 +257,13 @@ class Quads {
   p: number[] = [];
   n: number[] = [];
   c: number[] = [];
-  /** quad a-b-c-d, wound so that it faces away from `inside` */
-  quad(a: V3, b: V3, c: V3, d: V3, inside: V3, col: V3, sa = 1, sb = 1, sc = 1, sd = 1) {
+  t: number[] = [];
+  /**
+   * quad a-b-c-d, wound so that it faces away from `inside`. `tile` gives each corner the pattern
+   * coordinate the stair shader paints with: [distance from the stair's centre line, 0..1 across
+   * the face, kind (1 tread, 2 riser)].
+   */
+  quad(a: V3, b: V3, c: V3, d: V3, inside: V3, col: V3, sa = 1, sb = 1, sc = 1, sd = 1, tile?: [V3, V3, V3, V3]) {
     const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
     const vx = d[0] - a[0], vy = d[1] - a[1], vz = d[2] - a[2];
     let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
@@ -266,13 +272,18 @@ class Quads {
     const mx = (a[0] + c[0]) / 2 - inside[0], my = (a[1] + c[1]) / 2 - inside[1], mz = (a[2] + c[2]) / 2 - inside[2];
     const flip = nx * mx + ny * my + nz * mz < 0;
     if (flip) { nx = -nx; ny = -ny; nz = -nz; }
-    const order: [V3, number][] = flip
-      ? [[a, sa], [d, sd], [c, sc], [a, sa], [c, sc], [b, sb]]
-      : [[a, sa], [b, sb], [c, sc], [a, sa], [c, sc], [d, sd]];
-    for (const [v, s] of order) {
+    const corner: [V3, number, V3][] = [
+      [a, sa, tile?.[0] ?? NO_TILE],
+      [b, sb, tile?.[1] ?? NO_TILE],
+      [c, sc, tile?.[2] ?? NO_TILE],
+      [d, sd, tile?.[3] ?? NO_TILE],
+    ];
+    for (const k of flip ? [0, 3, 2, 0, 2, 1] : [0, 1, 2, 0, 2, 3]) {
+      const [v, s, tl] = corner[k]!;
       this.p.push(v[0], v[1], v[2]);
       this.n.push(nx, ny, nz);
       this.c.push(col[0] * s, col[1] * s, col[2] * s);
+      this.t.push(tl[0], tl[1], tl[2]);
     }
   }
   build(): BufferGeometry {
@@ -280,9 +291,11 @@ class Quads {
     g.setAttribute("position", new BufferAttribute(new Float32Array(this.p), 3));
     g.setAttribute("normal", new BufferAttribute(new Float32Array(this.n), 3));
     g.setAttribute("color", new BufferAttribute(new Float32Array(this.c), 3));
+    if (this.t.some((v) => v !== 0)) g.setAttribute("aTile", new BufferAttribute(new Float32Array(this.t), 3));
     return g;
   }
 }
+const NO_TILE: V3 = [0, 0, 0];
 
 function tint(g: BufferGeometry, fn: (x: number, y: number, z: number) => V3): BufferGeometry {
   const pos = g.getAttribute("position");
@@ -312,10 +325,122 @@ const SKY_GLSL = /* glsl */ `
   }
 `;
 
-function withVoidFog<T extends Material>(mat: T, strata = false): T {
+type Detail = "plain" | "strata" | "wall" | "stair";
+
+const WALL_W = (TAU * WALL_R) / WALL_N; // width of one arcade module
+const WALL_ARCH = WALL_W * 0.33; // radius of its arch
+const WALL_SPRING = WALL_H - 1.7 - WALL_ARCH; // height the arch springs from
+const WALL_C = WALL_PITCH / TAU; // rise of the arcade per radian
+const glf = (x: number) => x.toFixed(4);
+
+/** clock for the stone shaders' few moving parts; one Helix is mounted at a time */
+const hxTime = { value: 0 };
+
+/**
+ * Carved detail, painted in the fragment shader so that the low-poly stone stays low-poly.
+ * Both set `diffuseColor` and may add to `hxGlow`, which is light the fog still dims.
+ */
+const DETAIL_GLSL: Record<Detail, string> = {
+  plain: "",
+  strata: /* glsl */ `
+    diffuseColor.rgb *= 0.93 + 0.07 * sin(vHxW.y * 2.6 + sin(vHxW.x * 0.7 + vHxW.z * 0.9) * 1.5);`,
+  // The arcade: every module gets a striped ring of voussoirs with a keystone, imposts, quoined
+  // jambs, running-bond masonry in the spandrels and a dentilled cornice set with glowing gems.
+  // All of it is laid out in the module's own unbent coordinates (x across, y up).
+  wall: /* glsl */ `
+    {
+      float phi = atan(vHxW.z, vHxW.x);
+      float turn = phi * ${glf(WALL_N / TAU)};
+      float y = mod(vHxW.y - ${glf(WALL_C)} * phi, ${glf(WALL_H)});
+      float x = (fract(turn + 0.5) - 0.5) * ${glf(WALL_W)};
+      float module = floor(turn + 0.5);
+      float px = length(fwidth(vHxW)) * 0.8;          // size of a pixel on the stone
+      float fade = 1.0 - smoothstep(0.03, 0.22, px);  // fine joints dissolve with distance
+      float ax = abs(x);
+      float up = max(y - ${glf(WALL_SPRING)}, 0.0);
+      float dA = length(vec2(x, up));                 // distance from the arch's axis
+      float ring = ${glf(WALL_ARCH + 1.05)};
+      float joint = 0.0;
+      vec3 m = vec3(0.93 + 0.07 * sin(vHxW.y * 2.6 + sin(vHxW.x * 0.7 + vHxW.z * 0.9) * 1.5));
+      if (y > 11.72) {
+        // cornice: bed mould, dentils, fascia
+        float dent = step(0.5, fract(x * ${glf(30 / WALL_W)}));
+        m *= y < 11.95 ? 0.8 : y < 12.38 ? mix(1.0, 0.7 + 0.42 * dent, fade) : 1.13;
+        joint = hxLine(abs(y - 12.38), px) * 0.6;
+        // a gem every sixth of a module; light runs round the arcade through them
+        vec2 g = vec2((fract(x * ${glf(6 / WALL_W)}) - 0.5) * ${glf(WALL_W / 6)}, y - 12.7);
+        float gem = 1.0 - smoothstep(1.0 - px * 6.0, 1.0 + px * 6.0, abs(g.x) / 0.21 + abs(g.y) / 0.15);
+        float pulse = 0.5 + 0.5 * sin(turn * 0.9 + floor(vHxW.y / ${glf(WALL_H)} + 0.5) * 1.7 - uHxT * 1.1);
+        m = mix(m, vec3(0.1, 0.45, 0.45), gem);
+        hxGlow += vec3(0.05, 0.75, 0.62) * gem * (0.25 + 1.3 * pulse * pulse * pulse);
+      } else if (y < 0.7) {
+        m *= 0.8;
+        joint = max(hxLine(abs(fract(x * ${glf(4 / WALL_W)}) - 0.5) * ${glf(WALL_W / 4)}, px), hxLine(abs(y - 0.7), px));
+      } else if (dA < ring) {
+        if (up > 0.0) {
+          float seg = atan(up, x) * ${glf(13 / Math.PI)};
+          float id = floor(seg);
+          // alternating pale and terracotta voussoirs, a tall keystone in the middle
+          m *= id == 6.0 ? vec3(1.2, 1.16, 1.05) : mod(id, 2.0) < 0.5 ? vec3(1.1, 1.08, 1.0) : vec3(0.95, 0.68, 0.55);
+          joint = hxLine(min(fract(seg), 1.0 - fract(seg)) * dA * ${glf(Math.PI / 13)}, px);
+        } else {
+          float row = (y - 0.7) / 0.985;
+          m *= mod(floor(row), 2.0) < 0.5 ? vec3(1.07, 1.05, 1.0) : vec3(0.97, 0.78, 0.68);
+          joint = hxLine(min(fract(row), 1.0 - fract(row)) * 0.985, px);
+        }
+        joint = max(joint, hxLine(abs(dA - ${glf(WALL_ARCH + 0.16)}), px) * 0.7);
+        // impost blocks where the arch springs
+        float imp = step(abs(y - ${glf(WALL_SPRING)}), 0.24) * step(${glf(WALL_ARCH - 0.02)}, ax);
+        m = mix(m, vec3(1.18, 1.12, 1.0), imp);
+        joint *= 1.0 - imp;
+      } else {
+        float row = floor(y / 0.65);
+        float bx = x * ${glf(6 / WALL_W)} + 0.5 * mod(row, 2.0);
+        float fy = fract(y / 0.65);
+        float fx = fract(bx);
+        joint = max(hxLine(min(fy, 1.0 - fy) * 0.65, px), hxLine(min(fx, 1.0 - fx) * ${glf(WALL_W / 6)}, px));
+        m *= 0.9 + 0.17 * hxHash(vec2(floor(bx) + module * 7.0, row + floor(vHxW.y / ${glf(WALL_H)}) * 3.0)) * fade;
+        joint = max(joint, hxLine(abs(dA - ring), px));
+      }
+      diffuseColor.rgb *= m * (1.0 - 0.3 * joint * fade);
+    }`,
+  // The stair: a teal runner with a gold hem and a diamond on every tread, held down by brass
+  // rods, on stone treads with a worn nosing.
+  stair: /* glsl */ `
+    if (vTile.z > 0.5) {
+      float lat = abs(vTile.x);
+      float v = vTile.y;
+      float px = fwidth(vTile.x) * 0.9 + 1e-4;
+      float tread = step(vTile.z, 1.5);
+      float shade = clamp(dot(diffuseColor.rgb, vec3(0.42)), 0.35, 1.25);
+      vec3 stone = diffuseColor.rgb * (0.94 + 0.06 * hxHash(floor(vHxW.xz * 9.0)));
+      stone *= mix(1.0, 1.12, tread * (1.0 - smoothstep(0.06, 0.1, v)));   // nosing
+      vec3 teal = vec3(0.03, 0.2, 0.34);
+      vec3 gold = vec3(0.98, 0.66, 0.2);
+      vec3 pile = teal * (0.92 + 0.16 * hxHash(floor(vec2(vTile.x * 34.0, v * 50.0))));
+      // hem: two gold lines and a row of pearls between them
+      pile = mix(pile, gold, hxBand(lat, 1.06, 1.2, px));
+      pile = mix(pile, gold * 0.8, hxBand(lat, 0.86, 0.9, px));
+      vec2 pearl = vec2(lat - 0.98, (fract(v * 4.0) - 0.5) * 0.34);
+      pile = mix(pile, vec3(1.0, 0.9, 0.72), tread * (1.0 - smoothstep(0.04, 0.04 + px, length(pearl))));
+      // the diamond, a smaller crimson one inside it
+      float dm = lat / 0.52 + abs(v - 0.5) / 0.4;
+      pile = mix(pile, gold, tread * (1.0 - smoothstep(1.0 - px * 2.5, 1.0 + px * 2.5, dm)));
+      pile = mix(pile, vec3(0.62, 0.1, 0.12), tread * (1.0 - smoothstep(0.62 - px * 2.5, 0.62 + px * 2.5, dm)));
+      pile = mix(pile, gold, tread * (1.0 - smoothstep(0.2 - px * 2.5, 0.2 + px * 2.5, dm)));
+      // on the risers the runner is plain, with a brass rod pinning it at the foot
+      float rod = (1.0 - tread) * hxBand(v, 0.43, 0.53, 0.01) * (1.0 - smoothstep(1.5, 1.5 + px, lat));
+      float runner = 1.0 - smoothstep(1.28 - px, 1.28 + px, lat);
+      diffuseColor.rgb = mix(stone, pile * shade * 1.5, runner);
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(1.25, 0.8, 0.28) * (0.7 + 0.6 * sin(v * 62.0)), rod);
+    }`,
+};
+
+function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
   mat.onBeforeCompile = (s) => {
+    s.uniforms.uHxT = hxTime;
     s.vertexShader = s.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vHxW;")
+      .replace("#include <common>", "#include <common>\nvarying vec3 vHxW;\nattribute vec3 aTile;\nvarying vec3 vTile;")
       .replace(
         "#include <fog_vertex>",
         /* glsl */ `#include <fog_vertex>
@@ -323,13 +448,28 @@ function withVoidFog<T extends Material>(mat: T, strata = false): T {
         #ifdef USE_INSTANCING
           hxp = instanceMatrix * hxp;
         #endif
-        vHxW = (modelMatrix * hxp).xyz;`,
+        vHxW = (modelMatrix * hxp).xyz;
+        vTile = aTile;`,
       );
     s.fragmentShader = s.fragmentShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vHxW;\n" + SKY_GLSL)
+      .replace(
+        "#include <common>",
+        /* glsl */ `#include <common>
+        varying vec3 vHxW;
+        varying vec3 vTile;
+        uniform float uHxT;
+        vec3 hxGlow = vec3(0.0);
+        float hxHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        /** 1 on a line of half width 0.035 at distance d from it, antialiased over px */
+        float hxLine(float d, float px) { return 1.0 - smoothstep(0.035, 0.035 + px, d); }
+        float hxBand(float x, float a, float b, float px) { return smoothstep(a - px, a + px, x) * (1.0 - smoothstep(b - px, b + px, x)); }
+        ${SKY_GLSL}`,
+      )
+      .replace("#include <color_fragment>", "#include <color_fragment>\n" + DETAIL_GLSL[detail])
       .replace(
         "#include <tonemapping_fragment>",
         /* glsl */ `
+        gl_FragColor.rgb += hxGlow;
         #ifdef USE_FOG
           float hxf = smoothstep(fogNear, fogFar, vFogDepth);
           gl_FragColor.rgb = mix(gl_FragColor.rgb, hxSky(normalize(vHxW - cameraPosition)), hxf * 0.97);
@@ -337,15 +477,8 @@ function withVoidFog<T extends Material>(mat: T, strata = false): T {
         #include <tonemapping_fragment>`,
       )
       .replace("#include <fog_fragment>", "");
-    if (strata) {
-      s.fragmentShader = s.fragmentShader.replace(
-        "#include <color_fragment>",
-        /* glsl */ `#include <color_fragment>
-        diffuseColor.rgb *= 0.93 + 0.07 * sin(vHxW.y * 2.6 + sin(vHxW.x * 0.7 + vHxW.z * 0.9) * 1.5);`,
-      );
-    }
   };
-  mat.customProgramCacheKey = () => "helix-void-" + strata;
+  mat.customProgramCacheKey = () => "helix-void-" + detail;
   return mat;
 }
 
@@ -370,6 +503,9 @@ interface Assets {
   doorBack: BufferGeometry;
   doorPortal: BufferGeometry;
   stone: MeshLambertMaterial;
+  wallMat: MeshLambertMaterial;
+  stairMat: MeshLambertMaterial;
+  koi: Koi;
   glow: MeshBasicMaterial;
   skyMat: ShaderMaterial;
   pointsMat: ShaderMaterial;
@@ -453,8 +589,9 @@ function getAssets(): Assets {
     const ctr: V3 = [(i0[0] + o1[0]) / 2, top - THICK / 2, (i0[2] + o1[2]) / 2];
     const warm = 0.9 + 0.1 * rand();
     const tone: V3 = [IVORY[0] * warm, IVORY[1] * warm, IVORY[2] * warm];
-    sq.quad(i0, o0, o1, i1, ctr, tone, 0.5, 1, 1, 0.5); // tread
-    sq.quad(i0, o0, lo(o0), lo(i0), ctr, SAND, 0.7, 1.1, 0.95, 0.6); // riser
+    const wi0 = -innerW(s0 - nose), wo0 = halfW(s0 - nose), wi1 = -innerW(s1), wo1 = halfW(s1);
+    sq.quad(i0, o0, o1, i1, ctr, tone, 0.5, 1, 1, 0.5, [[wi0, 0, 1], [wo0, 0, 1], [wo1, 1, 1], [wi1, 1, 1]]); // tread
+    sq.quad(i0, o0, lo(o0), lo(i0), ctr, SAND, 0.7, 1.1, 0.95, 0.6, [[wi0, 0, 2], [wo0, 0, 2], [wo0, 1, 2], [wi0, 1, 2]]); // riser
     sq.quad(i1, o1, lo(o1), lo(i1), ctr, SAND, 0.6, 1.1, 0.8, 0.45); // back
     sq.quad(o0, o1, lo(o1), lo(o0), ctr, SAND, 1, 1, 0.8, 0.8); // outer end
     sq.quad(i0, i1, lo(i1), lo(i0), ctr, SAND, 0.6, 0.6, 0.5, 0.5); // inner end
@@ -557,9 +694,9 @@ function getAssets(): Assets {
   column.setIndex(ci);
 
   // ---- shaft wall: one arcade module, bent onto the cylinder and sheared along the helix ----
-  const W = (TAU * WALL_R) / WALL_N;
-  const ARCH = W * 0.33;
-  const SPRING = WALL_H - 1.7 - ARCH;
+  const W = WALL_W;
+  const ARCH = WALL_ARCH;
+  const SPRING = WALL_SPRING;
   const ws = new Shape();
   ws.moveTo(-W / 2, 0);
   ws.lineTo(-ARCH, 0);
@@ -571,7 +708,7 @@ function getAssets(): Assets {
   ws.lineTo(-W / 2, WALL_H);
   ws.closePath();
   const WALL_D = 2.6;
-  const wallC = WALL_PITCH / TAU;
+  const wallC = WALL_C;
   const wall = new ExtrudeGeometry(ws, { depth: WALL_D, bevelEnabled: false, curveSegments: 14, steps: 1 });
   {
     const pos = wall.getAttribute("position");
@@ -717,7 +854,13 @@ function getAssets(): Assets {
   points.setAttribute("aAnim", new BufferAttribute(new Float32Array(pa), 4));
 
   // ---- materials ----
-  const stone = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), true);
+  const stone = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "strata");
+  const wallMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "wall");
+  const stairMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "stair");
+  // between the stair's flare and the arcade, from far below the camera's start to above the door
+  const koi = createKoi({
+    count: 84, rMin: 18.5, rMax: 33, yMid: HEND - 22, yRange: 150, fogNear: FOG_NEAR, fogFar: FOG_FAR, skyGlsl: SKY_GLSL,
+  });
   const glow = withVoidFog(new MeshBasicMaterial({ color: new Color(1.35, 0.6, 0.16) }));
   const skyMat = new ShaderMaterial({
     side: BackSide,
@@ -780,7 +923,7 @@ function getAssets(): Assets {
     lantern: new SphereGeometry(0.22, 10, 8),
     sky: new SphereGeometry(1200, 24, 16),
     points, doorFrame, doorBack, doorPortal,
-    stone, glow, skyMat, pointsMat,
+    stone, wallMat, stairMat, koi, glow, skyMat, pointsMat,
     balusterM: new Float32Array(balusters),
     lanternM: new Float32Array(lanterns),
     wallM: new Float32Array(wallM),
@@ -810,11 +953,11 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     sky.frustumCulled = false;
     sky.renderOrder = -10;
     const column = new Mesh(A.column, A.stone);
-    const stairs = new Mesh(A.stairs, A.stone);
+    const stairs = new Mesh(A.stairs, A.stairMat);
     const rails = new Mesh(A.rails, A.stone);
     const balusters = instanced(A.baluster, A.stone, A.balusterM);
     const lanterns = instanced(A.lantern, A.glow, A.lanternM);
-    const wall = instanced(A.wall, A.stone, A.wallM);
+    const wall = instanced(A.wall, A.wallMat, A.wallM);
     const sats = new InstancedMesh(A.satellite, A.stone, A.satellites.length);
     sats.frustumCulled = false;
     const points = new Points(A.points, A.pointsMat);
@@ -824,14 +967,14 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     door.rotation.y = A.doorYaw;
     const portal = new Mesh(A.doorPortal, portalMaterial);
     door.add(new Mesh(A.doorFrame, A.stone), new Mesh(A.doorBack, A.stone), portal);
-    root.add(sky, column, stairs, rails, balusters, lanterns, wall, sats, points, door);
+    root.add(sky, column, stairs, rails, balusters, lanterns, wall, sats, A.koi.mesh, points, door);
     return { A, root, sky, column, sats, instancedMeshes: [balusters, lanterns, wall, sats] };
   }, [portalMaterial]);
 
   useEffect(() => () => rig.instancedMeshes.forEach((m) => m.dispose()), [rig]);
 
   const tmp = useMemo(
-    () => ({ pos: new Vector3(), tan: new Vector3(), look: new Vector3(), q: new Quaternion(), o: new Object3D() }),
+    () => ({ pos: new Vector3(), tan: new Vector3(), look: new Vector3(), q: new Quaternion(), o: new Object3D(), fwd: new Vector3() }),
     [],
   );
 
@@ -839,7 +982,7 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     const { A, sky, column, sats } = rig;
     const { path } = A.track;
     const t = Math.min(TIMING.total, Math.max(0, clock.t));
-    const { pos, tan, look, q, o } = tmp;
+    const { pos, tan, look, q, o, fwd } = tmp;
 
     // --- camera: in from the void, a glide up the stair, then straight into the keyhole ---
     const s = trackS(A.track, t);
@@ -876,6 +1019,8 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
       sats.setMatrixAt(i, o.matrix);
     }
     sats.instanceMatrix.needsUpdate = true;
+    hxTime.value = t;
+    A.koi.update(t, pos, fwd.subVectors(look, pos).normalize());
     A.pointsMat.uniforms.uT!.value = t;
     A.pointsMat.uniforms.uScale!.value =
       state.gl.domElement.height / (2 * Math.tan((camera.fov * Math.PI) / 360));

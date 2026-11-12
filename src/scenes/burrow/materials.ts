@@ -46,6 +46,7 @@ const WALL_FRAG = /* glsl */ `
   uniform float uSpotGain;
   uniform float uRidgeAmt;
   uniform float uFlutes;
+  uniform vec2 uScales;     // scales per pattern cell (0 = smooth skin)
   ${FOG_GLSL}
   #if MODE == 1
     uniform vec4 uCh[3];
@@ -110,6 +111,18 @@ const WALL_FRAG = /* glsl */ `
     // fine flutes running along the ribs
     float flute = 0.5 + 0.5 * cos(vPat.y * uFlutes * 6.2831853);
     albedo *= 1.0 - 0.3 * flute * flute * (1.0 - ridge * 0.6);
+    // the skin between the ribs is scaled like a lizard's; the scales dissolve with distance
+    float wet = 0.0;
+    if (uScales.x > 0.0) {
+      vec2 sg = vPat * uScales;
+      float sfade = 1.0 - smoothstep(0.12, 0.55, length(fwidth(sg)));
+      sg.x += 0.5 * mod(floor(sg.y), 2.0);
+      vec2 sf = fract(sg) - vec2(0.5, 0.0);
+      float sd = length(sf * vec2(1.0, 1.1));
+      float tone = hash(floor(sg) + 17.0);
+      wet = smoothstep(0.5, 0.15, sd) * sfade * (1.0 - ridge);
+      albedo *= 1.0 + sfade * (1.0 - ridge) * (0.3 * smoothstep(0.6, 0.15, sd) - 0.26 * smoothstep(0.4, 0.56, sd) + 0.16 * (tone - 0.5));
+    }
 
     // light: dim ambient, the traveller's lantern, and light baked from the glowing things
     vec3 light = vec3(0.05, 0.018, 0.07) * (0.7 + 0.3 * n.y);
@@ -117,6 +130,8 @@ const WALL_FRAG = /* glsl */ `
     light += vec3(0.62, 0.34, 0.27) * (0.2 + 0.8 * ndl) / (1.0 + dist * dist / 36.0);
     light += vGlow * 0.5;
     vec3 col = albedo * light;
+    // every scale is a little wet
+    col += vec3(1.0, 0.7, 0.6) * wet * pow(ndl, 14.0) * 0.5 / (1.0 + dist * dist / 30.0);
 
     // velvet rim, picks up the haze
     float rim = pow(1.0 - ndl, 3.0);
@@ -151,6 +166,7 @@ interface WallOptions {
   spotGain?: number;
   ridgeAmt?: number;
   flutes?: number;
+  scales?: [number, number];
 }
 
 function wallUniforms(shared: Shared, o: WallOptions) {
@@ -163,6 +179,7 @@ function wallUniforms(shared: Shared, o: WallOptions) {
     uSpotGain: { value: o.spotGain ?? 1 },
     uRidgeAmt: { value: o.ridgeAmt ?? 0.7 },
     uFlutes: { value: o.flutes ?? 0 },
+    uScales: { value: new Vector2(o.scales?.[0] ?? 0, o.scales?.[1] ?? 0) },
   };
 }
 
@@ -182,7 +199,7 @@ export function createCorridorMaterial(shared: Shared, chambers: Chamber[]) {
   return new ShaderMaterial({
     defines: { MODE: 1 },
     uniforms: {
-      ...wallUniforms(shared, { patScale: [2.1, 13.6], spotK: 13, hTop: 4.6, flutes: 26 }),
+      ...wallUniforms(shared, { patScale: [2.1, 13.6], spotK: 13, hTop: 4.6, flutes: 26, scales: [9, 64] }),
       uCh: { value: chambers.map((c) => new Vector4(c.c.x, c.c.z, c.R, c.H)) },
       uChY: { value: chambers.map((c) => c.yc) },
     },
@@ -206,6 +223,7 @@ export function createChamberMaterial(shared: Shared, ch: Chamber) {
         patScale: [(Math.PI * 2 * ch.R * 0.8) / ch.ridges, meridian],
         spotK: Math.round(meridian / 1.1),
         hTop: ch.yc + ch.H,
+        scales: [Math.round((Math.PI * 2 * ch.R * 0.8) / ch.ridges / 0.24), Math.round(meridian / 0.21)],
       }),
       uC: { value: new Vector2(ch.c.x, ch.c.z) },
       uDoor: { value: doors },

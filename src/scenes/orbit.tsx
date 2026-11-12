@@ -3,6 +3,7 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { RAIL, createRide } from "./rail";
 import { TIMING, type SceneProps } from "./types";
+import { createSky } from "./orbit/sky";
 
 /**
  * ORBIT — the inside-out world.
@@ -436,8 +437,8 @@ function buildWorld() {
   }
 
   // ---------------------------------------------------------------- ground texture
-  const W = 4096;
-  const H = 4096;
+  const W = 2048;
+  const H = 2048;
   const canvas = document.createElement("canvas");
   canvas.width = W;
   canvas.height = H;
@@ -518,7 +519,7 @@ function buildWorld() {
   soft.width = W;
   soft.height = H;
   const sctx = soft.getContext("2d")!;
-  sctx.filter = "blur(1.2px)";
+  sctx.filter = "blur(0.6px)";
   sctx.drawImage(canvas, 0, 0);
   const groundTex = new THREE.CanvasTexture(soft);
   groundTex.colorSpace = THREE.SRGBColorSpace;
@@ -769,11 +770,86 @@ function buildWorld() {
     emissive: 0xffffff,
     emissiveIntensity: 0.85,
   });
+  // Cobbles: fans of setts in the unrolled ground coordinates, fading out where they would shimmer.
+  groundMat.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec2 vGs;")
+      .replace("#include <begin_vertex>", `#include <begin_vertex>\nvGs = uv * vec2(${C.toFixed(3)}, ${(2 * ZH).toFixed(1)});`);
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying vec2 vGs;")
+      .replace(
+        "#include <emissivemap_fragment>",
+        /* glsl */ `#include <emissivemap_fragment>
+        {
+          vec2 p = vGs / 1.45;
+          float fade = 1.0 - smoothstep(0.08, 0.5, length(fwidth(p)));
+          p.x += 0.5 * mod(floor(p.y), 2.0);
+          vec2 f = fract(p) - vec2(0.5, 0.0);
+          float d = length(f) * 4.6;                     // rings of setts fanning out from each cell's foot
+          float a = atan(f.y, f.x) * (floor(d) * 1.7 + 2.0);
+          float mortar = min(min(fract(d), 1.0 - fract(d)), min(fract(a), 1.0 - fract(a)) * 0.8);
+          float sett = fract(sin(dot(floor(vec2(d, a)) + floor(p) * 13.0, vec2(12.99, 78.23))) * 43758.5);
+          float cob = mix(1.0, (0.7 + 0.4 * smoothstep(0.02, 0.2, mortar)) * (0.92 + 0.24 * sett), fade);
+          diffuseColor.rgb *= cob;
+          totalEmissiveRadiance *= cob;
+        }`,
+      );
+  };
   const overlay = { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -6, side: THREE.DoubleSide };
   const roadMat = new THREE.MeshBasicMaterial({ vertexColors: true, ...overlay });
   const plazaMat = new THREE.MeshBasicMaterial({ map: plazaTex, ...overlay });
   const bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  // Towers: brick courses, a string course under every row of windows, a plinth and a cornice.
+  bodyMat.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vTw;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvTw = vec3(atan(position.z, position.x), position.y * length(instanceMatrix[1].xyz), length(instanceMatrix[1].xyz));");
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vTw;")
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        {
+          float h = vTw.y;
+          float px = fwidth(h) + 1e-4;
+          float fade = 1.0 - smoothstep(0.05, 0.3, px);
+          float row = floor(h / 0.42);
+          float bx = vTw.x * 4.4563 + 0.5 * mod(row, 2.0);   // 28 bricks round the tower
+          float fy = fract(h / 0.42);
+          float fx = fract(bx);
+          float joint = 1.0 - smoothstep(0.03, 0.03 + px, min(min(fy, 1.0 - fy) * 0.42, min(fx, 1.0 - fx) * 0.5));
+          float tone = fract(sin(dot(vec2(floor(bx), row), vec2(12.99, 78.23))) * 43758.5);
+          float m = (0.9 + 0.22 * tone) * (1.0 - 0.25 * joint);
+          // mouldings: the windows sit on rows 2.35 apart, starting at 2.0
+          float course = 1.0 - smoothstep(0.09, 0.09 + px, abs(fract((h - 1.62) / 2.35 + 0.5) - 0.5) * 2.35);
+          float crown = smoothstep(vTw.z - 0.75, vTw.z - 0.7, h);
+          float dentil = step(0.5, fract(vTw.x * 7.0)) * step(vTw.z - 0.38, h);
+          m = mix(m, 1.5, max(course * step(1.0, h), crown * (1.0 - 0.3 * dentil)));
+          m *= mix(0.7, 1.0, smoothstep(0.62, 0.68, h));
+          diffuseColor.rgb *= mix(1.0, m, fade);
+        }`,
+      );
+  };
   const domeMat = new THREE.MeshLambertMaterial({ emissive: "#0a0d30" });
+  // Roofs: overlapping round shingles, a pale ridge at every hem.
+  domeMat.defines = { USE_UV: "" };
+  domeMat.onBeforeCompile = (sh) => {
+    sh.fragmentShader = sh.fragmentShader.replace(
+      "#include <color_fragment>",
+      /* glsl */ `#include <color_fragment>
+      {
+        vec2 sv = vec2(vUv.x * 20.0, vUv.y * 11.0);
+        float fade = 1.0 - smoothstep(0.1, 0.6, length(fwidth(sv)));
+        sv.x += 0.5 * mod(floor(sv.y), 2.0);
+        vec2 f = fract(sv);
+        float d = length(vec2(f.x - 0.5, max(0.5 - f.y, 0.0)));
+        float tile = smoothstep(0.52, 0.44, d);
+        float hem = tile * smoothstep(0.34, 0.44, d);
+        float tone = fract(sin(dot(floor(sv), vec2(12.99, 78.23))) * 43758.5);
+        diffuseColor.rgb *= mix(1.0, mix(0.5, (0.8 + 0.5 * f.y) * (0.88 + 0.24 * tone), tile) + 0.5 * hem, fade);
+      }`,
+    );
+  };
   const windowMat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
   const treeMat = new THREE.MeshLambertMaterial({ emissive: "#03141a" });
   const postMat = new THREE.MeshLambertMaterial({ color: "#3a3f78" });
@@ -863,9 +939,12 @@ function buildWorld() {
     side: THREE.DoubleSide,
   });
 
+  const sky = createSky({ R, fogColor: fogC, fogNear: FOG_NEAR, fogFar: FOG_FAR }, pointsMat);
+
   return {
     path,
     pathLen,
+    sky,
     inst: { bodies, domes, windows, trees, posts, bulbs, arches, pillars },
     geo: {
       groundGeo, bodyGeo, domeGeos, windowGeo, treeGeo, postGeo, bulbGeo, archGeo, pillarGeo, pointsGeo,
@@ -914,7 +993,7 @@ function buildObjects(w: World, portalMaterial: THREE.Material) {
   addInst(inst.pillars, geo.pillarGeo, mat.stoneMat);
   const points = new THREE.Points(geo.pointsGeo, mat.pointsMat);
   points.frustumCulled = false;
-  root.add(points);
+  root.add(points, w.sky.root);
 
   // the moon-gate hut (its local frame coincides with the world frame at s = 0)
   const hut = new THREE.Group();
@@ -1053,6 +1132,7 @@ export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
   );
   const track = useMemo(() => createTrack(world), [world]);
   const tmp = useMemo(newPose, []);
+  const forward = useMemo(() => new THREE.Vector3(), []);
 
   useFrame((state) => {
     const t = Math.min(TIMING.total, Math.max(0, clock.t));
@@ -1065,6 +1145,8 @@ export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
     camera.far = 800;
 
     objs.lamp.position.copy(tmp.pos).lerp(tmp.look, 0.3).addScaledVector(camera.up, 2.5);
+
+    world.sky.update(t, tmp.pos, forward.subVectors(tmp.look, tmp.pos).normalize());
 
     const open = smooth((t - 15.8) / 4.6) * 2.25;
     objs.leafL.rotation.y = open;

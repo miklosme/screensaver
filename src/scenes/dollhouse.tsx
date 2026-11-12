@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import {
   BackSide,
@@ -26,6 +26,7 @@ import {
 } from "three";
 import { RAIL, RAIL_LEAD_IN, RAIL_LEAD_OUT, createRide } from "./rail";
 import type { SceneProps } from "./types";
+import { createGarden } from "./dollhouse/garden";
 
 /**
  * DOLLHOUSE — bigger on the inside.
@@ -201,6 +202,104 @@ const DOORS: DoorDef[] = [
   { x: 30, z: 6, fx: -1, fz: 0.5, scale: 0.9, pal: 3, frame: 3, R: 18 },
 ];
 
+/** true where a prop of radius r stands clear of the camera's track, the doors and the stele */
+const clearOf = (pathPts: Vector3[]) => (x: number, z: number, r: number) => {
+  for (const p of pathPts) if (Math.hypot(p.x - x, p.z - z) < r) return false;
+  for (const d of DOORS) if (Math.hypot(d.x - x, d.z - z) < r + d.scale * 3) return false;
+  if (Math.hypot(x, z) < 6 + r) return false;
+  // keep the sight line D1 -> stele open
+  if (Math.abs(x) < 6 && z > -2 && z < 44) return false;
+  return true;
+};
+
+/**
+ * Paints a pattern onto a Lambert material in the object space of each instance, so that no two
+ * trees, domes or hoops need be alike. `glsl` may read vOb (object position) and vSeed (0..1 per
+ * instance), and mixes `second(colour)` into diffuseColor where its pattern goes.
+ */
+function patterned(mat: MeshLambertMaterial, key: string, glsl: string) {
+  mat.onBeforeCompile = (s) => {
+    s.vertexShader = s.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vOb;\nvarying float vSeed;")
+      .replace(
+        "#include <begin_vertex>",
+        /* glsl */ `#include <begin_vertex>
+        vOb = position;
+        #ifdef USE_INSTANCING
+          vSeed = fract(instanceMatrix[3].x * 0.371 + instanceMatrix[3].z * 0.713);
+        #else
+          vSeed = 0.0;
+        #endif`,
+      );
+    s.fragmentShader = s.fragmentShader
+      .replace(
+        "#include <common>",
+        /* glsl */ `#include <common>
+        varying vec3 vOb;
+        varying float vSeed;
+        const float TAU = 6.2831853;
+        /** pale things get a darker second colour, coloured things a paler one */
+        vec3 second(vec3 c) { return mix(mix(c, vec3(1.0), 0.6), c * vec3(0.7, 0.62, 0.78), step(0.78, dot(c, vec3(0.3333)))); }`,
+      )
+      .replace("#include <color_fragment>", "#include <color_fragment>\n" + glsl);
+  };
+  mat.customProgramCacheKey = () => "dollhouse-" + key;
+  return mat;
+}
+
+const PATTERNS = {
+  // lollipop trees: candy swirls, polka dots, hoops, or plain
+  crown: /* glsl */ `
+    {
+      vec3 q = normalize(vOb);
+      float ang = atan(q.z, q.x) / TAU;
+      float px = length(fwidth(q)) * 1.5 + 1e-4;
+      float kind = fract(vSeed * 7.31);
+      float m = 0.0;
+      if (kind < 0.36) {
+        m = smoothstep(-px * 6.0, px * 6.0, sin((ang * 3.0 + q.y * 1.1 + vSeed) * TAU));
+      } else if (kind < 0.62) {
+        vec2 g = vec2(ang * 10.0, q.y * 3.4 + 0.5);
+        g.x += 0.5 * mod(floor(g.y), 2.0);
+        m = (1.0 - smoothstep(0.27 - px * 3.0, 0.27 + px * 3.0, length(fract(g) - 0.5))) * smoothstep(0.95, 0.8, abs(q.y));
+      } else if (kind < 0.82) {
+        m = smoothstep(-px * 8.0, px * 8.0, sin(q.y * 9.0 + vSeed * 6.0));
+      }
+      diffuseColor.rgb = mix(diffuseColor.rgb, second(diffuseColor.rgb), m);
+    }`,
+  // pavilion domes: banded like a beach ball, with a ring of round windows and a cap
+  dome: /* glsl */ `
+    {
+      vec3 q = normalize(vOb);
+      float ang = atan(q.z, q.x) / TAU;
+      float px = length(fwidth(q)) * 1.5 + 1e-4;
+      float gores = 6.0 + floor(vSeed * 3.0) * 2.0;
+      float m = smoothstep(-px * gores, px * gores, sin(ang * gores * TAU)) * smoothstep(0.2, 0.26, q.y) * step(q.y, 0.93);
+      m = max(m, smoothstep(0.93 - px, 0.93 + px, q.y));
+      diffuseColor.rgb = mix(diffuseColor.rgb, second(diffuseColor.rgb), m);
+      vec2 w = vec2((fract(ang * 14.0) - 0.5) * 0.45, q.y - 0.08);
+      float win = 1.0 - smoothstep(0.045 - px, 0.045 + px, length(w));
+      float rim = 1.0 - smoothstep(0.062 - px, 0.062 + px, length(w));
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(1.0, 0.97, 0.9), rim);
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.33, 0.42, 0.78), win);
+    }`,
+  // hoops: barber-pole stripes along the arc
+  loop: /* glsl */ `
+    {
+      float s = vUv.x * (9.0 + floor(vSeed * 4.0) * 2.0) + vUv.y;
+      float px = fwidth(vUv.x) * 12.0 + 1e-4;
+      diffuseColor.rgb = mix(diffuseColor.rgb, second(diffuseColor.rgb), smoothstep(-px * 6.0, px * 6.0, sin(s * TAU)));
+    }`,
+  // stepping stones: a spiral, like the top of a lollipop
+  stone: /* glsl */ `
+    {
+      float r = length(vOb.xz);
+      float px = fwidth(r) + 1e-4;
+      float m = smoothstep(-px * 14.0, px * 14.0, sin((r * 2.6 - atan(vOb.z, vOb.x) / TAU + vSeed) * TAU));
+      diffuseColor.rgb = mix(diffuseColor.rgb, second(diffuseColor.rgb), 0.7 * m * step(0.5, vOb.y) * smoothstep(0.98, 0.93, r));
+    }`,
+};
+
 const TREES = 220;
 const FRAME_COLORS = ["#fff7ea", "#ffd9c2", "#cdeedd", "#c9e0f7"];
 const HUT_COLORS = ["#fff3e2", "#ffcdb6", "#bfe8d4", "#bcd8f5"];
@@ -227,6 +326,7 @@ function makeInteriorMaterial(pal: number, R: number) {
     side: FrontSide,
     toneMapped: false,
     uniforms: {
+      uT: { value: 0 },
       R: { value: R },
       cLow: { value: new Color(p[0]) },
       cHigh: { value: new Color(p[1]) },
@@ -245,6 +345,7 @@ function makeInteriorMaterial(pal: number, R: number) {
     `,
     fragmentShader: /* glsl */ `
       uniform float R;
+      uniform float uT;
       uniform vec3 cLow, cHigh, cFloor, cGlow, cOrb;
       varying vec3 vP;
       varying vec3 vCam;
@@ -291,7 +392,9 @@ function makeInteriorMaterial(pal: number, R: number) {
           float inside = step(au, 1.0) * step(v, 0.62 + 0.36 * sqrt(max(0.0, 1.0 - au * au)));
           float edge = step(abs(u) / 0.66, 1.0) * step(v, 0.66 + 0.40 * sqrt(max(0.0, 1.0 - min(1.0, au * au * 0.72))));
           col = mix(col, cLow * 0.82, (edge - inside) * 0.9);
-          col = mix(col, mix(cGlow, cOrb, 0.25 + 0.5 * v), inside * 0.92);
+          // the arches take turns to brighten, a slow wave going round the room
+          float lit = 0.8 + 0.2 * sin(uT * 1.1 - floor(ang / TAU * 22.0 + 0.5) * 0.9);
+          col = mix(col, mix(cGlow, cOrb, 0.25 + 0.5 * v) * lit, inside * 0.92);
           // oculus
           float oc2 = smoothstep(0.955, 0.965, y);
           col = mix(col, cGlow, 0.5 * smoothstep(0.7, 0.96, y));
@@ -300,7 +403,7 @@ function makeInteriorMaterial(pal: number, R: number) {
         // haze of distance
         col = mix(col, mix(cHigh, cGlow, 0.35), 0.3 * (1.0 - exp(-t / (R * 1.9))));
         // floating orb under the oculus
-        vec3 oC = C + vec3(0.0, R * 0.36, 0.0);
+        vec3 oC = C + vec3(0.0, R * (0.36 + 0.04 * sin(uT * 0.8 + R)), 0.0);
         float oR = R * 0.15;
         vec3 oo = ro - oC;
         float ob = dot(oo, rd);
@@ -367,6 +470,9 @@ function makeTerrainMaterial() {
         col = mix(col, mint, smoothstep(1.2, 6.0, hgt));
         col = mix(col, teal, smoothstep(9.0, 22.0, hgt));
         col *= 1.0 - 0.085 * (1.0 - band) * fadeB;
+        // fine wind ripples in the sand close by
+        float rip = sin(dot(vW.xz, vec2(0.8, 0.6)) * 5.5 + sin(vW.x * 0.21 + vW.z * 0.13) * 3.0 + hgt * 2.0);
+        col *= 1.0 - 0.028 * rip * (1.0 - smoothstep(8.0, 36.0, vD));
         float l = dot(n, sun);
         vec3 shade = vec3(0.66, 0.60, 0.82);
         col *= mix(shade, vec3(1.0), smoothstep(-0.2, 0.6, l));
@@ -600,7 +706,10 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       knob: lambert("#ffd98a"),
       plinth: lambert("#fff1df"),
       plinth2: lambert("#cdeedd"),
-      white: lambert("#ffffff"),
+      crown: patterned(lambert("#ffffff"), "crown", PATTERNS.crown),
+      dome: patterned(lambert("#ffffff"), "dome", PATTERNS.dome),
+      loop: patterned(Object.assign(lambert("#ffffff"), { defines: { USE_UV: "" } }), "loop", PATTERNS.loop),
+      stone: patterned(lambert("#ffffff"), "stone", PATTERNS.stone),
       trunk: lambert("#f2d7c4"),
       shadow: new MeshBasicMaterial({ color: SHADOW, toneMapped: false, side: DoubleSide, polygonOffset: true, polygonOffsetFactor: -0.5, polygonOffsetUnits: -1 }),
       cloud: new MeshLambertMaterial({ color: "#ffffff", emissive: "#8f96ad", toneMapped: false, fog: false }),
@@ -630,15 +739,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     const BS = blobShadows.current!;
     const TS = trunkShadows.current!;
     const LS = loopShadows.current!;
-    const pathPts = cam.curve.getPoints(80);
-    const clear = (x: number, z: number, r: number) => {
-      for (const p of pathPts) if (Math.hypot(p.x - x, p.z - z) < r) return false;
-      for (const d of DOORS) if (Math.hypot(d.x - x, d.z - z) < r + d.scale * 3) return false;
-      if (Math.hypot(x, z) < 6 + r) return false;
-      // keep the sight line D1 -> stele open
-      if (Math.abs(x) < 6 && z > -2 && z < 44) return false;
-      return true;
-    };
+    const clear = clearOf(cam.curve.getPoints(80));
 
     // lollipop trees
     const crownCols = ["#8fd8bd", "#b5e8cf", "#ffc2ad", "#ffdcc4", "#a9d3f5", "#fff0d6", "#6fc7b0"];
@@ -786,8 +887,16 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     if (St.instanceColor) St.instanceColor.needsUpdate = true;
   }, [cam]);
 
+  const garden = useMemo(() => {
+    const pathPts = cam.curve.getPoints(80);
+    return createGarden({ ground, clear: clearOf(pathPts), path: pathPts, rnd: mulberry32(4711), fogGlsl: FOG_GLSL });
+  }, [cam]);
+  useEffect(() => () => garden.dispose(), [garden]);
+
   useFrame(() => {
     const t = Math.min(25, Math.max(0, clock.t));
+    garden.update(t);
+    for (const m of mat.interiors) m.uniforms.uT!.value = t;
     cam.curve.getPointAt(Math.min(1, cam.ride.at(t) / cam.length), camera.position);
     // straight ahead while arriving, then the eye is drawn to the doorway, then on to the stele
     const free = smoothstep(RAIL.release, RAIL.release + 4.8, t);
@@ -878,14 +987,15 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       </group>
 
       <instancedMesh ref={trunks} args={[geo.trunk, mat.trunk, TREES]} frustumCulled={false} />
-      <instancedMesh ref={crowns} args={[geo.ball, mat.white, TREES]} frustumCulled={false} />
+      <instancedMesh ref={crowns} args={[geo.ball, mat.crown, TREES]} frustumCulled={false} />
       <instancedMesh ref={trunkShadows} args={[geo.trunk, mat.shadow, TREES]} frustumCulled={false} />
       <instancedMesh ref={blobShadows} args={[geo.lowBall, mat.shadow, TREES + DOORS.length]} frustumCulled={false} />
       <instancedMesh ref={loopShadows} args={[geo.lowLoop, mat.shadow, 16]} frustumCulled={false} />
-      <instancedMesh ref={domes} args={[geo.bigBall, mat.white, 22]} frustumCulled={false} />
-      <instancedMesh ref={loops} args={[geo.loop, mat.white, 16]} frustumCulled={false} />
+      <instancedMesh ref={domes} args={[geo.bigBall, mat.dome, 22]} frustumCulled={false} />
+      <instancedMesh ref={loops} args={[geo.loop, mat.loop, 16]} frustumCulled={false} />
       <instancedMesh ref={clouds} args={[geo.ball, mat.cloud, 48]} frustumCulled={false} />
-      <instancedMesh ref={stones} args={[geo.disc, mat.white, 26]} frustumCulled={false} />
+      <instancedMesh ref={stones} args={[geo.disc, mat.stone, 26]} frustumCulled={false} />
+      <primitive object={garden.root} />
     </>
   );
 }
