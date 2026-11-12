@@ -5,8 +5,10 @@ import {
   Group,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
+  Matrix3,
   Mesh,
   ShaderMaterial,
+  Vector3,
   type Material,
 } from "three";
 
@@ -20,7 +22,36 @@ import {
  */
 
 const TAU = Math.PI * 2;
-const lin = (hex: string) => new Color(hex).toArray() as [number, number, number];
+type RGB = [number, number, number];
+
+// three's ACES filmic curve, which the director's final pass applies to every scene (post.ts)
+const ACES_IN = new Matrix3().set(0.59719, 0.35458, 0.04823, 0.076, 0.90834, 0.01566, 0.0284, 0.13383, 0.83777).invert();
+const ACES_OUT = new Matrix3().set(1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -0.00605, -0.00327, -0.07276, 1.07602).invert();
+/** the curve's fit `(v (v + a) - b) / (v (c v + d) + e)`, solved for v */
+const unfit = (y: number) => {
+  y = Math.min(Math.max(y, 0), 0.99);
+  const A = y * 0.983729 - 1;
+  const B = y * 0.432951 - 0.0245786;
+  const C = y * 0.238081 + 0.000090537;
+  return (-B - Math.sqrt(B * B - 4 * A * C)) / (2 * A);
+};
+const _v = new Vector3();
+/**
+ * The linear light that reaches the screen as `hex`.
+ *
+ * The final tone curve squeezes bright colours together and greys them, so a pastel has to go in
+ * far more saturated than it comes out (a candy pink is about 7 : 1 : 1.5, and above 1 in red).
+ * The scene's palette is therefore written as the colours a viewer should see, and solved back
+ * through the curve here. Colours near white ask for a lot of light; keep channels below ~0xf4.
+ */
+export function onScreen(hex: string): RGB {
+  const c = new Color(hex);
+  _v.set(c.r, c.g, c.b).applyMatrix3(ACES_OUT);
+  _v.set(unfit(_v.x), unfit(_v.y), unfit(_v.z)).applyMatrix3(ACES_IN);
+  return [Math.max(0, _v.x * 0.6), Math.max(0, _v.y * 0.6), Math.max(0, _v.z * 0.6)];
+}
+/** `onScreen` as a GLSL vec3 */
+export const glScreen = (hex: string) => `vec3(${onScreen(hex).map((v) => v.toFixed(4)).join(",")})`;
 
 export interface GardenOptions {
   ground: (x: number, z: number) => number;
@@ -39,8 +70,8 @@ export interface GardenOptions {
 
 export interface Garden {
   root: Group;
-  /** each flower drift: centre and radius, for the contact shadow under it */
-  drifts: { x: number; z: number; r: number }[];
+  /** each flower drift: centre, radius and petal colour (linear light), for the shadow and the fallen petals under it */
+  drifts: { x: number; z: number; r: number; hue: RGB }[];
   /** foot of each pinwheel stalk */
   pinwheels: { x: number; z: number; size: number }[];
   update(t: number): void;
@@ -123,7 +154,8 @@ export function createGarden(o: GardenOptions): Garden {
     const COUNT = 3200;
     const place = new Float32Array(COUNT * 4);
     const look = new Float32Array(COUNT * 4);
-    const hues = ["#ffa9b8", "#ffe08f", "#ffffff", "#b4defc", "#d6bcff", "#ffb893", "#a3e6d1"].map(lin);
+    // deeper than the sand they stand on in every case, so that a drift is a patch of colour from afar
+    const hues = ["#f285a2", "#f4cc55", "#ea6a98", "#74aef0", "#b094ec", "#f4955a", "#5fcdb0"].map(onScreen);
     let n = 0;
     // drifts: each one a patch of a single colour near the camera's way
     while (n < COUNT) {
@@ -136,7 +168,7 @@ export function createGarden(o: GardenOptions): Garden {
       const spread = 1.2 + rnd() * 3.5;
       const size = 0.2 + rnd() * 0.3;
       const k = Math.min(COUNT - n, 10 + Math.floor(rnd() * 40));
-      if (Math.hypot(cx, cz) > 8.6 + spread) drifts.push({ x: cx, z: cz, r: spread });
+      if (Math.hypot(cx, cz) > 8.6 + spread) drifts.push({ x: cx, z: cz, r: spread, hue });
       for (let i = 0; i < k; i++) {
         const b = rnd() * TAU;
         const r = spread * Math.sqrt(rnd());
@@ -169,7 +201,8 @@ export function createGarden(o: GardenOptions): Garden {
           float gust = sin(uT * 1.4 + aPlace.x * 0.22 + aPlace.z * 0.17) + 0.4 * sin(uT * 3.1 + aLook.w);
           p.x += 0.16 * gust * position.y * position.y;
           vW = aPlace.xyz + p * aPlace.w;
-          vCol = aPart < 0.5 ? vec3(0.3, 0.6, 0.42) * (0.45 + 0.7 * position.y) : aPart < 1.5 ? aLook.rgb * (0.9 + 0.3 * length(position.xz)) * 1.12 : vec3(1.0, 0.62, 0.12);
+          // dark green stems and a dark eye, so every flower has its own little contrast
+          vCol = aPart < 0.5 ? ${glScreen("#3f9468")} * (0.45 + 0.6 * position.y) : aPart < 1.5 ? aLook.rgb * (0.74 + 0.4 * length(position.xz)) : ${glScreen("#5c2a50")};
           gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
         }`),
     );
@@ -206,7 +239,7 @@ export function createGarden(o: GardenOptions): Garden {
     const COUNT = 54;
     const place = new Float32Array(COUNT * 4);
     const spin = new Float32Array(COUNT * 4);
-    const hues = ["#ff8fa3", "#ffd166", "#7fd6c2", "#8fb8f2", "#c8a6ff", "#ff9f6e"].map(lin);
+    const hues = ["#ee6f8e", "#f4c540", "#4fc6ac", "#659eee", "#a888f0", "#f48650"].map(onScreen);
     const hue = new Float32Array(COUNT * 3);
     for (let n = 0, tries = 0; n < COUNT && tries < 4000; tries++) {
       const a = rnd() * TAU;
@@ -291,7 +324,7 @@ export function createGarden(o: GardenOptions): Garden {
           float c = cos(aSpin.x), s = sin(aSpin.x);
           p.xz = mat2(c, s, -s, c) * p.xz;
           vW = aPlace.xyz + p * aPlace.w;
-          vCol = aPart < 0.5 ? vec3(0.93, 0.78, 0.7) : aPart < 1.5 ? aHue : aPart < 2.5 ? vec3(1.0, 0.96, 0.9) : vec3(1.0, 0.7, 0.25);
+          vCol = aPart < 0.5 ? ${glScreen("#8d6a80")} : aPart < 1.5 ? aHue : aPart < 2.5 ? ${glScreen("#f4ecd8")} : ${glScreen("#5a2a4c")};
           gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
         }`,
         true,
@@ -324,7 +357,7 @@ export function createGarden(o: GardenOptions): Garden {
     const COUNT = 46;
     const orbit = new Float32Array(COUNT * 4);
     const bird = new Float32Array(COUNT * 4);
-    const hues = ["#ffffff", "#ffe2d2", "#d6f0e4", "#dbe9fb", "#fff3c4"].map(lin);
+    const hues = ["#f3f0ea", "#f4d3c0", "#c4e8d6", "#cbdff6", "#f4e6ac"].map(onScreen);
     const hue = new Float32Array(COUNT * 3);
     for (let n = 0; n < COUNT; n++) {
       const flock = n % 2;
@@ -364,7 +397,7 @@ export function createGarden(o: GardenOptions): Garden {
           p.x *= mix(1.0, cos(lift), reach);
           p.y -= 0.12 * beat * (1.0 - reach);
           vW = centre + (right * p.x + vec3(0.0, p.y, 0.0) + fwd * p.z) * aBird.x;
-          vCol = mix(aHue, vec3(1.0), 0.35 * reach);
+          vCol = aHue * (1.0 + 0.15 * reach);
           gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
         }`,
         true,
