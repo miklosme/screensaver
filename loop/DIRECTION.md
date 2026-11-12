@@ -37,6 +37,22 @@ other work in the meantime.
    keeps today's straight, level joints (so a scene on the new rail can meet one still on its
    old track without a jolt) and puts the loops and banking in the 14 seconds between them.
 
+**From pass 002:**
+
+4. **Half a slice reverted.** K4 was the rail and the burrow rebuilt on it. All three reviewers
+   reported the burrow as a regression (the knot gone from the opening, one mouth at the fork,
+   a wedge at a doorway foot); none could object to the rail itself, which draws nothing. I
+   reverted the burrow's files and kept `src/scenes/rail.ts`, so no scene rides the rail yet
+   and the picture of all four scenes is still on the old tracks. If you would rather a slice
+   is always reverted whole, say so.
+5. **A second change to the gate's tooling.** `look.ts perf` opens one page per scene, and every
+   page after the first read about double for its first second (the same dollhouse frame: 2.06 ms
+   measured alone, 4.05 ms as the third page, which failed the gate). It now draws until the
+   cost holds still before sampling (commit `9e79cb6`). As with the seam change in question 1,
+   say so if the gate's scripts should be yours alone to edit.
+6. **`AGENTS.md`'s camera section** will be wrong the day a scene lands on the rail. I will put
+   replacement text here for you when that happens instead of editing the file.
+
 ## Handled
 
 Notes the director has acted on, each with the pass number.

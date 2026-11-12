@@ -72,3 +72,40 @@ Learned:
 - Five parallel workers make frame-cost numbers useless (plus or minus 0.5 ms); workers that
   measured against their own "before" in alternation got usable deltas. The owner commits to
   `loop` while a pass runs: check `git log` before each merge.
+
+## Pass 002 (2026-11-13)
+
+Slices:
+- K4 all · The seasonal rail, with the burrow riding summer (fable): the rail kept, the burrow
+  pilot reverted. All three reviewers reported the burrow on the rail as a regression (knot gone
+  from the opening, one mouth at the fork, t=19 repeating t=0, fewer eyes, a wedge at a doorway
+  foot). No scene rides the rail yet.
+- O1 orbit · A town with depth, second try (opus) kept: windows stay lit through the fog this
+  time. Astra alone called the new tower rims a regression; queued as a rider on O2.
+- H2 helix · The keyhole arch is the best thing on the stair (opus) kept, no regressions.
+- D2 dollhouse · The exit door, with D4 · Shadows lie on the dunes (opus) kept, no regressions.
+Gate: frame cost worst 3.06 ms (orbit), loop worst 15 ms, seams 0.00–0.32% RMSE, bundle 263 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.0, burrow 5.3, dollhouse 6.0, orbit 6.7. The burrow score was
+given to the reverted pilot (`loop/out/pass-002/reviewed/`); the burrow on `loop` is pass 001's.
+Learned:
+- Scores did not move for helix, dollhouse or orbit although each got its top item and no
+  reviewer disputed the result. Crafting one object (an arch, a door) fixes a named problem
+  without lifting a scene; the panel's remaining problems are about what fills the frame for
+  most of the ride (the burrow's near wall, the orbit's road, the dollhouse's flowers and plain
+  arches, the helix's newel and lamp at the lens). Take those next.
+- Putting a scene on the rail is two jobs. The motion was right first time (seams and cost
+  unchanged); the composition was lost, because the world was swept along the new curve and its
+  sights stayed wherever the build put them. A migration brief has to list, frame by frame, what
+  must still be on screen, and name the legacy sheet as the thing to beat.
+- The rail's first and last 5 s are the same for every scene (a level 26° left sweep, then
+  straight). A rail scene next to a legacy one shows the wrong parallax through the portal for
+  about 2.5 s (the worker saw the burrow's outer wall through the helix keyhole), so migrate
+  neighbours together.
+- `look.ts perf` read double for every page after the first; fixed in `9e79cb6`. A frame-cost
+  breach at t=0 or 2.5 only, in every scene but the first, was that.
+- A worker told what must survive (O1's second brief named the lit windows and gave the
+  rejected frames) kept it. Do that for every second try.
+- The fable reviewer asked for director-level bloom as an opportunity, which exists since pass
+  001: the reviewers do not know what is already built. Nothing in the brief tells them.
+
