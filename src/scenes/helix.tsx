@@ -6,7 +6,6 @@ import {
   BufferAttribute,
   BufferGeometry,
   Color,
-  CylinderGeometry,
   Euler,
   ExtrudeGeometry,
   Group,
@@ -310,6 +309,59 @@ function tint(g: BufferGeometry, fn: (x: number, y: number, z: number) => V3): B
   return g;
 }
 
+/**
+ * A solid of revolution from a profile of [radius, height, shade, brass] points, with smooth
+ * normals along the profile. `shade` is baked occlusion; brass points are amber, the rest sandstone.
+ */
+type ProfilePt = [number, number, number, number];
+function lathe(profile: ProfilePt[], seg: number): BufferGeometry {
+  const n = profile.length;
+  const pos: number[] = [], nor: number[] = [], col: number[] = [], idx: number[] = [];
+  for (let j = 0; j < n; j++) {
+    const [r, y, sh, brass] = profile[j]!;
+    const a = profile[Math.max(0, j - 1)]!, b = profile[Math.min(n - 1, j + 1)]!;
+    // the profile's outward normal in the (r, y) plane
+    let nr = b[1] - a[1], ny = -(b[0] - a[0]);
+    const l = Math.hypot(nr, ny) || 1;
+    nr /= l; ny /= l;
+    const base: V3 = brass ? AMBER : SAND;
+    for (let i = 0; i <= seg; i++) {
+      const th = (i / seg) * TAU;
+      const c = Math.cos(th), s = Math.sin(th);
+      pos.push(r * c, y, r * s);
+      nor.push(nr * c, ny, nr * s);
+      col.push(base[0] * sh, base[1] * sh, base[2] * sh);
+      if (j < n - 1 && i < seg) {
+        const p0 = j * (seg + 1) + i, p1 = p0 + seg + 1;
+        idx.push(p0, p0 + 1, p1, p0 + 1, p1 + 1, p1);
+      }
+    }
+  }
+  const g = new BufferGeometry();
+  g.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute("normal", new BufferAttribute(new Float32Array(nor), 3));
+  g.setAttribute("color", new BufferAttribute(new Float32Array(col), 3));
+  g.setIndex(idx);
+  return g;
+}
+/** balusters, unit height (scaled to the rail): a brass vase turned on a slim stem */
+const BALUSTER_PROFILE: ProfilePt[] = [
+  [0.08, 0, 0.55, 1], [0.08, 0.035, 0.7, 1], [0.055, 0.06, 0.75, 1], [0.05, 0.1, 0.85, 1],
+  [0.075, 0.2, 1, 1], [0.06, 0.3, 1, 1], [0.04, 0.38, 0.9, 1], [0.036, 0.8, 1, 1],
+  [0.055, 0.86, 1, 1], [0.04, 0.92, 0.85, 1], [0.05, 1, 1, 1], [0, 1, 1, 1],
+];
+/** lamp posts, in metres: a sandstone shaft on a moulded plinth, banded in brass, with a cup for the globe */
+const POST_H = 2.3;
+const POST_PROFILE: ProfilePt[] = [
+  [0.2, 0, 0.42, 0], [0.2, 0.12, 0.6, 0], [0.17, 0.14, 0.7, 0], [0.165, 0.18, 0.85, 0],
+  [0.155, 0.22, 0.95, 0], [0.13, 0.26, 0.85, 0], [0.105, 0.3, 0.75, 0], [0.1, 0.36, 0.85, 0],
+  [0.088, 0.95, 1, 0], [0.084, 0.98, 0.8, 0], [0.115, 1.0, 1, 1], [0.118, 1.04, 1.1, 1],
+  [0.115, 1.08, 1, 1], [0.084, 1.1, 0.8, 0], [0.078, 1.86, 1, 0], [0.074, 1.9, 0.8, 0],
+  [0.105, 1.92, 1, 1], [0.108, 1.96, 1.1, 1], [0.105, 2.0, 1, 1], [0.066, 2.03, 0.8, 1],
+  [0.062, 2.12, 0.9, 1], [0.09, 2.17, 1, 1], [0.15, 2.25, 1.1, 1], [0.155, POST_H, 1.15, 1],
+  [0.12, POST_H, 0.9, 1], [0, POST_H - 0.04, 0.8, 1],
+];
+
 // ---------------------------------------------------------------------------------------------
 // shaders
 // ---------------------------------------------------------------------------------------------
@@ -325,7 +377,9 @@ const SKY_GLSL = /* glsl */ `
   }
 `;
 
-type Detail = "plain" | "strata" | "wall" | "stair";
+type Detail = "plain" | "strata" | "wall" | "stair" | "column" | "post" | "globe";
+/** details that carve the surface: they write a height into `hxH` and the normal follows it */
+const BUMPED: Detail[] = ["stair", "column", "post"];
 
 const WALL_W = (TAU * WALL_R) / WALL_N; // width of one arcade module
 const WALL_ARCH = WALL_W * 0.33; // radius of its arch
@@ -335,6 +389,41 @@ const glf = (x: number) => x.toFixed(4);
 
 /** clock for the stone shaders' few moving parts; one Helix is mounted at a time */
 const hxTime = { value: 0 };
+
+/**
+ * Where the two stairs' treads cross the newel, so the newel can darken above and below each one.
+ * Filled in by getAssets, read when the column's program is compiled on the first frame.
+ */
+const hxStairs = { offMain: 0, offTwin: 0, endMain: 0, endTwin: 0 };
+const THETA0 = -FLARE - TURNS * TAU;
+const PITCH = SLOPE * TAU * R0;
+function stairAoGlsl(): string {
+  return /* glsl */ `
+    /** occlusion from one turn of one stair at height y; s is plan length along it */
+    float hxSlabAO(float y, float s, float off, float yOff, float sEnd) {
+      if (s < 0.0 || s > sEnd) return 1.0;
+      float top = ${glf(SLOPE)} * (off + (floor((s - off) / ${glf(TREAD)}) + 1.0) * ${glf(TREAD)}) + yOff;
+      float a = y - top;
+      float b = top - ${glf(THICK)} - y;
+      return a > 0.0 ? mix(0.3, 1.0, smoothstep(0.0, 1.5, a)) : b > 0.0 ? mix(0.32, 1.0, smoothstep(0.0, 2.0, b)) : 0.3;
+    }
+    float hxStairAO(vec3 w) {
+      float phi = atan(w.z, w.x);
+      float lin = ${glf(SLOPE * R0)} * (phi - ${glf(THETA0)});
+      float ao = 1.0;
+      for (int k = 0; k < 2; k++) {
+        float yOff = k == 0 ? 0.0 : ${glf(PITCH / 2)};
+        float off = k == 0 ? ${glf(hxStairs.offMain)} : ${glf(hxStairs.offTwin)};
+        float sEnd = k == 0 ? ${glf(R0 * TURNS * TAU)} : ${glf(hxStairs.endTwin)};
+        float n = floor((w.y - yOff - lin) / ${glf(PITCH)});
+        for (int j = 0; j < 2; j++) {
+          float th = phi + (n + float(j)) * ${glf(TAU)};
+          ao *= hxSlabAO(w.y, ${glf(R0)} * (th - ${glf(THETA0)}), off, yOff, sEnd);
+        }
+      }
+      return ao;
+    }`;
+}
 
 /**
  * Carved detail, painted in the fragment shader so that the low-poly stone stays low-poly.
@@ -404,35 +493,143 @@ const DETAIL_GLSL: Record<Detail, string> = {
       }
       diffuseColor.rgb *= m * (1.0 - 0.3 * joint * fade);
     }`,
-  // The stair: a teal runner with a gold hem and a diamond on every tread, held down by brass
-  // rods, on stone treads with a worn nosing.
+  // The stair: worn sandstone slabs with a rounded nosing, a fluted riser panel and coffered
+  // soffits, under a teal runner with a gold hem and a diamond on every tread, held down by brass
+  // rods. vTile.z says which face: 1 tread, 2 riser, 3 soffit, 4 back, 5 end.
   stair: /* glsl */ `
     if (vTile.z > 0.5) {
+      float kind = vTile.z;
       float lat = abs(vTile.x);
       float v = vTile.y;
       float px = fwidth(vTile.x) * 0.9 + 1e-4;
-      float tread = step(vTile.z, 1.5);
+      float wpx = length(fwidth(vHxW)) * 0.8 + 1e-4;
+      float fine = 1.0 - smoothstep(0.03, 0.15, wpx);
+      float g = hxGrain(vHxW, wpx);
+      float tread = step(kind, 1.5);
+      float ao = 1.0;
       float shade = clamp(dot(diffuseColor.rgb, vec3(0.42)), 0.35, 1.25);
-      vec3 stone = diffuseColor.rgb * (0.94 + 0.06 * hxHash(floor(vHxW.xz * 9.0)));
-      stone *= mix(1.0, 1.12, tread * (1.0 - smoothstep(0.06, 0.1, v)));   // nosing
-      vec3 teal = vec3(0.03, 0.2, 0.34);
-      vec3 gold = vec3(0.98, 0.66, 0.2);
-      vec3 pile = teal * (0.92 + 0.16 * hxHash(floor(vec2(vTile.x * 34.0, v * 50.0))));
-      // hem: two gold lines and a row of pearls between them
-      pile = mix(pile, gold, hxBand(lat, 1.06, 1.2, px));
-      pile = mix(pile, gold * 0.8, hxBand(lat, 0.86, 0.9, px));
-      vec2 pearl = vec2(lat - 0.98, (fract(v * 4.0) - 0.5) * 0.34);
-      pile = mix(pile, vec3(1.0, 0.9, 0.72), tread * (1.0 - smoothstep(0.04, 0.04 + px, length(pearl))));
-      // the diamond, a smaller crimson one inside it
-      float dm = lat / 0.52 + abs(v - 0.5) / 0.4;
-      pile = mix(pile, gold, tread * (1.0 - smoothstep(1.0 - px * 2.5, 1.0 + px * 2.5, dm)));
-      pile = mix(pile, vec3(0.62, 0.1, 0.12), tread * (1.0 - smoothstep(0.62 - px * 2.5, 0.62 + px * 2.5, dm)));
-      pile = mix(pile, gold, tread * (1.0 - smoothstep(0.2 - px * 2.5, 0.2 + px * 2.5, dm)));
-      // on the risers the runner is plain, with a brass rod pinning it at the foot
-      float rod = (1.0 - tread) * hxBand(v, 0.43, 0.53, 0.01) * (1.0 - smoothstep(1.5, 1.5 + px, lat));
-      float runner = 1.0 - smoothstep(1.28 - px, 1.28 + px, lat);
-      diffuseColor.rgb = mix(stone, pile * shade * 1.5, runner);
-      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(1.25, 0.8, 0.28) * (0.7 + 0.6 * sin(v * 62.0)), rod);
+      vec3 stone = diffuseColor.rgb * hxTint(vHxW) * (1.0 + 0.1 * g);
+      hxH += 0.0035 * g;
+      if (kind < 1.5) {
+        float vm = v * 1.37;                                   // metres back from the nose
+        float nose = max(0.0, 1.0 - vm / 0.1);
+        hxH -= 0.06 * nose * nose;                             // the bullnose rolls over
+        stone *= 1.0 + 0.1 * hxBand(vm, 0.04, 0.12, wpx);       // worn bright lip
+        ao *= mix(0.55, 1.0, smoothstep(1.37, 1.05, vm));       // where the next riser rises
+      } else if (kind < 2.5) {
+        float vm = v * ${glf(THICK)};                          // metres down from the nose
+        float nose = max(0.0, 1.0 - vm / 0.09);
+        hxH -= 0.06 * nose * nose;
+        float scotia = hxBand(vm, 0.1, 0.15, wpx);              // a shadowed groove under the nose
+        hxH -= 0.02 * scotia;
+        ao *= 1.0 - 0.4 * scotia;
+        // a sunk panel of flutes on the stone either side of the runner
+        float panel = hxBand(vm, 0.2, 0.44, wpx) * smoothstep(1.45, 1.5, lat);
+        float flute = cos(lat * ${glf(TAU / 0.16)});
+        hxH += panel * (0.006 * flute * fine - 0.012);
+        stone *= 1.0 - panel * (0.1 - 0.06 * flute * fine);
+        ao *= mix(0.45, 1.0, smoothstep(0.53, 0.3, vm));        // foot, against the tread below
+      } else if (kind < 3.5) {
+        float vm = v * 1.37;
+        float cell = (fract(vTile.x / 1.05 + 0.5) - 0.5) * 1.05;
+        vec2 q = abs(vec2(cell, vm - 0.74));
+        float sd = max(q.x - 0.36, q.y - 0.42);                  // < 0 inside the coffer
+        float rim = smoothstep(0.0, 0.07, -sd);
+        hxH -= 0.06 * rim;
+        stone *= mix(1.06, 0.8, rim);
+        ao *= mix(1.0, 0.72, rim * (1.0 - smoothstep(0.07, 0.24, -sd)));
+        float b = length(vec2(cell, vm - 0.74)) / 0.1;           // a rosette boss in each coffer
+        hxH += 0.05 * sqrt(max(0.0, 1.0 - b * b));
+        float petals = 0.85 + 0.15 * cos(atan(vm - 0.74, cell) * 8.0);
+        stone = mix(stone, vec3(0.86, 0.52, 0.22) * petals, 1.0 - smoothstep(1.0 - wpx * 10.0, 1.0, b));
+        ao *= mix(0.45, 1.0, smoothstep(0.1, 0.5, vm));          // corner with the slab below
+      } else if (kind < 4.5) {
+        float vm = v * ${glf(THICK)};
+        ao *= mix(0.5, 1.0, smoothstep(0.52, 0.75, vm));         // corner with the soffit above
+        float edge = max(0.0, (vm - 0.86) / 0.09);
+        hxH -= 0.05 * edge * edge;
+      } else {
+        float vm = v * ${glf(THICK)};
+        float top = max(0.0, 1.0 - vm / 0.09);
+        float bot = max(0.0, (vm - 0.86) / 0.09);
+        hxH -= 0.06 * (top * top + bot * bot);
+        float bead = hxBand(vm, 0.15, 0.19, wpx);
+        hxH -= 0.015 * bead;
+        ao *= 1.0 - 0.35 * bead;
+      }
+      ao *= mix(0.45, 1.0, smoothstep(3.0, 4.9, length(vHxW.xz)));   // where it meets the newel
+      if (kind < 2.5) {
+        vec3 teal = vec3(0.03, 0.2, 0.34);
+        vec3 gold = vec3(0.98, 0.66, 0.2);
+        vec3 pile = teal * (0.92 + 0.16 * hxHash(floor(vec2(vTile.x * 34.0, v * 50.0))));
+        // hem: two gold lines and a row of pearls between them
+        pile = mix(pile, gold, hxBand(lat, 1.06, 1.2, px));
+        pile = mix(pile, gold * 0.8, hxBand(lat, 0.86, 0.9, px));
+        vec2 pearl = vec2(lat - 0.98, (fract(v * 4.0) - 0.5) * 0.34);
+        pile = mix(pile, vec3(1.0, 0.9, 0.72), tread * (1.0 - smoothstep(0.04, 0.04 + px, length(pearl))));
+        // the diamond, a smaller crimson one inside it
+        float dm = lat / 0.52 + abs(v - 0.5) / 0.4;
+        pile = mix(pile, gold, tread * (1.0 - smoothstep(1.0 - px * 2.5, 1.0 + px * 2.5, dm)));
+        pile = mix(pile, vec3(0.62, 0.1, 0.12), tread * (1.0 - smoothstep(0.62 - px * 2.5, 0.62 + px * 2.5, dm)));
+        pile = mix(pile, gold, tread * (1.0 - smoothstep(0.2 - px * 2.5, 0.2 + px * 2.5, dm)));
+        // on the risers the runner is plain, with a brass rod pinning it at the foot
+        float rod = (1.0 - tread) * hxBand(v, 0.43, 0.53, 0.01) * (1.0 - smoothstep(1.5, 1.5 + px, lat));
+        float runner = 1.0 - smoothstep(1.28 - px, 1.28 + px, lat);
+        stone = mix(stone, pile * shade * 1.5, runner);
+        stone = mix(stone, vec3(1.25, 0.8, 0.28) * (0.7 + 0.6 * sin(v * 62.0)), rod);
+      }
+      diffuseColor.rgb = stone * ao;
+    }`,
+  // The newel: ashlar courses with pillowed, worn edges, and a carved band of beads running down
+  // each of the barley-sugar grooves. Laid out in the column's own (turning) coordinates.
+  column: /* glsl */ `
+    {
+      vec3 p = vHxL;
+      float wpx = length(fwidth(vHxW)) * 0.8 + 1e-4;
+      float fade = 1.0 - smoothstep(0.03, 0.2, wpx);
+      float g = hxGrain(p, wpx);
+      vec3 m = hxTint(p) * (1.0 + 0.1 * g);
+      hxH += 0.0035 * g;
+      float phi = atan(p.z, p.x);
+      float ga = (fract((phi + p.y * 0.2) * ${glf(4 / TAU)}) - 0.5) * ${glf(TAU)}; // 0 in a groove
+      float dg = ga * 0.68;                               // metres across the groove
+      if (abs(dg) < 0.21) {
+        // sunk 4 cm, the same depth the ashlar's pillowed edges fall to, so the two meet cleanly
+        float by = (fract(p.y / 0.3) - 0.5) * 0.3 * 1.13;
+        float d = length(vec2(dg, by)) / 0.125;
+        float bead = sqrt(max(0.0, 1.0 - d * d));
+        hxH += 0.07 * bead - 0.04;
+        m *= mix(0.62, 1.12, smoothstep(0.0, 0.5, bead));
+        float fillet = hxBand(abs(dg), 0.165, 0.21, wpx);
+        m *= 1.0 + 0.12 * fillet;
+      } else {
+        float row = floor(p.y / 0.52);
+        float bx = phi * ${glf(18 / TAU)} + 0.5 * mod(row, 2.0);
+        float fy = fract(p.y / 0.52), fx = fract(bx);
+        float jd = min(min(fy, 1.0 - fy) * 0.52, min(fx, 1.0 - fx) * 1.05);   // metres to a joint
+        jd = min(jd, abs(dg) - 0.21);                        // the band's edge is a joint too
+        float pillow = max(0.0, 1.0 - jd / 0.08);
+        hxH -= 0.04 * pillow * pillow;
+        float jw = max(0.012, wpx * 0.7);
+        float joint = 1.0 - smoothstep(jw * 0.5, jw + wpx, jd);
+        m *= (0.88 + 0.18 * hxHash(vec2(floor(bx), row))) * (1.0 - 0.45 * joint * fade) * (1.0 - 0.12 * pillow * fade);
+      }
+      diffuseColor.rgb *= m * hxStairAO(vHxW);
+    }`,
+  // turned lamp posts and balusters: grain only, their banding is in the geometry
+  post: /* glsl */ `
+    {
+      float wpx = length(fwidth(vHxW)) * 0.8 + 1e-4;
+      float g = hxGrain(vHxW, wpx);
+      diffuseColor.rgb *= hxTint(vHxW) * (1.0 + 0.05 * g);
+      hxH += 0.0008 * g;
+    }`,
+  // the lamp globes: a hot core that falls off to a warm amber limb, so they read as spheres
+  globe: /* glsl */ `
+    {
+      float ndv = abs(dot(normalize(vHxN), normalize(cameraPosition - vHxW)));
+      diffuseColor.rgb *= mix(vec3(0.72, 0.5, 0.42), vec3(1.25, 1.12, 1.02), pow(ndv, 0.8));
+      diffuseColor.rgb += vec3(0.5, 0.35, 0.18) * pow(ndv, 6.0);
     }`,
 };
 
@@ -440,7 +637,10 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
   mat.onBeforeCompile = (s) => {
     s.uniforms.uHxT = hxTime;
     s.vertexShader = s.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vHxW;\nattribute vec3 aTile;\nvarying vec3 vTile;")
+      .replace(
+        "#include <common>",
+        "#include <common>\nvarying vec3 vHxW;\nvarying vec3 vHxL;\nvarying vec3 vHxN;\nattribute vec3 aTile;\nvarying vec3 vTile;",
+      )
       .replace(
         "#include <fog_vertex>",
         /* glsl */ `#include <fog_vertex>
@@ -449,6 +649,12 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
           hxp = instanceMatrix * hxp;
         #endif
         vHxW = (modelMatrix * hxp).xyz;
+        vHxL = transformed;
+        vec3 hxn = normal;
+        #ifdef USE_INSTANCING
+          hxn = mat3(instanceMatrix) * hxn;
+        #endif
+        vHxN = mat3(modelMatrix) * hxn;
         vTile = aTile;`,
       );
     s.fragmentShader = s.fragmentShader
@@ -456,16 +662,68 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
         "#include <common>",
         /* glsl */ `#include <common>
         varying vec3 vHxW;
+        varying vec3 vHxL;
+        varying vec3 vHxN;
         varying vec3 vTile;
         uniform float uHxT;
         vec3 hxGlow = vec3(0.0);
+        float hxH = 0.0; // carved height (metres) the bumped details write; the normal follows it
         float hxHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        /** integer lattice hash: exact, so the two sides of a cell wall always agree */
+        float hxH3(ivec3 c) {
+          uvec3 u = uvec3(c);
+          uint h = (u.x * 1597334677u) ^ (u.y * 3812015801u) ^ (u.z * 2798796415u);
+          h ^= h >> 15;
+          h *= 2246822519u;
+          h ^= h >> 13;
+          return float(h) * 2.3283064e-10;
+        }
+        float hxN3(vec3 p) {
+          vec3 fl = floor(p);
+          ivec3 i = ivec3(fl);
+          vec3 f = p - fl;
+          f = f * f * (3.0 - 2.0 * f);
+          const ivec2 o = ivec2(1, 0);
+          return mix(
+            mix(mix(hxH3(i), hxH3(i + o.xyy), f.x), mix(hxH3(i + o.yxy), hxH3(i + o.xxy), f.x), f.y),
+            mix(mix(hxH3(i + o.yyx), hxH3(i + o.xyx), f.x), mix(hxH3(i + o.yxx), hxH3(i + o.xxx), f.x), f.y),
+            f.z);
+        }
+        /** the grain's base octave, kept for hxTint so the bedding costs no second noise */
+        float hxBed = 0.5;
+        /** sandstone grain, about -1..1; the finer octaves dissolve once a pixel covers them */
+        float hxGrain(vec3 p, float px) {
+          hxBed = hxN3(p * 0.6 + 7.0);
+          float g = (hxBed - 0.5) * 0.6;
+          if (px < 0.12) g += (hxN3(p * 7.0) - 0.5) * (1.0 - smoothstep(0.03, 0.12, px));
+          if (px < 0.04) g += (hxN3(p * 31.0) - 0.5) * 0.6 * (1.0 - smoothstep(0.01, 0.04, px));
+          return g * 1.6;
+        }
+        /** slow drift between paler and ruddier beds of stone (call hxGrain first) */
+        vec3 hxTint(vec3 p) {
+          return mix(vec3(1.05, 1.0, 0.94), vec3(0.97, 0.88, 0.8), hxBed);
+        }
+        ${detail === "column" ? stairAoGlsl() : ""}
         /** 1 on a line of half width 0.035 at distance d from it, antialiased over px */
         float hxLine(float d, float px) { return 1.0 - smoothstep(0.035, 0.035 + px, d); }
         float hxBand(float x, float a, float b, float px) { return smoothstep(a - px, a + px, x) * (1.0 - smoothstep(b - px, b + px, x)); }
         ${SKY_GLSL}`,
       )
       .replace("#include <color_fragment>", "#include <color_fragment>\n" + DETAIL_GLSL[detail])
+      .replace(
+        "#include <normal_fragment_maps>",
+        BUMPED.includes(detail)
+          ? /* glsl */ `#include <normal_fragment_maps>
+          {
+            // Mikkelsen's bump mapping from screen derivatives, in true units (sigmas unnormalised)
+            vec3 sx = dFdx(-vViewPosition), sy = dFdy(-vViewPosition);
+            vec3 r1 = cross(sy, normal), r2 = cross(normal, sx);
+            float det = dot(sx, r1);
+            vec3 grad = sign(det) * (dFdx(hxH) * r1 + dFdy(hxH) * r2);
+            normal = normalize(abs(det) * normal - grad);
+          }`
+          : "#include <normal_fragment_maps>",
+      )
       .replace(
         "#include <tonemapping_fragment>",
         /* glsl */ `
@@ -503,6 +761,10 @@ interface Assets {
   doorBack: BufferGeometry;
   doorPortal: BufferGeometry;
   stone: MeshLambertMaterial;
+  columnMat: MeshLambertMaterial;
+  postMat: MeshLambertMaterial;
+  post: BufferGeometry;
+  postM: Float32Array;
   wallMat: MeshLambertMaterial;
   stairMat: MeshLambertMaterial;
   koi: Koi;
@@ -542,6 +804,7 @@ function getAssets(): Assets {
 
   const sq = new Quads();
   const balusters: number[] = [];
+  const posts: number[] = [];
   const lanterns: number[] = [];
   const lanternPos: number[] = [];
   const rp: number[] = [], rn: number[] = [], rc: number[] = [], ri: number[] = [];
@@ -570,6 +833,14 @@ function getAssets(): Assets {
     dummy.updateMatrix();
     balusters.push(...dummy.matrix.elements);
   };
+  /** a turned lamp post, POST_H tall, standing at v */
+  const pushPost = (v: V3, size = 1) => {
+    dummy.position.set(v[0], v[1], v[2]);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(size, 1, size);
+    dummy.updateMatrix();
+    posts.push(...dummy.matrix.elements);
+  };
   const pushLantern = (x: number, y: number, z: number, size: number) => {
     dummy.position.set(x, y, z);
     dummy.scale.setScalar(size);
@@ -592,14 +863,15 @@ function getAssets(): Assets {
     const wi0 = -innerW(s0 - nose), wo0 = halfW(s0 - nose), wi1 = -innerW(s1), wo1 = halfW(s1);
     sq.quad(i0, o0, o1, i1, ctr, tone, 0.5, 1, 1, 0.5, [[wi0, 0, 1], [wo0, 0, 1], [wo1, 1, 1], [wi1, 1, 1]]); // tread
     sq.quad(i0, o0, lo(o0), lo(i0), ctr, SAND, 0.7, 1.1, 0.95, 0.6, [[wi0, 0, 2], [wo0, 0, 2], [wo0, 1, 2], [wi0, 1, 2]]); // riser
-    sq.quad(i1, o1, lo(o1), lo(i1), ctr, SAND, 0.6, 1.1, 0.8, 0.45); // back
-    sq.quad(o0, o1, lo(o1), lo(o0), ctr, SAND, 1, 1, 0.8, 0.8); // outer end
-    sq.quad(i0, i1, lo(i1), lo(i0), ctr, SAND, 0.6, 0.6, 0.5, 0.5); // inner end
-    sq.quad(lo(i0), lo(o0), lo(o1), lo(i1), ctr, tone, 0.7, 1.25, 1.1, 0.6); // soffit
+    sq.quad(i1, o1, lo(o1), lo(i1), ctr, SAND, 0.6, 1.1, 0.8, 0.45, [[wi1, 0, 4], [wo1, 0, 4], [wo1, 1, 4], [wi1, 1, 4]]); // back
+    sq.quad(o0, o1, lo(o1), lo(o0), ctr, SAND, 1, 1, 0.8, 0.8, [[0, 0, 5], [1, 0, 5], [1, 1, 5], [0, 1, 5]]); // outer end
+    sq.quad(i0, i1, lo(i1), lo(i0), ctr, SAND, 0.6, 0.6, 0.5, 0.5, [[0, 0, 5], [1, 0, 5], [1, 1, 5], [0, 1, 5]]); // inner end
+    sq.quad(lo(i0), lo(o0), lo(o1), lo(i1), ctr, tone, 0.7, 1.15, 1.05, 0.6, [[wi0, 0, 3], [wo0, 0, 3], [wo1, 1, 3], [wi1, 1, 3]]); // soffit
     if (i === nSteps) continue;
     const sm = s0 + TREAD / 2;
     const post = i % 6 === (main ? 3 : 0) && sm < END - 6;
-    pushBaluster(edge(sm, 1, top, 0.22), post ? 2.25 : 1.45 + (heightAt(sm) - top));
+    if (post) pushPost(edge(sm, 1, top, 0.22));
+    else pushBaluster(edge(sm, 1, top, 0.22), 1.45 + (heightAt(sm) - top));
     if (post) {
       const e = edge(sm, 1, top + 2.5, 0.22);
       pushLantern(e[0], e[1], e[2], 1);
@@ -610,10 +882,15 @@ function getAssets(): Assets {
   if (main) {
     for (const side of [-1, 1]) {
       const e = edge(END - 1.6, side, heightAt(END) + 2.5, 0.22);
-      pushBaluster([e[0], heightAt(END), e[2]], 2.25);
+      pushPost([e[0], heightAt(END), e[2]], 1.1);
       pushLantern(e[0], e[1], e[2], 1.15);
     }
     HEND = heightAt(END);
+    hxStairs.endMain = END;
+    hxStairs.offMain = END - nSteps * TREAD;
+  } else {
+    hxStairs.endTwin = END;
+    hxStairs.offTwin = END - nSteps * TREAD;
   }
 
   // ---- hand rails: swept tubes ----
@@ -659,7 +936,7 @@ function getAssets(): Assets {
 
   // ---- central column: a solomonic (barley-sugar) shaft, wound against the stair ----
   const colY0 = HEND - 160, colY1 = HEND + 150;
-  const CS = 48, CR = Math.ceil((colY1 - colY0) / 0.75);
+  const CS = 112, CR = Math.ceil((colY1 - colY0) / 0.75);
   const LOBES = 4, TWIST = 0.2, DEPTH = 0.4;
   const cp = new Float32Array((CS + 1) * (CR + 1) * 3);
   const cn = new Float32Array(cp.length);
@@ -679,7 +956,7 @@ function getAssets(): Assets {
       const nx = r * c + rTh * s, ny = -r * rY, nz = r * s - rTh * c;
       const nl = Math.hypot(nx, ny, nz);
       cn[k] = nx / nl; cn[k + 1] = ny / nl; cn[k + 2] = nz / nl;
-      const shade = 0.5 + 0.5 * smooth(-1, 0.6, Math.cos(ph));
+      const shade = 0.62 + 0.38 * smooth(-1, 0.6, Math.cos(ph));
       cc[k] = IVORY[0] * shade; cc[k + 1] = IVORY[1] * shade; cc[k + 2] = IVORY[2] * shade;
       if (i < CS && j < CR) {
         const a = j * (CS + 1) + i, b = a + CS + 1;
@@ -857,11 +1134,13 @@ function getAssets(): Assets {
   const stone = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "strata");
   const wallMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "wall");
   const stairMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "stair");
+  const columnMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "column");
+  const postMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "post");
   // between the stair's flare and the arcade, from far below the camera's start to above the door
   const koi = createKoi({
     count: 84, rMin: 18.5, rMax: 33, yMid: HEND - 22, yRange: 150, fogNear: FOG_NEAR, fogFar: FOG_FAR, skyGlsl: SKY_GLSL,
   });
-  const glow = withVoidFog(new MeshBasicMaterial({ color: new Color(1.35, 0.6, 0.16) }));
+  const glow = withVoidFog(new MeshBasicMaterial({ color: new Color(1.35, 0.6, 0.16) }), "globe");
   const skyMat = new ShaderMaterial({
     side: BackSide,
     depthWrite: false,
@@ -919,12 +1198,14 @@ function getAssets(): Assets {
 
   cache = {
     path, track: buildCameraTrack(path), stairs, rails, column, wall, satellite,
-    baluster: tint(new CylinderGeometry(0.055, 0.075, 1, 5, 1, true).translate(0, 0.5, 0), () => AMBER),
-    lantern: new SphereGeometry(0.22, 10, 8),
+    baluster: lathe(BALUSTER_PROFILE, 7),
+    post: lathe(POST_PROFILE, 20),
+    lantern: new SphereGeometry(0.22, 28, 16),
     sky: new SphereGeometry(1200, 24, 16),
     points, doorFrame, doorBack, doorPortal,
-    stone, wallMat, stairMat, koi, glow, skyMat, pointsMat,
+    stone, columnMat, postMat, wallMat, stairMat, koi, glow, skyMat, pointsMat,
     balusterM: new Float32Array(balusters),
+    postM: new Float32Array(posts),
     lanternM: new Float32Array(lanterns),
     wallM: new Float32Array(wallM),
     satellites, doorPos, doorYaw,
@@ -952,10 +1233,11 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     const sky = new Mesh(A.sky, A.skyMat);
     sky.frustumCulled = false;
     sky.renderOrder = -10;
-    const column = new Mesh(A.column, A.stone);
+    const column = new Mesh(A.column, A.columnMat);
     const stairs = new Mesh(A.stairs, A.stairMat);
     const rails = new Mesh(A.rails, A.stone);
-    const balusters = instanced(A.baluster, A.stone, A.balusterM);
+    const balusters = instanced(A.baluster, A.postMat, A.balusterM);
+    const postMesh = instanced(A.post, A.postMat, A.postM);
     const lanterns = instanced(A.lantern, A.glow, A.lanternM);
     const wall = instanced(A.wall, A.wallMat, A.wallM);
     const sats = new InstancedMesh(A.satellite, A.stone, A.satellites.length);
@@ -967,8 +1249,8 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     door.rotation.y = A.doorYaw;
     const portal = new Mesh(A.doorPortal, portalMaterial);
     door.add(new Mesh(A.doorFrame, A.stone), new Mesh(A.doorBack, A.stone), portal);
-    root.add(sky, column, stairs, rails, balusters, lanterns, wall, sats, A.koi.mesh, points, door);
-    return { A, root, sky, column, sats, instancedMeshes: [balusters, lanterns, wall, sats] };
+    root.add(sky, column, stairs, rails, balusters, postMesh, lanterns, wall, sats, A.koi.mesh, points, door);
+    return { A, root, sky, column, sats, instancedMeshes: [balusters, postMesh, lanterns, wall, sats] };
   }, [portalMaterial]);
 
   useEffect(() => () => rig.instancedMeshes.forEach((m) => m.dispose()), [rig]);
