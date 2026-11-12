@@ -13,7 +13,9 @@ import {
  *
  * Every fish is placed in the vertex shader from its instance attributes and the scene clock, so
  * the school is a pure function of `uT`. Fish also keep out of a cone in front of the camera
- * (`uEye` / `uFwd`): they may drift alongside, but never onto the line of flight.
+ * (`uEye` / `uFwd`): they may drift alongside, but never onto the line of flight. And they swim
+ * round whatever stands in their water (`keepOut`: the bridges and the arch), by swelling their
+ * orbit outwards as they pass it.
  */
 
 const TAU = Math.PI * 2;
@@ -135,6 +137,20 @@ export interface KoiOptions {
   fogFar: number;
   /** GLSL that defines `vec3 hxSky(vec3 dir)` */
   skyGlsl: string;
+  /**
+   * Things standing in the school's water. Each is a span of angle about the shaft's axis
+   * (`angle` = atan2(z, x), give or take `halfAngle`) and of height; fish passing through it are
+   * moved out to radius `r`, and ease out and back over as much again on either side.
+   */
+  keepOut?: KeepOut[];
+}
+
+export interface KeepOut {
+  angle: number;
+  halfAngle: number;
+  y: number;
+  halfY: number;
+  r: number;
 }
 
 export interface Koi {
@@ -152,12 +168,24 @@ export function createKoi(o: KoiOptions): Koi {
   for (let i = 0; i < o.count; i++) {
     const r = o.rMin + (o.rMax - o.rMin) * rand() ** 0.8;
     const size = 2.3 + 3.4 * rand() ** 1.7;
-    orbit.set([r, rand() * TAU, rand() * o.yRange, -(1.1 + rand() * 1.5) / r], i * 4);
+    // anticlockwise seen from below: against the stair, which climbs anticlockwise seen from above
+    orbit.set([r, rand() * TAU, rand() * o.yRange, (1.1 + rand() * 1.5) / r], i * 4);
     fish.set([size, rand() * TAU, rand(), 0.35 + rand() * 0.75], i * 4);
   }
   geometry.setAttribute("aOrbit", new InstancedBufferAttribute(orbit, 4));
   geometry.setAttribute("aFish", new InstancedBufferAttribute(fish, 4));
   geometry.instanceCount = o.count;
+
+  const gl = (x: number) => x.toFixed(4);
+  const keepOut = (o.keepOut ?? [])
+    .map(
+      (k) => /* glsl */ `{
+          float da = abs(mod(ang - ${gl(k.angle)} + ${gl(Math.PI)}, ${gl(TAU)}) - ${gl(Math.PI)});
+          float w = (1.0 - smoothstep(${gl(k.halfAngle)}, ${gl(k.halfAngle * 2 + 0.2)}, da)) * (1.0 - smoothstep(${gl(k.halfY)}, ${gl(k.halfY * 2)}, abs(cy - ${gl(k.y)})));
+          r += max(0.0, ${gl(k.r)} - r) * w;
+        }`,
+    )
+    .join("\n");
 
   const material = new ShaderMaterial({
     side: DoubleSide,
@@ -180,7 +208,10 @@ export function createKoi(o: KoiOptions): Koi {
         // the wrap happens far below and far above; fish shrink to nothing there
         float grow = smoothstep(0.0, 10.0, yy) * smoothstep(${o.yRange.toFixed(1)}, ${(o.yRange - 10).toFixed(1)}, yy);
         float r = aOrbit.x + 1.4 * sin(uT * 0.21 + aFish.y * 3.0);
-        vec3 c = vec3(r * cos(ang), ${(o.yMid - o.yRange / 2).toFixed(1)} + yy + 0.7 * sin(uT * 0.6 + aFish.y), r * sin(ang));
+        float cy = ${(o.yMid - o.yRange / 2).toFixed(1)} + yy + 0.7 * sin(uT * 0.6 + aFish.y);
+        // swim round what stands in the water
+        ${keepOut}
+        vec3 c = vec3(r * cos(ang), cy, r * sin(ang));
 
         // keep the line of flight clear: nudge the fish out of a cone ahead of the camera
         vec3 rel = c - uEye;
