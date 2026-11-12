@@ -31,10 +31,18 @@ export interface GardenOptions {
   rnd: () => number;
   /** GLSL defining `vec3 applyFog(vec3 colour, float distance)` */
   fogGlsl: string;
+  /** the scene's sun, pointing towards it */
+  sun: { x: number; y: number; z: number };
+  /** a cast-shadow material around the given vertex shader, which sets vW and vA (see dollhouse.tsx) */
+  shadowMaterial: (vertexShader: string) => ShaderMaterial;
 }
 
 export interface Garden {
   root: Group;
+  /** each flower drift: centre and radius, for the contact shadow under it */
+  drifts: { x: number; z: number; r: number }[];
+  /** foot of each pinwheel stalk */
+  pinwheels: { x: number; z: number; size: number }[];
   update(t: number): void;
   dispose(): void;
 }
@@ -53,10 +61,11 @@ const FRAGMENT = (fogGlsl: string, flat: boolean) => /* glsl */ `
         ? /* glsl */ `
     // folded paper: every facet takes its own share of the sun
     vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
-    col *= 0.78 + 0.22 * abs(dot(n, normalize(vec3(0.45, 0.6, 0.75))));`
+    col *= 0.62 + 0.5 * abs(dot(n, normalize(vec3(0.45, 0.6, 0.75))));`
         : ""
     }
     gl_FragColor = vec4(applyFog(col, length(cameraPosition - vW)), 1.0);
+    #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }`;
 
@@ -70,9 +79,12 @@ function geometry(pos: number[], part: number[]) {
 export function createGarden(o: GardenOptions): Garden {
   const { rnd, ground } = o;
   const root = new Group();
+  const drifts: Garden["drifts"] = [];
+  const pinwheels: Garden["pinwheels"] = [];
   const materials: ShaderMaterial[] = [];
   const geometries: InstancedBufferGeometry[] = [];
   const add = (g: InstancedBufferGeometry, m: ShaderMaterial) => {
+    if (!m.uniforms.uT) m.uniforms.uT = { value: 0 };
     const mesh = new Mesh(g, m as Material);
     mesh.frustumCulled = false;
     root.add(mesh);
@@ -124,6 +136,7 @@ export function createGarden(o: GardenOptions): Garden {
       const spread = 1.2 + rnd() * 3.5;
       const size = 0.2 + rnd() * 0.3;
       const k = Math.min(COUNT - n, 10 + Math.floor(rnd() * 40));
+      if (Math.hypot(cx, cz) > 8.6 + spread) drifts.push({ x: cx, z: cz, r: spread });
       for (let i = 0; i < k; i++) {
         const b = rnd() * TAU;
         const r = spread * Math.sqrt(rnd());
@@ -156,7 +169,7 @@ export function createGarden(o: GardenOptions): Garden {
           float gust = sin(uT * 1.4 + aPlace.x * 0.22 + aPlace.z * 0.17) + 0.4 * sin(uT * 3.1 + aLook.w);
           p.x += 0.16 * gust * position.y * position.y;
           vW = aPlace.xyz + p * aPlace.w;
-          vCol = aPart < 0.5 ? vec3(0.5, 0.74, 0.58) : aPart < 1.5 ? aLook.rgb * (0.84 + 0.22 * length(position.xz)) : vec3(1.0, 0.72, 0.2);
+          vCol = aPart < 0.5 ? vec3(0.3, 0.6, 0.42) * (0.45 + 0.7 * position.y) : aPart < 1.5 ? aLook.rgb * (0.9 + 0.3 * length(position.xz)) * 1.12 : vec3(1.0, 0.62, 0.12);
           gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
         }`),
     );
@@ -203,6 +216,7 @@ export function createGarden(o: GardenOptions): Garden {
       const size = 0.9 + rnd() ** 1.5 * 1.7;
       if (!o.clear(x, z, 4 + size)) continue;
       place.set([x, ground(x, z) + STALK * size - 0.1, z, size], n * 4);
+      pinwheels.push({ x, z, size });
       spin.set([rnd() * TAU, (rnd() < 0.5 ? -1 : 1) * (1.2 + rnd() * 2.6) / size, rnd() * TAU, 0], n * 4);
       hue.set(hues[Math.floor(rnd() * hues.length)]!, n * 3);
       n++;
@@ -211,6 +225,52 @@ export function createGarden(o: GardenOptions): Garden {
     g.setAttribute("aSpin", new InstancedBufferAttribute(spin, 4));
     g.setAttribute("aHue", new InstancedBufferAttribute(hue, 3));
     g.instanceCount = COUNT;
+    // the dune under each pinwheel as a plane (normal, offset), for its shadow
+    const plane = new Float32Array(COUNT * 4);
+    pinwheels.forEach((p, i) => {
+      const e = 1.5;
+      const nx = ground(p.x - e, p.z) - ground(p.x + e, p.z);
+      const nz = ground(p.x, p.z - e) - ground(p.x, p.z + e);
+      const l = Math.hypot(nx, 2 * e, nz);
+      const [ax, ay, az] = [nx / l, (2 * e) / l, nz / l];
+      plane.set([ax, ay, az, ax * p.x + ay * (ground(p.x, p.z) + 0.05) + az * p.z], i * 4);
+    });
+    const sg = new InstancedBufferGeometry();
+    for (const name of ["position", "aPart"]) sg.setAttribute(name, g.getAttribute(name));
+    for (const name of ["aPlace", "aSpin"]) sg.setAttribute(name, g.getAttribute(name));
+    sg.setAttribute("aPlane", new InstancedBufferAttribute(plane, 4));
+    sg.instanceCount = COUNT;
+    const shadowOf = (vs: string) => Object.assign(o.shadowMaterial(vs), { side: DoubleSide });
+    add(
+      sg,
+      shadowOf(/* glsl */ `
+        attribute float aPart;
+        attribute vec4 aPlace;
+        attribute vec4 aSpin;
+        attribute vec4 aPlane; // ground normal, offset
+        uniform float uT;
+        varying vec3 vW;
+        varying float vA;
+        varying vec2 vQ;
+        const vec3 SUN = vec3(${o.sun.x.toFixed(4)}, ${o.sun.y.toFixed(4)}, ${o.sun.z.toFixed(4)});
+        void main() {
+          vec3 p = position;
+          if (aPart > 0.5) {
+            float a = aSpin.z + uT * aSpin.y;
+            float c = cos(a), s = sin(a);
+            p.xy = mat2(c, s, -s, c) * p.xy;
+          }
+          float c = cos(aSpin.x), s = sin(aSpin.x);
+          p.xz = mat2(c, s, -s, c) * p.xz;
+          vec3 w = aPlace.xyz + p * aPlace.w;
+          // flattened onto the dune along the sun; the sails' shadow is a little lighter
+          w -= SUN * (dot(aPlane.xyz, w) - aPlane.w) / dot(aPlane.xyz, SUN);
+          vW = w;
+          vA = aPart < 0.5 ? 1.0 : 0.85;
+          vQ = vec2(0.0);
+          gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+        }`),
+    );
     add(
       g,
       shader(
@@ -314,6 +374,8 @@ export function createGarden(o: GardenOptions): Garden {
 
   return {
     root,
+    drifts,
+    pinwheels,
     update(t) {
       for (const m of materials) m.uniforms.uT!.value = t;
     },
