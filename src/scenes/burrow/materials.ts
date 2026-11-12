@@ -23,19 +23,16 @@ const FOG_GLSL = /* glsl */ `
 const WALL_VERT = /* glsl */ `
   attribute vec2 pat;
   attribute vec3 glow;
-  attribute float hgt;      // height above the local floor: the tunnel climbs and dives
   varying vec3 vW;
   varying vec3 vN;
   varying vec2 vPat;
   varying vec3 vGlow;
-  varying float vH;
   void main() {
     vec4 w = modelMatrix * vec4(position, 1.0);
     vW = w.xyz;
     vN = mat3(modelMatrix) * normal;
     vPat = pat;
     vGlow = glow;
-    vH = hgt;
     gl_Position = projectionMatrix * viewMatrix * w;
   }
 `;
@@ -57,16 +54,13 @@ const WALL_FRAG = /* glsl */ `
   #endif
   #if MODE == 2
     uniform vec2 uC;
-    uniform float uBase;      // level of the chamber's floor
-    uniform vec2 uDoorP[4];   // a point on each corridor's centreline, relative to uC
-    uniform vec2 uDoorT[4];   // the way that corridor runs, out of the chamber
+    uniform vec2 uDoor[4];
     uniform int uDoorN;
   #endif
   varying vec3 vW;
   varying vec3 vN;
   varying vec2 vPat;
   varying vec3 vGlow;
-  varying float vH;
 
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
@@ -82,13 +76,11 @@ const WALL_FRAG = /* glsl */ `
       vec2 rel = vW.xz - uC;
       for (int i = 0; i < 4; i++) {
         if (i >= uDoorN) break;
-        vec2 dr = uDoorT[i];
-        vec2 off = rel - uDoorP[i];
-        // the corridor's outline, carried along the corridor through the near wall only
-        if (dot(off, dr) > -3.0) {
+        vec2 dr = uDoor[i];
+        if (dot(rel, dr) > 0.0) {
           const float K = 0.92;
-          float x = abs(dot(off, vec2(dr.y, -dr.x))) / (${PROFILE.a.toFixed(3)} * K);
-          float Y = (vW.y - uBase - ${PROFILE.hc.toFixed(3)} * K) / K;
+          float x = abs(dot(rel, vec2(dr.y, -dr.x))) / (${PROFILE.a.toFixed(3)} * K);
+          float Y = (vW.y - ${PROFILE.hc.toFixed(3)} * K) / K;
           float n = Y > 0.0 ? ${PROFILE.nUp.toFixed(3)} : ${PROFILE.nLo.toFixed(3)};
           float b = Y > 0.0 ? ${PROFILE.bUp.toFixed(3)} : ${PROFILE.bLo.toFixed(3)};
           if (pow(x, n) + pow(abs(Y) / b, n) < 1.0) discard;
@@ -107,7 +99,7 @@ const WALL_FRAG = /* glsl */ `
     float groove = smoothstep(0.5, 0.2, abs(q));
 
     // albedo: plum floor, coral flanks, magenta vault, pale ribs
-    float h = clamp(vH / uHTop, 0.0, 1.0);
+    float h = clamp(vW.y / uHTop, 0.0, 1.0);
     vec3 plum = vec3(0.09, 0.02, 0.11);
     vec3 coral = vec3(0.80, 0.15, 0.13);
     vec3 magenta = vec3(0.42, 0.03, 0.27);
@@ -208,10 +200,8 @@ export function createCorridorMaterial(shared: Shared, chambers: Chamber[]) {
     defines: { MODE: 1 },
     uniforms: {
       ...wallUniforms(shared, { patScale: [2.1, 13.6], spotK: 13, hTop: 4.6, flutes: 26, scales: [9, 64] }),
-      // A little larger than the chamber: its shell ripples up to 1.2% beyond the spheroid, and a
-      // corridor that meets it at an angle would show through those ripples as slivers.
-      uCh: { value: chambers.map((c) => new Vector4(c.c.x, c.c.z, c.R * 1.03, c.H * 1.03)) },
-      uChY: { value: chambers.map((c) => c.c.y + c.yc) },
+      uCh: { value: chambers.map((c) => new Vector4(c.c.x, c.c.z, c.R, c.H)) },
+      uChY: { value: chambers.map((c) => c.yc) },
     },
     vertexShader: WALL_VERT,
     fragmentShader: WALL_FRAG,
@@ -221,7 +211,10 @@ export function createCorridorMaterial(shared: Shared, chambers: Chamber[]) {
 
 /** chamber shell: doorway-shaped holes are cut where corridors arrive */
 export function createChamberMaterial(shared: Shared, ch: Chamber) {
-  const doors = [0, 1, 2, 3].map((i) => ch.doors[i]);
+  const doors = [0, 1, 2, 3].map((i) => {
+    const d = ch.doors[i];
+    return d ? new Vector2(d.x, d.z) : new Vector2(0, 1);
+  });
   const meridian = (ch.H * Math.PI) / 2 + ch.yc;
   return new ShaderMaterial({
     defines: { MODE: 2 },
@@ -233,9 +226,7 @@ export function createChamberMaterial(shared: Shared, ch: Chamber) {
         scales: [Math.round((Math.PI * 2 * ch.R * 0.8) / ch.ridges / 0.24), Math.round(meridian / 0.21)],
       }),
       uC: { value: new Vector2(ch.c.x, ch.c.z) },
-      uBase: { value: ch.c.y },
-      uDoorP: { value: doors.map((d) => (d ? new Vector2(d.p.x - ch.c.x, d.p.z - ch.c.z) : new Vector2())) },
-      uDoorT: { value: doors.map((d) => (d ? new Vector2(d.t.x, d.t.z) : new Vector2(0, 1))) },
+      uDoor: { value: doors },
       uDoorN: { value: ch.doors.length },
     },
     vertexShader: WALL_VERT,
