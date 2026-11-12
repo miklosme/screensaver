@@ -1,5 +1,5 @@
 import { AdditiveBlending, Color, DoubleSide, ShaderMaterial, Vector2, Vector3, Vector4 } from "three";
-import { PROFILE, type Chamber } from "./build";
+import { PROFILE, PROFILE_LEN, type Chamber } from "./build";
 
 export const FOG_COLOR = new Color(0.085, 0.012, 0.075);
 export const FOG_DENSITY = 0.03;
@@ -27,12 +27,19 @@ const WALL_VERT = /* glsl */ `
   varying vec3 vN;
   varying vec2 vPat;
   varying vec3 vGlow;
+  varying vec3 vSwell;
   void main() {
     vec4 w = modelMatrix * vec4(position, 1.0);
     vW = w.xyz;
     vN = mat3(modelMatrix) * normal;
     vPat = pat;
     vGlow = glow;
+    // slow world-space swells of the skin (low frequency, so per-vertex is enough):
+    // xy stretch the scale lattice so size and spacing drift, z sets how deep the scales are
+    vec3 wp = w.xyz * vec3(0.9, 1.1, 0.9);
+    vSwell = vec3(sin(wp.x * 1.3 + sin(wp.z * 0.9)) + sin(wp.y * 1.7 + wp.z * 0.6),
+                  sin(wp.z * 1.2 + sin(wp.x * 0.8)) + sin(wp.y * 1.1 - wp.x * 0.7),
+                  0.5 + 0.25 * (sin(wp.x * 0.7 + wp.z * 0.5) + sin(wp.z * 0.6 - wp.y * 0.9 + 1.3)));
     gl_Position = projectionMatrix * viewMatrix * w;
   }
 `;
@@ -45,8 +52,8 @@ const WALL_FRAG = /* glsl */ `
   uniform float uRidgeAll;  // > 0 paints the whole surface in the ridge colour (trims)
   uniform float uSpotGain;
   uniform float uRidgeAmt;
-  uniform float uFlutes;
-  uniform vec2 uScales;     // scales per pattern cell (0 = smooth skin)
+  uniform vec2 uScales;     // scale cells per pattern unit (0 = smooth skin)
+  uniform vec2 uPer;        // period of the scale lattice in cells (0 = none), so seams close
   ${FOG_GLSL}
   #if MODE == 1
     uniform vec4 uCh[3];
@@ -61,8 +68,46 @@ const WALL_FRAG = /* glsl */ `
   varying vec3 vN;
   varying vec2 vPat;
   varying vec3 vGlow;
+  varying vec3 vSwell;
 
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  // pcg2d (Jarzynski & Olano): two well mixed random numbers per integer cell, cheaply
+  vec2 hash22(vec2 p) {
+    uvec2 v = uvec2(ivec2(p) + 4096);
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+    v ^= v >> 16u;
+    v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+    v ^= v >> 16u;
+    return vec2(v & 0xffffu) / 65535.0;
+  }
+
+  // packed cells: x = distance to the nearest centre, y = F2 - F1 (how far inside the cell edge),
+  // z, w = two random numbers of the nearest cell
+  vec4 cells(vec2 g) {
+    // only the 2x2 block of cells nearest the point is searched; the jitter is kept small enough
+    // that the two nearest centres almost always lie in it (the world-space warp adds the rest)
+    vec2 id = floor(g - 0.5);
+    vec2 f = g - id;
+    if (uPer.x > 0.0) id.x = mod(id.x, uPer.x);
+    if (uPer.y > 0.0) id.y = mod(id.y, uPer.y);
+    float d1 = 9.0, d2 = 9.0;
+    vec2 r1 = vec2(0.0);
+    for (int j = 0; j <= 1; j++)
+      for (int i = 0; i <= 1; i++) {
+        vec2 o = vec2(float(i), float(j));
+        vec2 c = id + o;
+        if (uPer.x > 0.0 && c.x >= uPer.x) c.x -= uPer.x;
+        if (uPer.y > 0.0 && c.y >= uPer.y) c.y -= uPer.y;
+        vec2 h = hash22(c);
+        vec2 dv = o + 0.22 + 0.56 * h - f;
+        float d = dot(dv, dv);
+        if (d < d1) { d2 = d1; d1 = d; r1 = fract(h * vec2(7.13, 13.7)); }
+        else if (d < d2) { d2 = d; }
+      }
+    d1 = sqrt(d1);
+    return vec4(d1, sqrt(d2) - d1, r1);
+  }
 
   void main() {
     #if MODE == 1
@@ -106,36 +151,95 @@ const WALL_FRAG = /* glsl */ `
     vec3 shell = vec3(0.95, 0.42, 0.33);
     vec3 albedo = mix(plum, coral, smoothstep(0.02, 0.33, h));
     albedo = mix(albedo, magenta, smoothstep(0.42, 1.0, h));
-    albedo = mix(albedo, shell, ridge * uRidgeAmt);
-    albedo *= 0.62 + 0.38 * groove;
-    // fine flutes running along the ribs
-    float flute = 0.5 + 0.5 * cos(vPat.y * uFlutes * 6.2831853);
-    albedo *= 1.0 - 0.3 * flute * flute * (1.0 - ridge * 0.6);
-    // the skin between the ribs is scaled like a lizard's; the scales dissolve with distance
+    albedo = mix(albedo, shell, ridge * uRidgeAmt * 0.75);
+    albedo *= 0.66 + 0.34 * groove;
+
+    // --- living skin: packed scales on the walls, pores on the floor ------------------------
+    vec2 warp = vSwell.xy;
+    float swell = vSwell.z;
+    float fogK = fogAmount(dist);
+    float floorK = 0.0;
+    vec2 g;
+    #if MODE == 3
+      g = vW.xz / 0.24 + warp * 0.55;
+      floorK = 1.0;
+    #else
+      g = vPat * uScales + warp * 0.8;
+      floorK = 1.0 - smoothstep(0.08, 0.5, vW.y);
+    #endif
+    vec2 fwg = fwidth(g);
+    float fw = max(fwg.x, fwg.y);
+    float detail = (1.0 - smoothstep(0.16, 0.42, fw)) * step(0.001, uScales.x + floorK) * (1.0 - smoothstep(0.8, 0.9, fogK));
+    float H = 0.0;          // height of the skin, in world units
+    float edgeLit = 0.0;    // thin, light-bleeding rim of each scale
     float wet = 0.0;
-    if (uScales.x > 0.0) {
-      vec2 sg = vPat * uScales;
-      float sfade = 1.0 - smoothstep(0.12, 0.55, length(fwidth(sg)));
-      sg.x += 0.5 * mod(floor(sg.y), 2.0);
-      vec2 sf = fract(sg) - vec2(0.5, 0.0);
-      float sd = length(sf * vec2(1.0, 1.1));
-      float tone = hash(floor(sg) + 17.0);
-      wet = smoothstep(0.5, 0.15, sd) * sfade * (1.0 - ridge);
-      albedo *= 1.0 + sfade * (1.0 - ridge) * (0.3 * smoothstep(0.6, 0.15, sd) - 0.26 * smoothstep(0.4, 0.56, sd) + 0.16 * (tone - 0.5));
+    float pore = 0.0;
+    float poreGlow = 0.0;
+    if (detail > 0.0) {
+      vec4 c = cells(g);
+      float aa = max(fw, 0.015);
+      float cr = c.z, cr2 = c.w;
+      // scale pad: domed, rounded at its edge, deep groove in between
+      float rim = 0.16 + 0.14 * cr2;
+      float e = clamp(c.y / (rim + aa), 0.0, 1.0);
+      float pad = 1.0 - (1.0 - e) * (1.0 - e);
+      float dome = pad * (1.0 - 0.8 * c.x * c.x);
+      float sH = dome * (0.35 + 0.65 * swell);
+      // floor: flatter tissue with pits; a few pits hold a mint spark
+      float pr = 0.12 + 0.12 * cr2;
+      float pit = 0.0, fH = 0.0;
+      if (floorK > 0.0) {
+        pit = smoothstep(pr + aa, pr * 0.4, c.x);
+        fH = 0.5 * smoothstep(0.0, 0.2 + aa, c.y) - pit;
+      }
+      H = mix(sH, fH, floorK) * 0.035 * detail;
+      edgeLit = (1.0 - floorK) * smoothstep(0.0, 0.025 + aa, c.y) * (1.0 - smoothstep(0.02, 0.6 * rim + aa, c.y)) * detail;
+      wet = mix(pad, 0.4 + 0.6 * (1.0 - pit), floorK) * detail;
+      pore = floorK * pit * detail;
+      poreGlow = pore * step(0.86, cr) * smoothstep(pr * 0.7, 0.0, c.x);
+      // per-scale tint and the shadowed grooves
+      vec3 tint = mix(vec3(1.08, 0.86, 0.95), vec3(0.95, 1.06, 1.0), cr2);
+      float ao = mix(0.25, 1.0, pad);
+      albedo *= mix(vec3(1.0), tint * (0.82 + 0.36 * cr) * ao * mix(1.0, 1.0 - 0.75 * pit, floorK), detail);
     }
 
-    // light: dim ambient, the traveller's lantern, and light baked from the glowing things
-    vec3 light = vec3(0.05, 0.018, 0.07) * (0.7 + 0.3 * n.y);
-    float ndl = max(dot(n, V), 0.0);
-    light += vec3(0.62, 0.34, 0.27) * (0.2 + 0.8 * ndl) / (1.0 + dist * dist / 36.0);
+    // bump normal from the skin height (surface gradient, no tangents needed)
+    vec3 dpx = dFdx(vW), dpy = dFdy(vW);
+    vec3 a1 = cross(dpy, n), a2 = cross(n, dpx);
+    float det = dot(dpx, a1);
+    vec3 sg = sign(det) * (dFdx(H) * a1 + dFdy(H) * a2);
+    vec3 nb = normalize(abs(det) * n - sg);
+
+    // light: dim ambient, the traveller's lantern (wrapped), and light baked from the glowing things
+    float ndl = max(dot(nb, V), 0.0);
+    float wrapL = (dot(nb, V) + 0.4) / 1.4;
+    float lant = 1.0 / (1.0 + dist * dist / 36.0);
+    vec3 light = vec3(0.05, 0.018, 0.07) * (0.7 + 0.3 * nb.y);
+    light += vec3(0.62, 0.34, 0.27) * (0.15 + 0.85 * max(wrapL, 0.0)) * lant;
     light += vGlow * 0.5;
     vec3 col = albedo * light;
-    // every scale is a little wet
-    col += vec3(1.0, 0.7, 0.6) * wet * pow(ndl, 14.0) * 0.5 / (1.0 + dist * dist / 30.0);
+
+    // light bleeding through the thin scale edges: warm transmission, strongest at grazing view
+    float thin = edgeLit * (0.55 + 0.45 * (1.0 - ndl));
+    col += vec3(1.0, 0.24, 0.30) * thin * (0.45 * lant + 0.6 * length(vGlow) + 0.03) * (0.6 + 0.4 * h);
+
+    // wet sheen: a tight lantern glint on every dome plus a fresnel film reflecting the haze
+    float gloss = wet * (0.5 + 0.5 * swell);
+    float n2 = ndl * ndl, n4 = n2 * n2, n8 = n4 * n4, n16 = n8 * n8;
+    col += vec3(1.0, 0.78, 0.7) * gloss * n16 * n16 * n16 * 0.55 / (1.0 + dist * dist / 30.0);
+    col += vec3(1.0, 0.6, 0.55) * gloss * n8 * ndl * 0.06 * lant;
+    float fr = 1.0 - ndl, fr2 = fr * fr;
+    float fres = fr2 * fr2;
+    vec3 env = mix(vec3(0.30, 0.05, 0.22), vec3(0.15, 0.6, 0.45), clamp(length(vGlow) * 1.5, 0.0, 1.0) * 0.5);
+    col += env * fres * gloss * 0.35 * (0.3 + 0.7 * lant);
 
     // velvet rim, picks up the haze
-    float rim = pow(1.0 - ndl, 3.0);
-    col += vec3(0.42, 0.05, 0.30) * rim * (0.05 + 0.16 * length(vGlow) + 0.2 / (1.0 + dist * dist / 60.0));
+    float rimL = pow(1.0 - max(dot(n, V), 0.0), 3.0);
+    col += vec3(0.42, 0.05, 0.30) * rimL * (0.05 + 0.16 * length(vGlow) + 0.2 / (1.0 + dist * dist / 60.0));
+
+    // mint sparks in a few floor pores
+    float tw = 0.55 + 0.45 * sin(uTime * 1.3 + vW.x * 2.1 + vW.z * 1.7);
+    col += vec3(0.1, 0.95, 0.62) * poreGlow * 0.6 * tw;
 
     // bioluminescent pores along the ribs; a slow wave of light runs ahead along the route
     float row = vPat.y * uSpotK;
@@ -151,7 +255,7 @@ const WALL_FRAG = /* glsl */ `
     vec3 spotCol = mix(vec3(0.08, 0.95, 0.62), vec3(1.0, 0.35, 0.55), step(0.9, rnd));
     col += spotCol * (core * 1.1 + halo) * on * pulse * uSpotGain;
 
-    col = mix(col, uFog, fogAmount(dist));
+    col = mix(col, uFog, fogK);
     gl_FragColor = vec4(col, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
@@ -165,9 +269,12 @@ interface WallOptions {
   ridgeAll?: number;
   spotGain?: number;
   ridgeAmt?: number;
-  flutes?: number;
   scales?: [number, number];
+  per?: [number, number];
 }
+
+/** world size of one wall scale */
+const SCALE = 0.23;
 
 function wallUniforms(shared: Shared, o: WallOptions) {
   return {
@@ -178,15 +285,15 @@ function wallUniforms(shared: Shared, o: WallOptions) {
     uRidgeAll: { value: o.ridgeAll ?? 0 },
     uSpotGain: { value: o.spotGain ?? 1 },
     uRidgeAmt: { value: o.ridgeAmt ?? 0.7 },
-    uFlutes: { value: o.flutes ?? 0 },
     uScales: { value: new Vector2(o.scales?.[0] ?? 0, o.scales?.[1] ?? 0) },
+    uPer: { value: new Vector2(o.per?.[0] ?? 0, o.per?.[1] ?? 0) },
   };
 }
 
-/** plain surface (floors, trims) */
+/** plain surface: a chamber floor (pored skin in world xz), or a trim when `ridgeAll` is set */
 export function createTrimMaterial(shared: Shared, o: WallOptions) {
   return new ShaderMaterial({
-    defines: { MODE: 0 },
+    defines: { MODE: o.ridgeAll ? 0 : 3 },
     uniforms: wallUniforms(shared, o),
     vertexShader: WALL_VERT,
     fragmentShader: WALL_FRAG,
@@ -199,7 +306,10 @@ export function createCorridorMaterial(shared: Shared, chambers: Chamber[]) {
   return new ShaderMaterial({
     defines: { MODE: 1 },
     uniforms: {
-      ...wallUniforms(shared, { patScale: [2.1, 13.6], spotK: 13, hTop: 4.6, flutes: 26, scales: [9, 64] }),
+      ...wallUniforms(shared, (() => {
+        const around = Math.round(PROFILE_LEN / SCALE);
+        return { patScale: [2.1, PROFILE_LEN], spotK: 13, hTop: 4.6, scales: [2.1 / SCALE, around], per: [0, around] } as WallOptions;
+      })()),
       uCh: { value: chambers.map((c) => new Vector4(c.c.x, c.c.z, c.R, c.H)) },
       uChY: { value: chambers.map((c) => c.yc) },
     },
@@ -223,7 +333,8 @@ export function createChamberMaterial(shared: Shared, ch: Chamber) {
         patScale: [(Math.PI * 2 * ch.R * 0.8) / ch.ridges, meridian],
         spotK: Math.round(meridian / 1.1),
         hTop: ch.yc + ch.H,
-        scales: [Math.round((Math.PI * 2 * ch.R * 0.8) / ch.ridges / 0.24), Math.round(meridian / 0.21)],
+        scales: [Math.round((Math.PI * 2 * ch.R * 0.8) / ch.ridges / SCALE), Math.round(meridian / SCALE)],
+        per: [Math.round((Math.PI * 2 * ch.R * 0.8) / ch.ridges / SCALE) * ch.ridges, 0],
       }),
       uC: { value: new Vector2(ch.c.x, ch.c.z) },
       uDoor: { value: doors },
