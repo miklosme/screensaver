@@ -5,16 +5,18 @@ import {
   BufferGeometry,
   CatmullRomCurve3,
   Color,
+  CustomBlending,
   CylinderGeometry,
+  DstColorFactor,
   ExtrudeGeometry,
   DoubleSide,
   FrontSide,
   InstancedMesh,
   Matrix4,
-  MeshBasicMaterial,
   MeshLambertMaterial,
   Object3D,
   Path,
+  Quaternion,
   PlaneGeometry,
   ShaderMaterial,
   Shape,
@@ -22,6 +24,7 @@ import {
   SphereGeometry,
   TorusGeometry,
   Vector3,
+  ZeroFactor,
   type Group,
 } from "three";
 import { RAIL, RAIL_LEAD_IN, RAIL_LEAD_OUT, createRide } from "./rail";
@@ -39,13 +42,15 @@ import { createGarden } from "./dollhouse/garden";
  */
 
 // ───────────────────────────── palette ─────────────────────────────
-const HORIZON = "#fdebd6";
-const FOG_NEAR = 70;
-const FOG_FAR = 400;
+const HORIZON = "#fdd2b8";
+// the haze starts well past the garden, so near props keep their full colour and only the far
+// dunes fade to peach
+const FOG_NEAR = 95;
+const FOG_FAR = 430;
 const SUN_DIR = new Vector3(0.45, 0.6, 0.75).normalize();
 const glc = (hex: string) => `vec3(${new Color(hex).toArray().map((v) => v.toFixed(4)).join(",")})`;
 const CREAM = "#fdeccd";
-const SHADOW = new Color(CREAM).multiply(new Color().setRGB(0.74, 0.68, 0.86));
+const glv = (v: Vector3) => `vec3(${v.x.toFixed(4)},${v.y.toFixed(4)},${v.z.toFixed(4)})`;
 
 // ───────────────────────────── helpers ─────────────────────────────
 function mulberry32(seed: number) {
@@ -213,11 +218,30 @@ const clearOf = (pathPts: Vector3[]) => (x: number, z: number, r: number) => {
 };
 
 /**
- * Paints a pattern onto a Lambert material in the object space of each instance, so that no two
- * trees, domes or hoops need be alike. `glsl` may read vOb (object position) and vSeed (0..1 per
- * instance), and mixes `second(colour)` into diffuseColor where its pattern goes.
+ * One sun for everything. Props are lit by a wrapped (half-Lambert) warm key and a cool lavender
+ * fill, so the side turned from the sun goes lavender rather than grey; the ground uses the same
+ * light, and a cast shadow is the ground lit by the fill alone.
  */
-function patterned(mat: MeshLambertMaterial, key: string, glsl: string) {
+const SUN_GLSL = /* glsl */ `
+  const vec3 SUN = ${glv(SUN_DIR)};
+  const vec3 KEY = vec3(1.0, 0.83, 0.62) * 1.12;
+  const vec3 FILL = vec3(0.6, 0.57, 0.95) * 0.46;
+  const vec3 BOUNCE = vec3(1.0, 0.7, 0.55) * 0.1;
+  /** lit: 1 in the sun, 0 in shadow */
+  vec3 sunLight(vec3 n, float lit) {
+    float w = clamp(dot(n, SUN) * 0.5 + 0.5, 0.0, 1.0);
+    float up = n.y * 0.5 + 0.5;
+    return FILL * (0.72 + 0.28 * up) + BOUNCE * (1.0 - up) + KEY * (w * w * lit);
+  }
+`;
+
+/**
+ * Lights a Lambert material with the scene's sun and paints a pattern onto it in the object space
+ * of each instance, so that no two trees, domes or hoops need be alike. `glsl` may read vOb
+ * (object position) and vSeed (0..1 per instance), and mixes `second(colour)` into diffuseColor
+ * where its pattern goes. `ao` is a float expression of vOb: 0 where the prop meets the ground.
+ */
+function sunlit(mat: MeshLambertMaterial, key: string, glsl = "", ao = "1.0") {
   mat.onBeforeCompile = (s) => {
     s.vertexShader = s.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec3 vOb;\nvarying float vSeed;")
@@ -238,10 +262,17 @@ function patterned(mat: MeshLambertMaterial, key: string, glsl: string) {
         varying vec3 vOb;
         varying float vSeed;
         const float TAU = 6.2831853;
+        ${SUN_GLSL}
         /** pale things get a darker second colour, coloured things a paler one */
         vec3 second(vec3 c) { return mix(mix(c, vec3(1.0), 0.6), c * vec3(0.7, 0.62, 0.78), step(0.78, dot(c, vec3(0.3333)))); }`,
       )
-      .replace("#include <color_fragment>", "#include <color_fragment>\n" + glsl);
+      .replace("#include <color_fragment>", "#include <color_fragment>\n" + glsl)
+      .replace(
+        "vec3 outgoingLight = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse + totalEmissiveRadiance;",
+        /* glsl */ `vec3 nW = normalize(inverseTransformDirection(normal, viewMatrix));
+        float occ = clamp(${ao}, 0.0, 1.0);
+        vec3 outgoingLight = diffuseColor.rgb * sunLight(nW, occ) * mix(0.62, 1.0, occ) + totalEmissiveRadiance;`,
+      );
   };
   mat.customProgramCacheKey = () => "dollhouse-" + key;
   return mat;
@@ -301,6 +332,7 @@ const PATTERNS = {
 };
 
 const TREES = 220;
+const CONTACTS = 560;
 const FRAME_COLORS = ["#fff7ea", "#ffd9c2", "#cdeedd", "#c9e0f7"];
 const HUT_COLORS = ["#fff3e2", "#ffcdb6", "#bfe8d4", "#bcd8f5"];
 
@@ -320,11 +352,70 @@ const FOG_GLSL = /* glsl */ `
   }
 `;
 
+/**
+ * The sand: its colour (contour bands, mint and teal up the dunes, richer and darker close by) and
+ * its wind ripples at two scales, which only tilt the normal so that they read as lit and shaded
+ * faces. Shared by the ground and by every shadow lying on it, so a shadow is exactly the sand
+ * without the sun.
+ */
+const SAND_GLSL = /* glsl */ `
+  float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), f.x), mix(hash12(i + vec2(0.0, 1.0)), hash12(i + 1.0), f.x), f.y);
+  }
+  vec3 sandAlbedo(vec3 w, float d) {
+    float hgt = w.y;
+    vec3 sand = ${glc("#f6a596")};
+    vec3 cream = ${glc("#fde0c4")};
+    vec3 mint = ${glc("#a9dcc0")};
+    vec3 teal = ${glc("#6cbfae")};
+    // wind-combed contour bands that follow the dunes
+    float warp = sin(w.x * 0.045 + sin(w.z * 0.03) * 1.7) * 2.2 + sin(w.z * 0.05 + w.x * 0.02) * 1.6;
+    float bands = sin((hgt * 1.5 + warp) * 2.4 + w.x * 0.10 + w.z * 0.07);
+    float bw = fwidth(bands) * 1.2;
+    float band = smoothstep(-bw, bw, bands);
+    float fadeB = 1.0 - smoothstep(60.0, 160.0, d);
+    vec3 col = mix(sand, cream, smoothstep(-3.0, 1.0, hgt + (band - 0.5) * 1.6 * fadeB + 0.6));
+    col = mix(col, mint, smoothstep(1.2, 6.0, hgt));
+    col = mix(col, teal, smoothstep(9.0, 22.0, hgt));
+    col *= 1.0 - 0.07 * (1.0 - band) * fadeB;
+    // drifts of darker, coarser sand
+    col *= 1.0 - 0.08 * smoothstep(0.45, 0.8, vnoise(w.xz * 0.07)) * fadeB;
+    // the sand at your feet is darker and richer than the far dunes
+    float near = 1.0 - smoothstep(8.0, 70.0, d);
+    float l = dot(col, vec3(0.3, 0.59, 0.11));
+    return mix(col, mix(vec3(l), col, 1.3) * 0.87, near);
+  }
+  /** the ground normal n tilted by wind ripples: long asymmetric ones, and a fine patchy set */
+  vec3 rippleNormal(vec3 n, vec3 w, float d) {
+    vec2 p = w.xz;
+    vec2 q = p + vec2(sin(p.y * 0.11 + 1.7 * sin(p.x * 0.07)), sin(p.x * 0.09 + 1.3 * sin(p.y * 0.13))) * 3.5;
+    vec2 W1 = vec2(0.62, 0.78);
+    float c1 = dot(q, W1) / 0.95 + 0.7 * sin(q.x * 0.31 + 2.0 * sin(q.y * 0.23));
+    float s1 = fract(c1);
+    float slope1 = 1.25 - 6.25 * (smoothstep(0.72, 0.82, s1) - smoothstep(0.93, 1.0, s1));
+    float aa1 = (1.0 - smoothstep(0.12, 0.4, fwidth(c1))) * (1.0 - smoothstep(20.0, 60.0, d)) * (0.7 + 0.3 * sin(q.x * 0.13 - q.y * 0.07));
+    vec2 W2 = vec2(0.42, 0.91);
+    float c2 = (dot(q, W2) + 0.25 * sin(p.x * 1.3 + 1.6 * sin(p.y * 0.9))) / 0.26;
+    float s2 = fract(c2);
+    float slope2 = 1.25 - 6.25 * (smoothstep(0.72, 0.84, s2) - smoothstep(0.92, 1.0, s2));
+    float aa2 = (1.0 - smoothstep(0.12, 0.4, fwidth(c2))) * (1.0 - smoothstep(6.0, 26.0, d)) * smoothstep(0.3, 0.65, vnoise(p * 0.21 + 3.0));
+    vec2 g = W1 * slope1 * 0.05 * aa1 + W2 * slope2 * 0.045 * aa2;
+    return normalize(n - vec3(g.x, 0.0, g.y));
+  }
+`;
+
 function makeInteriorMaterial(pal: number, R: number) {
   const p = INTERIORS[pal]!;
   return new ShaderMaterial({
     side: FrontSide,
-    toneMapped: false,
     uniforms: {
       uT: { value: 0 },
       R: { value: R },
@@ -432,8 +523,6 @@ function makeInteriorMaterial(pal: number, R: number) {
 
 function makeTerrainMaterial() {
   return new ShaderMaterial({
-    toneMapped: false,
-    uniforms: { sun: { value: SUN_DIR } },
     vertexShader: /* glsl */ `
       varying vec3 vW;
       varying vec3 vN;
@@ -448,36 +537,26 @@ function makeTerrainMaterial() {
       }
     `,
     fragmentShader: /* glsl */ `
-      uniform vec3 sun;
       varying vec3 vW;
       varying vec3 vN;
       varying float vD;
       ${FOG_GLSL}
+      ${SUN_GLSL}
+      ${SAND_GLSL}
       void main() {
-        vec3 n = normalize(vN);
-        float hgt = vW.y;
-        vec3 sand = ${glc("#fbc3ad")};
-        vec3 cream = ${glc(CREAM)};
-        vec3 mint = ${glc("#b9e4cc")};
-        vec3 teal = ${glc("#74c4b2")};
-        // wind-combed contour bands that follow the dunes
-        float warp = sin(vW.x * 0.045 + sin(vW.z * 0.03) * 1.7) * 2.2 + sin(vW.z * 0.05 + vW.x * 0.02) * 1.6;
-        float bands = sin((hgt * 1.5 + warp) * 2.4 + vW.x * 0.10 + vW.z * 0.07);
-        float bw = fwidth(bands) * 1.2;
-        float band = smoothstep(-bw, bw, bands);
-        float fadeB = 1.0 - smoothstep(60.0, 160.0, vD);
-        vec3 col = mix(sand, cream, smoothstep(-3.0, 1.0, hgt + (band - 0.5) * 1.6 * fadeB + 0.6));
-        col = mix(col, mint, smoothstep(1.2, 6.0, hgt));
-        col = mix(col, teal, smoothstep(9.0, 22.0, hgt));
-        col *= 1.0 - 0.085 * (1.0 - band) * fadeB;
-        // fine wind ripples in the sand close by
-        float rip = sin(dot(vW.xz, vec2(0.8, 0.6)) * 5.5 + sin(vW.x * 0.21 + vW.z * 0.13) * 3.0 + hgt * 2.0);
-        col *= 1.0 - 0.028 * rip * (1.0 - smoothstep(8.0, 36.0, vD));
-        float l = dot(n, sun);
-        vec3 shade = vec3(0.66, 0.60, 0.82);
-        col *= mix(shade, vec3(1.0), smoothstep(-0.2, 0.6, l));
-        col = applyFog(col, vD);
-        gl_FragColor = vec4(col, 1.0);
+        vec3 n = rippleNormal(normalize(vN), vW, vD);
+        vec3 col = sandAlbedo(vW, vD) * sunLight(n, 1.0);
+        // a few grains catch the sun as the eye moves past
+        vec2 g = vW.xz * 9.0;
+        vec2 cell = floor(g);
+        float h = hash12(cell);
+        vec2 at = cell + 0.5 + (vec2(hash12(cell + 7.1), hash12(cell + 3.7)) - 0.5) * 0.6;
+        vec3 v = normalize(vW - cameraPosition);
+        float glint = pow(max(0.0, sin(h * 91.0 + dot(v, vec3(23.0, 17.0, 29.0)))), 12.0);
+        float dotm = 1.0 - smoothstep(0.06, 0.16, length(g - at));
+        float spark = step(0.965, h) * glint * dotm * (1.0 - smoothstep(4.0, 16.0, vD)) * (1.0 - smoothstep(0.08, 0.16, fwidth(g.x)));
+        col += vec3(1.0, 0.95, 0.85) * spark * 1.4 * max(0.0, dot(n, SUN));
+        gl_FragColor = vec4(applyFog(col, vD), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
@@ -485,11 +564,81 @@ function makeTerrainMaterial() {
   });
 }
 
+/**
+ * Shadows lying on the sand. A shadow multiplies what is under it by how much darker the ground is
+ * out of the sun than in it (fading out in the haze), so it costs almost nothing to draw. CAST:
+ * geometry flattened onto the ground along the sun, its edge softened where the surface turns
+ * side-on to the sun. FLAT: a flat silhouette flattened the same way, lighter towards its far end.
+ * CONTACT: a round dark pool, its strength in the length of the instance's y axis.
+ */
+const SHADOW_FRAG = /* glsl */ `
+  varying vec3 vW;
+  varying float vA;
+  varying vec2 vQ;
+  ${SUN_GLSL}
+  void main() {
+    vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
+    n *= sign(n.y);
+    vec3 k = sunLight(n, 0.0) / sunLight(n, 1.0);
+    float a = vA;
+    #ifdef CONTACT
+      float r = length(vQ) * 2.0;
+      a *= pow(1.0 - smoothstep(0.0, 1.0, r), 1.5);
+      k *= 0.6;
+    #endif
+    a *= 1.0 - smoothstep(${FOG_NEAR.toFixed(1)}, ${FOG_FAR.toFixed(1)}, length(cameraPosition - vW));
+    gl_FragColor = vec4(mix(vec3(1.0), k, a), 1.0);
+    #include <colorspace_fragment>
+  }
+`;
+
+function makeShadowMaterial(kind: "CAST" | "FLAT" | "CONTACT", vertexShader?: string) {
+  return new ShaderMaterial({
+    defines: { [kind]: "" },
+    uniforms: { uT: { value: 0 } },
+    transparent: true,
+    depthWrite: false,
+    // dst * src: the shadow darkens whatever sand, ripple or sparkle lies under it
+    blending: CustomBlending,
+    blendSrc: DstColorFactor,
+    blendDst: ZeroFactor,
+    side: kind === "FLAT" ? DoubleSide : FrontSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -4,
+    vertexShader:
+      vertexShader ??
+      /* glsl */ `
+      varying vec3 vW;
+      varying float vA;
+      varying vec2 vQ;
+      const vec3 SUN = ${glv(SUN_DIR)};
+      void main() {
+        mat4 m = modelMatrix;
+        #ifdef USE_INSTANCING
+          m = m * instanceMatrix;
+        #endif
+        vec4 w = m * vec4(position, 1.0);
+        vW = w.xyz;
+        vQ = position.xz;
+        #if defined(CONTACT)
+          vA = length(m[1].xyz);
+        #elif defined(FLAT)
+          vA = 1.0 - 0.3 * smoothstep(0.0, 8.0, position.y);
+        #else
+          vA = smoothstep(0.0, 0.5, dot(normal, SUN));
+        #endif
+        gl_Position = projectionMatrix * viewMatrix * w;
+      }
+    `,
+    fragmentShader: SHADOW_FRAG,
+  });
+}
+
 function makeSkyMaterial() {
   return new ShaderMaterial({
     side: BackSide,
     depthWrite: false,
-    toneMapped: false,
     fog: false,
     uniforms: { sun: { value: SUN_DIR }, horizon: { value: new Color(HORIZON) } },
     vertexShader: /* glsl */ `
@@ -506,11 +655,11 @@ function makeSkyMaterial() {
       void main() {
         vec3 d = normalize(vDir);
         float y = max(d.y, 0.0);
-        vec3 peach = ${glc("#ffcdb8")};
-        vec3 blue = ${glc("#a3d2f5")};
-        vec3 deep = ${glc("#6aa5ea")};
+        vec3 peach = ${glc("#ffbfa3")};
+        vec3 blue = ${glc("#78bbf6")};
+        vec3 deep = ${glc("#4f8fe6")};
         vec3 col = mix(horizon, peach, smoothstep(0.0, 0.07, y) * (1.0 - smoothstep(0.05, 0.22, y)) * 0.55);
-        col = mix(col, blue, smoothstep(0.05, 0.38, y));
+        col = mix(col, blue, smoothstep(0.03, 0.3, y));
         col = mix(col, deep, smoothstep(0.35, 1.0, y));
         float s = max(dot(d, sun), 0.0);
         col += vec3(1.0, 0.86, 0.66) * (0.10 * pow(s, 8.0) + 0.22 * pow(s, 70.0));
@@ -536,6 +685,8 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
   const blobShadows = useRef<InstancedMesh>(null);
   const trunkShadows = useRef<InstancedMesh>(null);
   const loopShadows = useRef<InstancedMesh>(null);
+  const domeShadows = useRef<InstancedMesh>(null);
+  const contacts = useRef<InstancedMesh>(null);
 
   const cam = useMemo(() => {
     const curve = new CatmullRomCurve3(CAM_KEYS, false, "centripetal");
@@ -660,7 +811,8 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     const trunk = new CylinderGeometry(0.05, 0.09, 1, 6);
     trunk.translate(0, 0.5, 0);
     const ball = new SphereGeometry(1, 14, 9);
-    const lowBall = new SphereGeometry(1, 10, 6);
+    const contact = new PlaneGeometry(1, 1);
+    contact.rotateX(-Math.PI / 2);
     const bigBall = new SphereGeometry(1, 32, 16);
     const loop = new TorusGeometry(1, 0.11, 10, 40, Math.PI);
     const lowLoop = new TorusGeometry(1, 0.11, 6, 28, Math.PI);
@@ -682,7 +834,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       disc,
       trunk,
       ball,
-      lowBall,
+      contact,
       lowLoop,
       bigBall,
       loop,
@@ -691,28 +843,31 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
   }, []);
 
   const mat = useMemo(() => {
-    const lambert = (c: string) => new MeshLambertMaterial({ color: c, toneMapped: false });
+    const lambert = (c: string, key: string, glsl = "", ao = "1.0") => sunlit(new MeshLambertMaterial({ color: c }), key, glsl, ao);
+    const FRAME_AO = "smoothstep(-0.3, 1.1, vOb.y)";
     return {
       terrain: makeTerrainMaterial(),
       sky: makeSkyMaterial(),
-      frames: FRAME_COLORS.map(lambert),
-      huts: HUT_COLORS.map(lambert),
+      frames: FRAME_COLORS.map((c) => lambert(c, "frame", "", FRAME_AO)),
+      huts: HUT_COLORS.map((c) => lambert(c, "hut", "", "smoothstep(-0.37, 0.2, vOb.y)")),
       interiors: DOORS.map((d) => makeInteriorMaterial(d.pal, d.R / d.scale)),
-      stele: lambert("#ffab98"),
-      steleBack: lambert("#ffc4b0"),
-      trim: lambert("#fff6e6"),
-      leaf: lambert("#5f96dc"),
-      leafPanel: lambert("#86b6ec"),
-      knob: lambert("#ffd98a"),
-      plinth: lambert("#fff1df"),
-      plinth2: lambert("#cdeedd"),
-      crown: patterned(lambert("#ffffff"), "crown", PATTERNS.crown),
-      dome: patterned(lambert("#ffffff"), "dome", PATTERNS.dome),
-      loop: patterned(Object.assign(lambert("#ffffff"), { defines: { USE_UV: "" } }), "loop", PATTERNS.loop),
-      stone: patterned(lambert("#ffffff"), "stone", PATTERNS.stone),
-      trunk: lambert("#f2d7c4"),
-      shadow: new MeshBasicMaterial({ color: SHADOW, toneMapped: false, side: DoubleSide, polygonOffset: true, polygonOffsetFactor: -0.5, polygonOffsetUnits: -1 }),
-      cloud: new MeshLambertMaterial({ color: "#ffffff", emissive: "#8f96ad", toneMapped: false, fog: false }),
+      stele: lambert("#ffab98", "frame", "", FRAME_AO),
+      steleBack: lambert("#ffc4b0", "frame", "", FRAME_AO),
+      trim: lambert("#fff6e6", "plain"),
+      leaf: lambert("#5f96dc", "plain"),
+      leafPanel: lambert("#86b6ec", "plain"),
+      knob: lambert("#ffd98a", "plain"),
+      plinth: lambert("#fff1df", "plinth", "", "smoothstep(0.64, 0.95, vOb.y)"),
+      plinth2: lambert("#cdeedd", "plinth2", "", "smoothstep(0.8, 1.0, vOb.y)"),
+      crown: lambert("#ffffff", "crown", PATTERNS.crown),
+      dome: lambert("#ffffff", "dome", PATTERNS.dome, "smoothstep(0.1, 0.55, vOb.y)"),
+      loop: Object.assign(lambert("#ffffff", "loop", PATTERNS.loop, "smoothstep(0.0, 0.4, vOb.y)"), { defines: { USE_UV: "" } }),
+      stone: lambert("#ffffff", "stone", PATTERNS.stone),
+      trunk: lambert("#f2d7c4", "trunk", "", "smoothstep(0.0, 0.3, vOb.y)"),
+      cast: makeShadowMaterial("CAST"),
+      flat: makeShadowMaterial("FLAT"),
+      contact: makeShadowMaterial("CONTACT"),
+      cloud: sunlit(new MeshLambertMaterial({ color: "#ffffff", emissive: "#8f96ad", fog: false }), "cloud"),
     };
   }, []);
 
@@ -729,6 +884,20 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     return { doors, stele };
   }, []);
 
+  const garden = useMemo(() => {
+    const pathPts = cam.curve.getPoints(80);
+    return createGarden({
+      ground,
+      clear: clearOf(pathPts),
+      path: pathPts,
+      rnd: mulberry32(4711),
+      fogGlsl: FOG_GLSL,
+      sun: SUN_DIR,
+      shadowMaterial: (vs) => makeShadowMaterial("CAST", vs),
+    });
+  }, [cam]);
+  useEffect(() => () => garden.dispose(), [garden]);
+
   // scattered, instanced dressing
   useLayoutEffect(() => {
     const rnd = mulberry32(20251);
@@ -739,7 +908,24 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     const BS = blobShadows.current!;
     const TS = trunkShadows.current!;
     const LS = loopShadows.current!;
+    const DS = domeShadows.current!;
+    const CT = contacts.current!;
     const clear = clearOf(cam.curve.getPoints(80));
+    // soft dark pools where things meet the ground: an ellipse rx by rz turned by yaw, laid on the dune
+    const up = new Vector3(0, 1, 0);
+    const tilt = new Quaternion();
+    const yawQ = new Quaternion();
+    let nc = 0;
+    const contact = (x: number, z: number, rx: number, rz: number, yaw: number, strength: number) => {
+      if (nc >= CT.count) return;
+      tilt.setFromUnitVectors(up, groundNormal(x, z, _n));
+      yawQ.setFromAxisAngle(up, yaw);
+      o.position.set(x, ground(x, z) + 0.04, z);
+      o.quaternion.copy(tilt).multiply(yawQ);
+      o.scale.set(rx * 2, strength, rz * 2);
+      o.updateMatrix();
+      CT.setMatrixAt(nc++, o.matrix);
+    };
 
     // lollipop trees
     const crownCols = ["#8fd8bd", "#b5e8cf", "#ffc2ad", "#ffdcc4", "#a9d3f5", "#fff0d6", "#6fc7b0"];
@@ -762,15 +948,15 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       o.scale.set(1 + hgt * 0.25, hgt, 1 + hgt * 0.25);
       o.updateMatrix();
       T.setMatrixAt(n, o.matrix);
-      const lit = r < 95;
-      if (lit) shadowMatrix(x, z, sm);
-      TS.setMatrixAt(n, lit ? o.matrix.premultiply(sm) : zero);
+      shadowMatrix(x, z, sm);
+      TS.setMatrixAt(n, o.matrix.premultiply(sm));
       o.position.set(x, y + hgt + cr * squash * 0.55, z);
       o.scale.set(cr, cr * squash, cr);
       o.updateMatrix();
       K.setMatrixAt(n, o.matrix);
       K.setColorAt(n, c.set(crownCols[ci]!));
-      BS.setMatrixAt(n, lit ? o.matrix.premultiply(sm) : zero);
+      BS.setMatrixAt(n, o.matrix.premultiply(sm));
+      contact(x + SUN_DIR.x * -0.15, z - SUN_DIR.z * 0.15, 0.35 + hgt * 0.09, 0.35 + hgt * 0.09, 0, 0.8);
       n++;
     }
     // hut domes cast blobs too
@@ -786,7 +972,14 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       o.scale.set(dw * 2.3, dw * 2.9, dw * 2.3);
       o.updateMatrix();
       BS.setMatrixAt(slot, o.matrix.premultiply(shadowMatrix(hx, hz, sm)));
+      contact(hx, hz, dw * 2.75, dw * 2.75, 0, 0.75);
     });
+    // every doorway darkens the sand along its foot, and the stele's plinth sits in a pool
+    for (const d of DOORS) {
+      const w = (D_A + 0.42) * d.scale;
+      contact(d.x, d.z, w * 1.25, 0.9 * d.scale + 0.3, Math.atan2(d.fx, d.fz), 0.7);
+    }
+    contact(0, 0, 9.4, 9.4, 0, 0.75);
     BS.instanceMatrix.needsUpdate = true;
     TS.instanceMatrix.needsUpdate = true;
     T.instanceMatrix.needsUpdate = true;
@@ -812,9 +1005,12 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       o.updateMatrix();
       Dm.setMatrixAt(n, o.matrix);
       Dm.setColorAt(n, c.set(domeCols[ci]!));
+      DS.setMatrixAt(n, o.matrix.premultiply(shadowMatrix(x, z, sm)));
+      contact(x, z, s * 1.22, s * 1.22, 0, 0.6);
       n++;
     }
     Dm.instanceMatrix.needsUpdate = true;
+    DS.instanceMatrix.needsUpdate = true;
     if (Dm.instanceColor) Dm.instanceColor.needsUpdate = true;
 
     // bulbous hoops leaping over the dunes
@@ -837,7 +1033,9 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       o.updateMatrix();
       L.setMatrixAt(n, o.matrix);
       L.setColorAt(n, c.set(loopCols[ci]!));
-      LS.setMatrixAt(n, r < 120 ? o.matrix.premultiply(shadowMatrix(x, z, sm)) : zero);
+      LS.setMatrixAt(n, o.matrix.premultiply(shadowMatrix(x, z, sm)));
+      // both feet
+      for (const side of [-1, 1]) contact(x + Math.cos(rot) * s * side, z - Math.sin(rot) * s * side, 0.5 * s * 0.22 * fat + 0.5, 0.5 * s * 0.22 * fat + 0.5, rot, 0.7);
       n++;
     }
     LS.instanceMatrix.needsUpdate = true;
@@ -885,13 +1083,13 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     }
     St.instanceMatrix.needsUpdate = true;
     if (St.instanceColor) St.instanceColor.needsUpdate = true;
-  }, [cam]);
 
-  const garden = useMemo(() => {
-    const pathPts = cam.curve.getPoints(80);
-    return createGarden({ ground, clear: clearOf(pathPts), path: pathPts, rnd: mulberry32(4711), fogGlsl: FOG_GLSL });
-  }, [cam]);
-  useEffect(() => () => garden.dispose(), [garden]);
+    // the garden's flower drifts and pinwheel stalks
+    for (const f of garden.drifts) contact(f.x - SUN_DIR.x * 0.3, f.z - SUN_DIR.z * 0.3, f.r * 1.1, f.r * 1.1, 0, 0.32);
+    for (const p of garden.pinwheels) contact(p.x, p.z, 0.3 * p.size + 0.15, 0.3 * p.size + 0.15, 0, 0.8);
+    for (let i = nc; i < CT.count; i++) CT.setMatrixAt(i, zero);
+    CT.instanceMatrix.needsUpdate = true;
+  }, [cam, garden]);
 
   useFrame(() => {
     const t = Math.min(25, Math.max(0, clock.t));
@@ -923,8 +1121,6 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     <>
       <color attach="background" args={[HORIZON]} />
       <fog attach="fog" args={[HORIZON, FOG_NEAR, FOG_FAR]} />
-      <hemisphereLight args={["#ffffff", "#f3c2d2", 2.35]} />
-      <directionalLight position={SUN_DIR} intensity={1.1} color="#fff1dc" />
 
       <mesh geometry={geo.sky} material={mat.sky} frustumCulled={false} renderOrder={-10} />
       <mesh geometry={geo.terrain} material={mat.terrain} />
@@ -955,12 +1151,10 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
         );
       })}
 
-      {DOORS.map((d, i) =>
-        d.hut ? null : (
-          <mesh key={i} geometry={geo.frameFlat} material={mat.shadow} matrix={shadows.doors[i]} matrixAutoUpdate={false} frustumCulled={false} />
-        ),
-      )}
-      <mesh geometry={geo.steleFlat} material={mat.shadow} matrix={shadows.stele} matrixAutoUpdate={false} frustumCulled={false} />
+      {DOORS.map((d, i) => (
+        <mesh key={i} geometry={geo.frameFlat} material={mat.flat} matrix={shadows.doors[i]} matrixAutoUpdate={false} frustumCulled={false} />
+      ))}
+      <mesh geometry={geo.steleFlat} material={mat.flat} matrix={shadows.stele} matrixAutoUpdate={false} frustumCulled={false} />
 
       {/* the stele: the real way out */}
       <group position={[0, HERO_Y, 0]}>
@@ -988,9 +1182,11 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
       <instancedMesh ref={trunks} args={[geo.trunk, mat.trunk, TREES]} frustumCulled={false} />
       <instancedMesh ref={crowns} args={[geo.ball, mat.crown, TREES]} frustumCulled={false} />
-      <instancedMesh ref={trunkShadows} args={[geo.trunk, mat.shadow, TREES]} frustumCulled={false} />
-      <instancedMesh ref={blobShadows} args={[geo.lowBall, mat.shadow, TREES + DOORS.length]} frustumCulled={false} />
-      <instancedMesh ref={loopShadows} args={[geo.lowLoop, mat.shadow, 16]} frustumCulled={false} />
+      <instancedMesh ref={trunkShadows} args={[geo.trunk, mat.cast, TREES]} frustumCulled={false} />
+      <instancedMesh ref={blobShadows} args={[geo.ball, mat.cast, TREES + DOORS.length]} frustumCulled={false} />
+      <instancedMesh ref={loopShadows} args={[geo.lowLoop, mat.cast, 16]} frustumCulled={false} />
+      <instancedMesh ref={domeShadows} args={[geo.ball, mat.cast, 22]} frustumCulled={false} />
+      <instancedMesh ref={contacts} args={[geo.contact, mat.contact, CONTACTS]} frustumCulled={false} />
       <instancedMesh ref={domes} args={[geo.bigBall, mat.dome, 22]} frustumCulled={false} />
       <instancedMesh ref={loops} args={[geo.loop, mat.loop, 16]} frustumCulled={false} />
       <instancedMesh ref={clouds} args={[geo.ball, mat.cloud, 48]} frustumCulled={false} />
