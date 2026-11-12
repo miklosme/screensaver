@@ -47,6 +47,14 @@ bun run build    # static build in dist/
 Everything that moves is animated in a vertex shader from the scene clock, one instanced draw per
 kind of creature.
 
+## The improvement loop
+
+The scenes are improved by an agent loop: a director (Claude Fable 5.2) hands slices of
+`BACKLOG.md` to workers (Claude Opus 5.5) in parallel worktrees, gates the result on measured
+budgets, and has three reviewers on different models rank what is still wrong. `DESIGN.md` is
+the taste it works towards, `loop/LOOP.md` is the director's procedure, `loop/JOURNAL.md` is
+what happened, and `loop/DIRECTION.md` is where the owner steers it.
+
 ## Debugging
 
 There is no UI, only query params:
@@ -55,7 +63,9 @@ There is no UI, only query params:
 - `?t=<seconds>` freeze the scene clock at a local time
 - `?speed=<n>` time multiplier
 
-`scripts/shot.sh <scene> <t> <out.png>` takes a headless Chrome screenshot of a frozen frame.
+`bun scripts/look.ts` captures frozen frames and contact sheets in headless Chrome on the GPU,
+and measures frame cost, hitches and seams; run it with no arguments for usage.
+`scripts/shot.sh <scene> <t> <out.png>` is the software-rendered fallback.
 
 In dev builds `window.__screensaver` exposes `freeze(t)` (freeze the scene clock, `null` to
 release it), `advance(ms)` (render one frame now), the renderer as `gl` and the director's `live`

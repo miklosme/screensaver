@@ -1,0 +1,63 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scores", "regressions", "problems", "opportunities"],
+  "properties": {
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["helix", "burrow", "dollhouse", "orbit"],
+      "properties": {
+        "helix": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "burrow": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "dollhouse": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "orbit": { "type": "integer", "minimum": 1, "maximum": 10 }
+      }
+    },
+    "regressions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scene", "t", "what"],
+        "properties": {
+          "scene": { "type": "string", "enum": ["helix", "burrow", "dollhouse", "orbit", "all"] },
+          "t": { "type": "string" },
+          "what": { "type": "string" }
+        }
+      }
+    },
+    "problems": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scene", "t", "where", "what", "fix"],
+        "properties": {
+          "scene": { "type": "string", "enum": ["helix", "burrow", "dollhouse", "orbit", "all"] },
+          "t": { "type": "string" },
+          "where": { "type": "string" },
+          "what": { "type": "string" },
+          "fix": { "type": "string" }
+        }
+      }
+    },
+    "opportunities": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scene", "technique", "where", "payoff"],
+        "properties": {
+          "scene": { "type": "string", "enum": ["helix", "burrow", "dollhouse", "orbit", "all"] },
+          "technique": { "type": "string" },
+          "where": { "type": "string" },
+          "payoff": { "type": "string" }
+        }
+      }
+    }
+  }
+}

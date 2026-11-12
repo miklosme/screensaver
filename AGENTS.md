@@ -28,14 +28,20 @@ A camera change is done when both seams hold the seam state and frames at `t` = 
 
 ## Looking at a frame
 
-`scripts/shot.sh <scene> <t> <out.png>` screenshots one frozen frame and needs `bun run dev` running; set `PORT` if vite landed somewhere other than 5173.
+`bun scripts/look.ts` drives headless Chrome on the real GPU and starts its own dev server, so it works inside a git worktree; run it with no arguments for usage. `shots` and `sheet` capture frozen frames, `perf` and `seams` measure, and `gate` does all of it and fails on any breach of `loop/budget.json`.
 
-- Run at most three shots at once and retry any PNG under ~9 KB: overloaded headless Chrome returns a blank frame with no error.
-- Headless Chrome advances only a few animation frames under `--virtual-time-budget`. To sample a scene over time, call `__screensaver.freeze(t)` then `__screensaver.advance(ms)` in a loop (dev builds only) instead of waiting on frames.
-- A real GPU works headless with `--use-angle=vulkan --enable-features=Vulkan` in place of the swiftshader flags, and is fast enough to shoot whole contact sheets.
+- To sample a scene some other way, call `__screensaver.freeze(t)` then `__screensaver.advance(ms)` in a loop (dev builds only) instead of waiting on animation frames.
+- Headless Chrome sometimes drops the GL context as a page first appears; three restores it, but the director's warm-up is gone and every program then compiles in flight. `look.ts` reloads such a page. A harness of your own has to do the same, or it measures 20 to 60 ms hitches that are not the scene's.
+- With no GPU, `scripts/shot.sh <scene> <t> <out.png>` screenshots one frame under swiftshader against a running `bun run dev`. Run at most three at once and retry any PNG under ~9 KB: overloaded headless Chrome returns a blank frame with no error.
 
 ## Checks
 
 `bun run typecheck` and `bun run build`. There are no tests, so a frame is the only evidence that a visual change works.
 
-For performance, the evidence is a full loop with no long frame: run `?speed=2` for 90 s recording `requestAnimationFrame` deltas, and expect none above ~20 ms after the first frame. A hitch at a scene's `t` = 5 or 12 means something was built or compiled in flight.
+For performance, the evidence is `bun scripts/look.ts perf <out.json>` with nothing over budget: frame cost at 4K at thirteen times per scene, and two full loops at `?speed=2` with no long frame. A hitch at a scene's `t` = 5 or 12 means something was built or compiled in flight.
+
+## Taste, and the improvement loop
+
+`DESIGN.md` is the reference for any visual change: the owner's brief, what stays fixed, and what a good frame has.
+
+The scenes are improved by an agent loop. Its director starts from `loop/LOOP.md`, a worker building a slice from `loop/WORKER.md`, a reviewer from `loop/REVIEWER.md`.
