@@ -230,6 +230,17 @@ const PROFILE = `(async () => {
   gl.info.autoReset = false;
   let now = performance.now();
   const frame = (t) => { S.freeze(t); now += 16; S.advance(now); sync(); };
+  // A page opened after another one shares the GPU with the old page's teardown for about a
+  // second, and its first frames cost twice as much (seen at pass 002: the same frame read 2.06 ms
+  // on a first page and 4.03 ms on a later one). Draw until the cost holds still before sampling.
+  const settle = () => { const t0 = performance.now(); for (let i = 0; i < 30; i++) frame(${PERF_T[0]}); return (performance.now() - t0) / 30; };
+  const began = performance.now();
+  let before = settle(), calm = 0;
+  while (performance.now() - began < 8000 && (performance.now() - began < 1500 || calm < 3)) {
+    const c = settle();
+    calm = Math.abs(c - before) < 0.05 * before ? calm + 1 : 0;
+    before = c;
+  }
   const samples = [];
   for (const t of ${JSON.stringify(PERF_T)}) {
     for (let i = 0; i < 4; i++) frame(t);
