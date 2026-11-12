@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { Vector2, Vector3, type Group, type Mesh } from "three";
 import { TIMING, type SceneProps } from "./types";
-import { createRide } from "./rail";
-import { EYE, HOOP, buildWorld } from "./burrow/build";
+import { createFrame, lookTowards, season } from "./rail";
+import { HOOP, buildWorld } from "./burrow/build";
 import { buildCreatures } from "./burrow/creatures";
 import {
   FOG_COLOR,
@@ -22,6 +22,9 @@ import {
  * A glowing thread leads the camera through ribbed, winding corridors and round junction chambers
  * whose other doorways curl away into coloured haze. The last chamber is a dead end holding only a
  * slowly revolving hoop, a band a hand's width thick: the way out.
+ *
+ * The camera is the rail's (./rail.ts): the tunnel is swept along the stretch this scene rides,
+ * and all the scene adds is where the camera looks while it has the track to itself.
  */
 
 const FOV = 66;
@@ -32,9 +35,10 @@ const smooth = (a: number, b: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 
-export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
+export default function Burrow({ index, clock, camera, portalMaterial }: SceneProps) {
   const gl = useThree((s) => s.gl);
-  const world = useMemo(buildWorld, []);
+  const stretch = useMemo(() => season(index), [index]);
+  const world = useMemo(() => buildWorld(stretch), [stretch]);
 
   const mats = useMemo(() => {
     const shared = createShared();
@@ -77,16 +81,8 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
   const gimbalA = useRef<Mesh>(null);
   const gimbalB = useRef<Mesh>(null);
 
-  const tmp = useMemo(
-    () => ({ look: new Vector3(), near: new Vector3(), far: new Vector3(), to: new Vector3(), size: new Vector2() }),
-    [],
-  );
-  // one even cruise through the corridors, at whatever speed uses up the route exactly
-  const ride = useMemo(() => createRide({ cruise: 5, length: world.sHoop - world.sStart, rampIn: 2, rampOut: 2.5 }), [world]);
-  const sights = useMemo(
-    () => [0, 1].map((i) => ({ p: new Vector3(world.chambers[i]!.c.x, 2.8, world.chambers[i]!.c.z), R: world.chambers[i]!.R })),
-    [world],
-  );
+  const tmp = useMemo(() => ({ pose: createFrame(), ahead: createFrame(), look: new Vector3(), to: new Vector3(), size: new Vector2() }), []);
+  const sights = useMemo(() => world.sights.map((p, i) => ({ p, R: world.chambers[i]!.R })), [world]);
 
   useFrame(() => {
     const t = Math.min(TIMING.total, Math.max(0, clock.t));
@@ -94,64 +90,52 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
     gl.getDrawingBufferSize(tmp.size);
     mats.motes.uniforms.uViewH!.value = tmp.size.y;
 
-    // --- camera: a pure function of t ---------------------------------------------------------
-    const s = world.sStart + ride.at(t);
-    const pos = camera.position;
-    world.table.at(s, pos);
-    world.table.at(s + LOOK_AHEAD, tmp.look);
-    world.table.at(s + 0.6, tmp.near);
-    world.table.at(s + 7.5, tmp.far);
+    // --- camera: the rail's pose, a pure function of t --------------------------------------------
+    const d = stretch.distance(t);
+    const pose = stretch.pose(t, tmp.pose);
+    camera.position.copy(pose.position);
 
-    // lean into the bends, gently
-    const tx = tmp.near.x - pos.x;
-    const tz = tmp.near.z - pos.z;
-    const fx = tmp.far.x - pos.x;
-    const fz = tmp.far.z - pos.z;
-    const turn = (tx * fz - tz * fx) / (Math.hypot(tx, tz) * Math.hypot(fx, fz) + 1e-6);
-    const roll = -0.085 * Math.tanh(turn * 2.2);
-
-    // glance at whatever floats in the junction we are crossing
-    for (const sight of sights) {
-      tmp.to.copy(sight.p).sub(pos);
-      tmp.to.y = 0;
-      const d = tmp.to.length();
-      const ahead = (tmp.to.x * tx + tmp.to.z * tz) / (Math.hypot(tx, tz) + 1e-6);
-      const w = 0.22 * smooth(sight.R + 3, sight.R - 1.5, d) * smooth(-0.5, 3, ahead);
-      tmp.look.x += (sight.p.x - tmp.look.x) * w;
-      tmp.look.z += (sight.p.z - tmp.look.z) * w;
-      tmp.look.y += (sight.p.y - EYE - tmp.look.y) * w * 0.6;
+    // While it has the track to itself the camera looks into the bend, at the tunnel a little way
+    // ahead, and glances at whatever floats in the junction it is crossing.
+    const free = stretch.free(t);
+    if (free > 0) {
+      tmp.look.copy(stretch.frame(d + LOOK_AHEAD, tmp.ahead).position);
+      for (const sight of sights) {
+        tmp.to.copy(sight.p).sub(pose.position);
+        const ahead = tmp.to.dot(pose.tangent);
+        tmp.to.y = 0;
+        const w = 0.22 * smooth(sight.R + 3, sight.R - 1.5, tmp.to.length()) * smooth(-0.5, 3, ahead);
+        tmp.look.x += (sight.p.x - tmp.look.x) * w;
+        tmp.look.z += (sight.p.z - tmp.look.z) * w;
+        tmp.look.y += (sight.p.y - tmp.look.y) * w * 0.6;
+      }
+      lookTowards(pose, tmp.look, free);
     }
-
-    pos.y += EYE;
-    tmp.look.y += EYE;
-    camera.up.set(0, 1, 0);
-    camera.lookAt(tmp.look);
-    camera.rotateZ(roll);
+    camera.quaternion.copy(pose.quaternion);
     if (camera.fov !== FOV) camera.fov = FOV;
 
     // --- things that move -----------------------------------------------------------------------
     if (knot.current) {
       knot.current.rotation.set(t * 0.23, t * 0.37, 0);
-      knot.current.position.y = 2.7 + Math.sin(t * 0.9) * 0.12;
+      knot.current.position.y = world.sights[0]!.y + Math.sin(t * 0.9) * 0.12;
     }
     if (moons.current) {
       const ch = moons.current.children;
       for (let i = 0; i < ch.length; i++) ch[i]!.rotation.y = t * (0.5 + i * 0.17) + i * 2.1;
-      moons.current.position.y = 3.3 + Math.sin(t * 0.8 + 1) * 0.1;
+      moons.current.position.y = world.sights[1]!.y + 0.4 + Math.sin(t * 0.8 + 1) * 0.1;
     }
     if (hoop.current) {
       // revolves like a coin on its edge, then settles square-on to the approaching camera
       const e = 1 - smooth(14.5, 22.8, t);
       hoop.current.rotation.y = world.hoopYaw + e * Math.PI * 1.1;
-      hoop.current.position.y = HOOP.y;
     }
     const left = TIMING.total - t;
     if (gimbalA.current) gimbalA.current.rotation.y = left * 0.42;
     if (gimbalB.current) gimbalB.current.rotation.x = left * 0.3;
   });
 
-  const [ch1, ch2, ch3] = world.chambers;
-  const topOf = (ch: (typeof world.chambers)[number]) => ch.yc + ch.H * Math.sin(Math.acos(ch.oculus / ch.R));
+  const topOf = (ch: (typeof world.chambers)[number]) => ch.c.y + ch.yc + ch.H * Math.sin(Math.acos(ch.oculus / ch.R));
+  const [knotAt, orreryAt] = world.sights as [Vector3, Vector3];
 
   return (
     <>
@@ -188,15 +172,15 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
       ))}
 
       {/* junction 1: a knot of light */}
-      <mesh ref={knot} position={[ch1!.c.x, 2.7, ch1!.c.z]} material={mats.knot}>
+      <mesh ref={knot} position={knotAt} material={mats.knot}>
         <torusKnotGeometry args={[0.72, 0.2, 160, 12, 2, 3]} />
       </mesh>
-      <mesh position={[ch1!.c.x, 2.7, ch1!.c.z]} scale={8} material={mats.haloWarm}>
+      <mesh position={knotAt} scale={8} material={mats.haloWarm}>
         <planeGeometry args={[1, 1]} />
       </mesh>
 
       {/* junction 2: a little orrery */}
-      <group ref={moons} position={[ch2!.c.x, 2.9, ch2!.c.z]}>
+      <group ref={moons} position={orreryAt}>
         {[0, 1, 2].map((i) => (
           <group key={i} rotation-z={0.5 + i * 0.9} rotation-x={i * 0.7}>
             <group>
@@ -213,10 +197,10 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
           </group>
         ))}
       </group>
-      <mesh position={[ch2!.c.x, 3.3, ch2!.c.z]} material={mats.moon}>
+      <mesh position={[orreryAt.x, orreryAt.y + 0.4, orreryAt.z]} material={mats.moon}>
         <sphereGeometry args={[0.3, 32, 20]} />
       </mesh>
-      <mesh position={[ch2!.c.x, 3.3, ch2!.c.z]} scale={7} material={mats.haloAmber}>
+      <mesh position={[orreryAt.x, orreryAt.y + 0.4, orreryAt.z]} scale={7} material={mats.haloAmber}>
         <planeGeometry args={[1, 1]} />
       </mesh>
 
@@ -235,7 +219,6 @@ export default function Burrow({ clock, camera, portalMaterial }: SceneProps) {
           <torusGeometry args={[2.5, 0.028, 8, 128]} />
         </mesh>
       </group>
-      {ch3 && null}
     </>
   );
 }
