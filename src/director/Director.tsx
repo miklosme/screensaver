@@ -2,11 +2,8 @@ import { useEffect, useMemo, useRef } from "react";
 import { createPortal, useFrame, useThree } from "@react-three/fiber";
 import {
   HalfFloatType,
-  Mesh,
   type Object3D,
-  OrthographicCamera,
   PerspectiveCamera,
-  PlaneGeometry,
   Scene,
   Vector2,
   WebGLRenderTarget,
@@ -14,9 +11,13 @@ import {
 } from "three";
 import { scenes } from "../scenes";
 import { TIMING, type SceneClock, type SceneDef } from "../scenes/types";
+import { createLook, lookAt, looks } from "./looks";
 import { blackTexture, createPortalMaterial } from "./portalMaterial";
+import { createPost } from "./post";
 
 interface Slot {
+  /** id of the scene mounted in this slot */
+  id: string;
   scene: Scene;
   camera: PerspectiveCamera;
   clock: SceneClock;
@@ -41,6 +42,9 @@ function SceneSlot({ def, slot }: { def: SceneDef; slot: Slot }) {
   );
 }
 
+/** Linear HDR, multisampled. Nothing reads its depth afterwards, so only colour is resolved. */
+const createTarget = () => new WebGLRenderTarget(2, 2, { type: HalfFloatType, samples: 4, resolveDepthBuffer: false });
+
 /** Two scenes are on screen at most, but a one-scene list still needs a second copy to fly into. */
 const SLOTS = Math.max(2, scenes.length);
 
@@ -52,7 +56,8 @@ export function Director() {
   // flight it is a dropped frame at every portal.
   const slots = useMemo(
     () =>
-      Array.from({ length: SLOTS }, (): Slot => ({
+      Array.from({ length: SLOTS }, (_, i): Slot => ({
+        id: scenes[(startIndex + i) % scenes.length]!.id,
         scene: new Scene(),
         camera: new PerspectiveCamera(60, 1, 0.1, 2000),
         clock: { t: 0 },
@@ -64,31 +69,46 @@ export function Director() {
   /** slot i holds scene startIndex + i, so the show starts on slot 0 whatever ?scene= says */
   const slotAt = (seq: number) => slots[seq % SLOTS]!;
   const live = useRef({ seq: 0, time: 0 });
-  /** what the render target holds while the next scene is still waiting on its first frame */
+  /** what `ahead` holds while the next scene is still waiting on its first frame */
   const still = useRef<{ slot: Slot | null; width: number; height: number }>({ slot: null, width: 0, height: 0 });
   const warmed = useRef(false);
+  // A restored GL context comes back empty: three rebuilds each program, buffer, texture and target
+  // the next time it is used, which without this would be in flight, one portal at a time.
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const rewarm = () => void (warmed.current = false);
+    canvas.addEventListener("webglcontextrestored", rewarm);
+    return () => canvas.removeEventListener("webglcontextrestored", rewarm);
+  }, [gl]);
 
   // Dev only: a handle for sampling and profiling from the console or a headless browser.
   //   __screensaver.freeze(t)    freeze the scene clock at t (null lets it run again)
   //   __screensaver.advance(ms)  render one frame now, without waiting for the browser
+  //   __screensaver.looks        the per-scene look numbers, live: edit one and the next frame has it
   useEffect(() => {
     if (!import.meta.env.DEV) return;
-    const handle = { gl, slots, live: live.current, advance, freeze: (t: number | null) => void (frozenT = t) };
+    const handle = { gl, slots, live: live.current, advance, freeze: (t: number | null) => void (frozenT = t), looks };
     (window as unknown as { __screensaver: typeof handle }).__screensaver = handle;
   }, [gl, slots, advance]);
 
-  const target = useMemo(() => new WebGLRenderTarget(2, 2, { type: HalfFloatType, samples: 4 }), []);
-  const overlay = useMemo(() => {
-    const material = createPortalMaterial();
-    material.transparent = true;
-    material.depthTest = false;
-    material.depthWrite = false;
-    const scene = new Scene();
-    scene.add(new Mesh(new PlaneGeometry(2, 2), material));
-    return { scene, camera: new OrthographicCamera(-1, 1, 1, -1, 0, 1), material };
-  }, []);
+  // One colour pipeline. Every scene is drawn into a linear HDR target, never onto the canvas:
+  // `ahead` takes the next scene, which the current scene's portal samples, and `frame` takes the
+  // current scene. `post` then turns `frame` into the picture. A scene therefore gets the same
+  // tone curve, the same blending and the same anti-aliasing whether it is seen through a portal
+  // or owns the screen, and a takeover has nothing left to pop.
+  const frame = useMemo(createTarget, []);
+  const ahead = useMemo(createTarget, []);
+  const post = useMemo(createPost, []);
+  const look = useMemo(createLook, []);
   const size = useMemo(() => new Vector2(), []);
-  useEffect(() => () => target.dispose(), [target]);
+  useEffect(
+    () => () => {
+      frame.dispose();
+      ahead.dispose();
+      post.dispose();
+    },
+    [frame, ahead, post],
+  );
 
   // Advance the clocks before the scenes' own useFrame callbacks (priority 0) read them.
   useFrame((_, delta) => {
@@ -111,7 +131,11 @@ export function Director() {
     const t = current.clock.t;
 
     gl.getDrawingBufferSize(size);
-    if (target.width !== size.x || target.height !== size.y) target.setSize(size.x, size.y);
+    if (frame.width !== size.x || frame.height !== size.y) {
+      frame.setSize(size.x, size.y);
+      ahead.setSize(size.x, size.y);
+      post.setSize(size.x, size.y);
+    }
     const aspect = size.x / size.y;
     for (const slot of slots) {
       slot.portal.uniforms.resolution!.value.copy(size);
@@ -119,11 +143,13 @@ export function Director() {
       slot.camera.updateProjectionMatrix();
     }
 
-    // The very first frame draws every scene once, unculled, both into the target and onto the
-    // canvas (three compiles a different program for each): that compiles every program and
-    // uploads every buffer and texture before the show starts.
+    // The very first frame draws every scene once, unculled, and runs the whole post chain: that
+    // compiles every program, uploads every buffer and texture and allocates every target before
+    // the show starts. Both targets are the same kind, so a scene needs one program per material,
+    // whichever of them it is drawn into.
     if (!warmed.current) {
       warmed.current = true;
+      still.current.slot = null;
       for (const slot of slots) {
         const culled: Object3D[] = [];
         slot.scene.traverse((o) => {
@@ -131,12 +157,11 @@ export function Director() {
           o.frustumCulled = false;
         });
         slot.portal.uniforms.map!.value = blackTexture;
-        gl.setRenderTarget(target);
-        gl.render(slot.scene, slot.camera);
-        gl.setRenderTarget(null);
+        gl.setRenderTarget(slot === slots[0] ? ahead : frame);
         gl.render(slot.scene, slot.camera);
         for (const o of culled) o.frustumCulled = true;
       }
+      post.render(gl, frame.texture, { ...look, bloom: 1 }, ahead.texture, 0.5);
     }
 
     const portalLive = t >= TIMING.portalLive;
@@ -147,26 +172,21 @@ export function Director() {
       const moving = next.clock.t > 0;
       if (moving || s.slot !== next || s.width !== size.x || s.height !== size.y) {
         next.portal.uniforms.map!.value = blackTexture;
-        gl.setRenderTarget(target);
+        gl.setRenderTarget(ahead);
         gl.render(next.scene, next.camera);
-        gl.setRenderTarget(null);
         s.slot = moving ? null : next;
         s.width = size.x;
         s.height = size.y;
       }
     }
-    current.portal.uniforms.map!.value = portalLive ? target.texture : blackTexture;
+    current.portal.uniforms.map!.value = portalLive ? ahead.texture : blackTexture;
+    gl.setRenderTarget(frame);
     gl.render(current.scene, current.camera);
 
-    const fade = (t - (TIMING.total - SAFETY_FADE)) / SAFETY_FADE;
-    if (portalLive && fade > 0) {
-      overlay.material.uniforms.map!.value = target.texture;
-      overlay.material.uniforms.resolution!.value.copy(size);
-      overlay.material.uniforms.opacity!.value = Math.min(1, fade * fade * (3 - 2 * fade));
-      gl.autoClear = false;
-      gl.render(overlay.scene, overlay.camera);
-      gl.autoClear = true;
-    }
+    // In the last half second the next scene is faded over any leftovers of the current one, so
+    // that at t = TIMING.total the frame is the next scene's picture and nothing else.
+    const x = portalLive ? Math.min(1, Math.max(0, (t - (TIMING.total - SAFETY_FADE)) / SAFETY_FADE)) : 0;
+    post.render(gl, frame.texture, lookAt(look, current.id, next.id, t), ahead.texture, x * x * (3 - 2 * x));
   }, 1);
 
   return (
