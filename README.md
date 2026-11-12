@@ -29,10 +29,10 @@ bun run build    # static build in dist/
   playing order picks its season (`index % 4`), and its 25 s are the last 5 s of the season before
   followed by its own 20, so the scene that is leaving and the one arriving ride the same piece
   of track with the same bank and speed, and the portal between them is a true window. The rail
-  owns position, heading, bank and speed; a scene builds its world around its stretch. No scene
-  rides it yet (a first burrow on it was reverted in pass 002): all four still have their own
-  tracks and meet in the legacy seam state the same file describes: dead straight along the view
-  axis, without rotating, at one common speed.
+  owns position, heading, bank and speed; a scene builds its world around its stretch. The burrow
+  rides summer this way. Helix, dollhouse and orbit still have their own tracks and meet the rail
+  in the legacy seam state the same file describes: dead straight along the view axis, without
+  rotating, at one common speed.
 - Scenes are listed in `src/scenes/index.ts` and loop in that order. To add one, write a component
   that takes `SceneProps`, ask the rail for its stretch with `season(index)`, build the world
   along `stretch.frame(distance)`, put `portalMaterial` on an exit standing at

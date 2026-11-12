@@ -10,7 +10,7 @@ import {
   Vector2,
   Vector3,
 } from "three";
-import { HOOP, PROFILE, type Chamber, type PathTable } from "./build";
+import { HOOP, PROFILE, floorY, footRadius, troughY, wallRelief, type Chamber, type Station } from "./build";
 import type { Shared } from "./materials";
 
 /**
@@ -39,77 +39,112 @@ const FOG_GLSL = /* glsl */ `
   float fogAmount(float d) { float x = d * uFogD; return 1.0 - exp(-x * x); }
 `;
 
-/** height of the corridor's trough at lateral offset x */
-const troughY = (x: number) => PROFILE.hc - PROFILE.bLo * Math.cbrt(Math.max(0, 1 - Math.abs(x / PROFILE.a) ** PROFILE.nLo));
-
 const inChamber = (chambers: Chamber[], p: Vector3, grow = 0) =>
   chambers.some((ch) => {
-    const ey = (p.y - ch.yc) / (ch.H + grow);
+    const ey = (p.y - ch.c.y - ch.yc) / (ch.H + grow);
     return ((p.x - ch.c.x) ** 2 + (p.z - ch.c.z) ** 2) / (ch.R + grow) ** 2 + ey * ey < 1;
   });
 
 export interface CreatureInput {
   chambers: Chamber[];
-  corridorPts: Vector3[][];
-  table: PathTable;
-  sHoop: number;
+  corridorPts: Station[][];
+  /** stands of tall mushrooms: the foot of the wall they grow at, and the way they lean */
+  groves: { p: Vector3; lean: Vector3; tall: boolean }[];
+  /** the thread's course across the floors */
+  route: Vector3[];
   hoopPos: Vector3;
+  /** unit vector in plan from the hoop towards the arriving camera */
+  arrive: Vector3;
 }
 
 export function buildCreatures(world: CreatureInput, shared: Shared) {
   const { chambers, corridorPts } = world;
   const rnd = mulberry32(31337);
-  const UP = new Vector3(0, 1, 0);
 
   // -------------------------------------------------------------------------------------------
   // eyes
   // -------------------------------------------------------------------------------------------
   const eyePos: number[] = []; // centre + radius
   const eyeAxis: number[] = []; // the wall's inward normal + seed
-  const addEye = (p: Vector3, inward: Vector3, r: number) => {
+  const addEye = (p: Vector3, inward: Vector3, r: number, seed: number) => {
     // sunk a third of the way into the wall
     eyePos.push(p.x - inward.x * r * 0.3, p.y - inward.y * r * 0.3, p.z - inward.z * r * 0.3, r);
-    eyeAxis.push(inward.x, inward.y, inward.z, rnd());
+    eyeAxis.push(inward.x, inward.y, inward.z, seed);
   };
-  const T = new Vector3();
-  const side = new Vector3();
   const p = new Vector3();
   const n = new Vector3();
+  const mid = new Vector3();
+  /** an eye in a corridor's wall at one of its stations: `phi` runs from 1.3, just below the widest point, to 2.45, high on the vault */
+  const wallEye = (st: Station, sgn: number, phi: number, r: number, seed = rnd()) => {
+    const { c, side, up: bed, k } = st;
+    const sn = Math.sin(phi);
+    const cs = -Math.cos(phi);
+    const up = cs >= 0;
+    const e = 2 / (up ? PROFILE.nUp : PROFILE.nLo);
+    const x = PROFILE.a * Math.abs(sn) ** e * 1.05 * k;
+    const y = (PROFILE.hc + (up ? PROFILE.bUp * 1.05 : PROFILE.bLo) * Math.sign(cs) * Math.abs(cs) ** e) * k;
+    p.copy(c).addScaledVector(side, x * sgn).addScaledVector(bed, y);
+    if (inChamber(chambers, p, 0.6)) return;
+    // towards the tunnel's axis, flattened a little
+    mid.copy(c).addScaledVector(bed, y + (PROFILE.hc * k - y) * 0.5);
+    n.copy(mid).sub(p).normalize();
+    addEye(p, n, r, seed);
+  };
+  // The watchers of the arrival, set where the camera on the rail faces them: two or three are open
+  // and in frame all the way down the first gallery. [station, side (1 = right), phi, radius, seed]
+  const watchers: [number, number, number, number, number][] = [
+    [50, 1, 1.75, 0.36, 0.62],
+    [70, -1, 1.95, 0.3, 0.22],
+    [80, 1, 2.05, 0.42, 0.86],
+    [100, -1, 1.75, 0.34, 0.55],
+    [110, 1, 1.8, 0.4, 0.12],
+    [130, -1, 2.0, 0.44, 0.78],
+    [140, 1, 1.75, 0.36, 0.33],
+    [150, -1, 1.7, 0.32, 0.66],
+  ];
+  for (const [i, sgn, phi, r, seed] of watchers) {
+    const st = corridorPts[0]![i];
+    if (st) wallEye(st, sgn, phi, r, seed);
+  }
   for (const pts of corridorPts) {
     // row 0, 10, 20 .. lie in the hollows between two ribs
     for (let i = 10; i < pts.length - 10; i += 10) {
       if (rnd() > 0.5) continue;
-      const c = pts[i]!;
-      T.copy(pts[i + 1]!).sub(pts[i - 1]!).normalize();
-      side.crossVectors(T, UP).normalize();
-      const sgn = rnd() < 0.5 ? -1 : 1;
-      const phi = 1.3 + rnd() * 1.15; // from just below the widest point to high on the vault
-      const s = Math.sin(phi);
-      const cs = -Math.cos(phi);
-      const up = cs >= 0;
-      const e = 2 / (up ? PROFILE.nUp : PROFILE.nLo);
-      const x = PROFILE.a * Math.abs(s) ** e * 1.05;
-      const y = PROFILE.hc + (up ? PROFILE.bUp * 1.05 : PROFILE.bLo) * Math.sign(cs) * Math.abs(cs) ** e;
-      p.set(c.x + side.x * x * sgn, y, c.z + side.z * x * sgn);
-      if (inChamber(chambers, p, 0.6)) continue;
-      n.set(c.x - p.x, (PROFILE.hc - p.y) * 0.5, c.z - p.z).normalize();
-      addEye(p, n, 0.13 + 0.2 * rnd() ** 2);
+      if (pts === corridorPts[0] && watchers.some((w) => w[0] === i)) continue;
+      wallEye(pts[i]!, rnd() < 0.5 ? -1 : 1, 1.3 + rnd() * 1.15, 0.13 + 0.2 * rnd() ** 2);
     }
   }
+  /** an eye in a chamber's wall, `bearing` degrees round it (0 = towards -Z, positive to the left) and y above its floor */
+  const domeEye = (ch: Chamber, th: number, y: number, r: number, seed = rnd()) => {
+    // on the wall as it is built there, ridge or hollow
+    const rho = ch.R * Math.sqrt(1 - ((y - ch.yc) / ch.H) ** 2) * wallRelief(ch, th, y);
+    const dx = Math.sin(th);
+    const dz = Math.cos(th);
+    p.set(ch.c.x + dx * rho, ch.c.y + y, ch.c.z + dz * rho);
+    n.set((-dx * rho) / (ch.R * ch.R), -(y - ch.yc) / (ch.H * ch.H), (-dz * rho) / (ch.R * ch.R)).normalize();
+    addEye(p, n, r, seed);
+  };
+  // junction 1: the walls the camera faces as it swings round the knot, to either side of the way out
+  for (const [bearing, y, r, seed] of [
+    // two big light sleepers flank the far mouth: they are open, behind the knot, before the camera is in the room
+    [-24, 2.9, 0.58, 0.07],
+    [24, 3.6, 0.6, 0.12],
+    [-36, 4.4, 0.36, 0.25],
+    [-43, 2.1, 0.3, 0.8],
+    [-91, 2.6, 0.42, 0.3],
+    [-85, 4.9, 0.3, 0.62],
+    [-102, 3.6, 0.36, 0.86],
+  ] as const)
+    domeEye(chambers[0]!, ((bearing + 180) * Math.PI) / 180, y, r, seed);
   for (const ch of chambers) {
     const count = Math.round(ch.R * 4.2);
     for (let k = 0, tries = 0; k < count && tries < 400; tries++) {
       // between two ridges, anywhere from knee height to most of the way up the dome
       const th = ((Math.floor(rnd() * ch.ridges) + 0.03) / ch.ridges) * Math.PI * 2;
       const y = 1.1 + rnd() ** 1.3 * (ch.yc + ch.H * 0.78 - 1.1);
-      const rho = ch.R * Math.sqrt(1 - ((y - ch.yc) / ch.H) ** 2);
-      const dx = Math.sin(th);
-      const dz = Math.cos(th);
       // not in a doorway
-      if (y < 5 && ch.doors.some((d) => d.x * dx + d.z * dz > Math.cos(2.6 / ch.R))) continue;
-      p.set(ch.c.x + dx * rho, y, ch.c.z + dz * rho);
-      n.set(-dx * rho / (ch.R * ch.R), -(y - ch.yc) / (ch.H * ch.H), -dz * rho / (ch.R * ch.R)).normalize();
-      addEye(p, n, (0.16 + 0.3 * rnd() ** 2.5) * (ch.R > 8 ? 1.5 : 1));
+      if (ch.doors.some((d) => y < 5.2 * d.k && d.dir.x * Math.sin(th) + d.dir.z * Math.cos(th) > Math.cos((2.1 * d.k + 0.6) / ch.R))) continue;
+      domeEye(ch, th, y, (0.16 + 0.3 * rnd() ** 2.5) * (ch.R > 8 ? 1.5 : 1));
       k++;
     }
   }
@@ -221,35 +256,46 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       addShroom(x + Math.cos(a) * d, y, z + Math.sin(a) * d, h * (i === 0 ? 1 : 0.3 + rnd() * 0.45), leanX, leanZ);
     }
   };
+  // the thread's course, to keep clear of: the camera rides right above it
+  const route = world.route;
+  const nearRoute = (x: number, z: number, d: number) => route.some((q) => (q.x - x) ** 2 + (q.z - z) ** 2 < d * d);
   for (const pts of corridorPts) {
     for (let i = 3; i < pts.length - 3; i += 2) {
       if (rnd() > 0.3) continue;
-      const c = pts[i]!;
-      T.copy(pts[i + 1]!).sub(pts[i - 1]!).normalize();
-      side.crossVectors(T, UP).normalize();
+      const { c, side, up, k, rib } = pts[i]!;
+      // not on a doorway's sill, where the trough is pressed flat
+      if (rib < 0.7) continue;
       const sgn = rnd() < 0.5 ? -1 : 1;
-      const x = (0.95 + rnd() * 0.5) * sgn;
-      p.set(c.x + side.x * x, troughY(x), c.z + side.z * x);
-      if (inChamber(chambers, p, 0.3)) continue;
-      cluster(p.x, p.y - 0.03, p.z, 0.22 + rnd() ** 2 * 0.55, -side.x * sgn * 0.25, -side.z * sgn * 0.25);
+      const x = (0.95 + rnd() * 0.5) * sgn * k;
+      const h = 0.22 + rnd() ** 2 * 0.55;
+      p.copy(c).addScaledVector(side, x).addScaledVector(up, troughY(x, k));
+      if (inChamber(chambers, p, 0.3) || nearRoute(p.x, p.z, 1.05)) continue;
+      cluster(p.x, p.y - 0.03, p.z, h, -side.x * sgn * 0.25, -side.z * sgn * 0.25);
     }
   }
-  // the thread's course across the chamber floors, to keep clear of
-  const route: Vector3[] = [];
-  for (let s = 0; s < world.sHoop; s += 0.5) route.push(world.table.at(s, new Vector3()));
-  const nearRoute = (x: number, z: number, d: number) => route.some((q) => (q.x - x) ** 2 + (q.z - z) ** 2 < d * d);
+  // groves: one tall mushroom and its family. In a junction they stand well off the thread and grow
+  // tall; in the tunnel they keep to the foot of the wall, lean back against it and stay under the eye.
+  for (const g of world.groves)
+    for (let i = 0; i < 4; i++) {
+      const a = rnd() * 6.283;
+      const d = i === 0 ? 0 : 0.25 + rnd() * 0.35;
+      const tall = g.tall ? 1.15 + rnd() * 0.3 : 0.82 + rnd() * 0.13;
+      const h = i === 0 ? tall : 0.35 + rnd() * 0.4;
+      const lean = g.tall ? 0.22 : -0.1;
+      cluster(g.p.x + Math.cos(a) * d - g.lean.x * 0.1, g.p.y - 0.05, g.p.z + Math.sin(a) * d - g.lean.z * 0.1, h, g.lean.x * lean, g.lean.z * lean);
+    }
   for (const ch of chambers) {
     const big = ch.R > 8;
     const count = Math.round(ch.R * (big ? 6 : 4));
     for (let k = 0, tries = 0; k < count && tries < 600; tries++) {
       const a = rnd() * 6.283;
-      const r = ch.R * (0.45 + 0.5 * rnd() ** 0.6);
+      const r = Math.min(ch.R * (0.45 + 0.5 * rnd() ** 0.6), footRadius(ch) * 0.93);
       const x = ch.c.x + Math.sin(a) * r;
       const z = ch.c.z + Math.cos(a) * r;
       if (nearRoute(x, z, 2.1)) continue;
       // doorways stay open
-      if (ch.doors.some((d) => d.x * Math.sin(a) + d.z * Math.cos(a) > Math.cos(2.4 / r) && r > ch.R * 0.7)) continue;
-      cluster(x, -0.02, z, (0.3 + rnd() ** 2 * (big ? 1.5 : 0.9)) * (0.6 + 0.6 * (r / ch.R)), 0, 0);
+      if (ch.doors.some((d) => d.dir.x * Math.sin(a) + d.dir.z * Math.cos(a) > Math.cos((2.4 * d.k) / r) && r > ch.R * 0.7)) continue;
+      cluster(x, floorY(ch, r) - 0.02, z, (0.3 + rnd() ** 2 * (big ? 1.5 : 0.9)) * (0.6 + 0.6 * (r / ch.R)), 0, 0);
       k++;
     }
   }
@@ -257,12 +303,11 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
   {
     const N = 26;
     const ch = chambers[chambers.length - 1]!;
-    const d = ch.doors[0]!;
-    const facing = Math.atan2(d.x, d.z);
+    const facing = Math.atan2(world.arrive.x, world.arrive.z);
     for (let i = 0; i < N; i++) {
       const a = facing + 0.62 + ((Math.PI * 2 - 1.24) * i) / (N - 1);
       const r = HOOP.rx + 1.5 + 0.25 * Math.sin(i * 2.4);
-      addShroom(world.hoopPos.x + Math.sin(a) * r, -0.02, world.hoopPos.z + Math.cos(a) * r, 0.42 + 0.3 * rnd(), -Math.sin(a) * 0.12, -Math.cos(a) * 0.12);
+      addShroom(world.hoopPos.x + Math.sin(a) * r, floorY(ch, r) - 0.02, world.hoopPos.z + Math.cos(a) * r, 0.42 + 0.3 * rnd(), -Math.sin(a) * 0.12, -Math.cos(a) * 0.12);
     }
   }
 
@@ -280,7 +325,7 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
         [0.15, 1.13],
         [0, 1.17],
       ].map(([x, y]) => new Vector2(x, y)),
-      12,
+      18,
     );
     shroomGeo.index = base.index;
     shroomGeo.setAttribute("position", base.getAttribute("position"));
@@ -359,6 +404,10 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
   return {
     eyes,
     shrooms,
+    /** centre + radius, and inward normal + seed, of every eye: four numbers each */
+    eyeSpots: { pos: eyePos, axis: eyeAxis },
+    /** foot + height, and lean + phase + hue, of every mushroom: four numbers each */
+    shroomSpots: { pos: shroomPos, lean: shroomLean },
     dispose() {
       eyeGeo.dispose();
       eyeMat.dispose();
