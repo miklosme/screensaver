@@ -309,6 +309,17 @@ function tint(g: BufferGeometry, fn: (x: number, y: number, z: number) => V3): B
   return g;
 }
 
+/** marks each face of an extruded slab for the keyhole shader: 1 front, 2 back, 3 edge */
+function faceKinds(g: BufferGeometry) {
+  const nor = g.getAttribute("normal");
+  const k = new Float32Array(nor.count * 3);
+  for (let i = 0; i < nor.count; i++) {
+    const nz = nor.getZ(i);
+    k[i * 3 + 2] = nz > 0.75 ? 1 : nz < -0.75 ? 2 : 3;
+  }
+  g.setAttribute("aTile", new BufferAttribute(k, 3));
+}
+
 /**
  * A solid of revolution from a profile of [radius, height, shade, brass] points, with smooth
  * normals along the profile. `shade` is baked occlusion; brass points are amber, the rest sandstone.
@@ -377,9 +388,9 @@ const SKY_GLSL = /* glsl */ `
   }
 `;
 
-type Detail = "plain" | "strata" | "wall" | "stair" | "column" | "post" | "globe";
+type Detail = "plain" | "strata" | "wall" | "stair" | "column" | "post" | "globe" | "keyhole";
 /** details that carve the surface: they write a height into `hxH` and the normal follows it */
-const BUMPED: Detail[] = ["stair", "column", "post"];
+const BUMPED: Detail[] = ["stair", "column", "post", "keyhole"];
 
 const WALL_W = (TAU * WALL_R) / WALL_N; // width of one arcade module
 const WALL_ARCH = WALL_W * 0.33; // radius of its arch
@@ -395,6 +406,15 @@ const hxTime = { value: 0 };
  * Filled in by getAssets, read when the column's program is compiled on the first frame.
  */
 const hxStairs = { offMain: 0, offTwin: 0, endMain: 0, endTwin: 0 };
+/** the two lamps that flank the door, in world space; filled in by getAssets, they light the arch */
+const hxLamps = { value: [new Vector3(), new Vector3()] };
+
+// The keyhole arch's carving, in the stele's own coordinates (x across, y up from the landing).
+const KH_YJ = DOOR_CY - Math.sqrt(DOOR_R * DOOR_R - DOOR_A * DOOR_A); // where the jambs meet the circle
+const KH_SPRING = Math.atan2(DOOR_A, KH_YJ - DOOR_CY); // the springer joint's angle from straight up
+const KH_VOUSS = (2 * KH_SPRING) / 19; // nineteen voussoirs, the keystone in the middle
+const KH_COURSE = KH_YJ / 4; // four courses up each jamb
+
 const THETA0 = -FLARE - TURNS * TAU;
 const PITCH = SLOPE * TAU * R0;
 function stairAoGlsl(): string {
@@ -616,6 +636,94 @@ const DETAIL_GLSL: Record<Detail, string> = {
       }
       diffuseColor.rgb *= m * hxStairAO(vHxW);
     }`,
+  // The keyhole arch: a thin carved slab. Radial voussoirs with a raised keystone round the
+  // keyhole, coursed jambs below the springer joints, a bead moulding round the opening, and a
+  // band of turquoise inlay set with studs that match the arcade's gems. Laid out from a distance
+  // field of the opening in the stele's own coordinates. vTile.z: 1 face, 2 back, 3 edge or reveal.
+  keyhole: /* glsl */ `
+    {
+      vec3 p = vHxL;
+      float kind = vTile.z;
+      float wpx = length(fwidth(vHxW)) * 0.8 + 1e-4;
+      float fine = 1.0 - smoothstep(0.03, 0.15, wpx);
+      float g = hxGrain(p + vec3(11.0, 0.0, 5.0), wpx);
+      vec3 m = hxTint(p) * (1.0 + 0.16 * g);
+      hxH += 0.004 * g;
+      // distance from the opening: a circle on a shaft
+      vec2 c = p.xy - vec2(0.0, ${glf(DOOR_CY)});
+      vec2 bq = vec2(abs(p.x) - ${glf(DOOR_A)}, c.y);
+      float dIn = min(length(c) - ${glf(DOOR_R)}, length(max(bq, 0.0)) + min(max(bq.x, bq.y), 0.0));
+      float w = max(dIn, 0.0);                          // metres out from the opening's edge
+      float ang = atan(c.x, c.y);                       // 0 straight up, +-${glf(KH_SPRING)} at the springers
+      float rad = length(c);
+      // the springer joint, a radial line through the jamb's top corner
+      float spring = abs(abs(c.x) * ${glf(Math.cos(KH_SPRING))} - c.y * ${glf(Math.sin(KH_SPRING))});
+      bool arch = abs(ang) < ${glf(KH_SPRING)};
+      float jd, along, id;
+      if (arch) {
+        float seg = ang / ${glf(KH_VOUSS)} + 0.5;
+        id = floor(seg);
+        float f = fract(seg);
+        jd = min(f, 1.0 - f) * ${glf(KH_VOUSS)} * rad;
+        along = (f - 0.5) * ${glf(KH_VOUSS)} * rad;
+      } else {
+        float cr = p.y / ${glf(KH_COURSE)};
+        id = 20.0 + floor(cr) * 2.0 + step(0.0, p.x);
+        float f = fract(cr);
+        jd = min(f, 1.0 - f) * ${glf(KH_COURSE)};
+        along = (f - 0.5) * ${glf(KH_COURSE)};
+        // every other course is two stones, so the jamb is bonded like the arcade's quoins
+        if (mod(floor(cr), 2.0) > 0.5) jd = min(jd, abs(w - 0.46));
+      }
+      jd = min(jd, spring);
+      bool key = arch && id == 0.0;
+      // each stone its own bed: alternating ivory and honey voussoirs, a pale keystone
+      float sh = hxHash(vec2(id, 3.0));
+      m *= key ? vec3(1.12, 1.08, 1.0) : mod(id, 2.0) < 0.5 ? vec3(1.04, 1.0, 0.94) : vec3(0.93, 0.76, 0.6);
+      m *= 0.9 + 0.16 * sh;
+      // joints: pillowed edges and a fine dark line, which fade once a pixel covers them
+      float pillow = max(0.0, 1.0 - jd / 0.07);
+      hxH -= 0.03 * pillow * pillow;
+      float jw = max(0.014, wpx * 0.6);
+      float joint = 1.0 - smoothstep(jw * 0.5, jw + wpx, jd);
+      m *= (1.0 - mix(0.6, 0.3, smoothstep(0.01, 0.05, wpx)) * joint) * (1.0 - 0.2 * pillow * pillow);
+      float ao = mix(0.42, 1.0, smoothstep(0.0, 1.1, p.y));   // where the jambs meet the landing
+      if (kind < 1.5) {
+        // worn arrises at the opening and the outer edge
+        float inner = max(0.0, 1.0 - w / 0.05);
+        float outer = max(0.0, (w - 0.72) / 0.08);
+        hxH -= 0.035 * (inner * inner + outer * outer);
+        m *= 1.0 + 0.08 * hxBand(w, 0.0, 0.03, wpx);
+        if (key) {
+          // the keystone stands proud of the face and runs over the bead
+          hxH += 0.03 * smoothstep(0.02, 0.05, w);
+        } else {
+          // a round bead between two quirks, carved in every stone round the opening
+          float b = (w - 0.13) / 0.055;
+          float bead = sqrt(max(0.0, 1.0 - b * b));
+          hxH += 0.04 * bead;
+          float quirk = hxBand(w, 0.055, 0.075, wpx) + hxBand(w, 0.185, 0.205, wpx);
+          hxH -= 0.012 * quirk;
+          ao *= 1.0 - 0.55 * quirk;
+          m *= mix(0.78, 1.1, bead);
+        }
+        // the inlay: a sunk turquoise band, studded at the middle of every stone
+        float band = hxBand(w, 0.625, 0.695, wpx);
+        float stud = (abs(along) / (key ? 0.15 : 0.11) + abs(w - 0.66) / (key ? 0.1 : 0.075));
+        float st = 1.0 - smoothstep(1.0 - wpx * 12.0, 1.0 + wpx * 12.0, stud);
+        float inlay = max(band, st);
+        hxH -= 0.006 * band * (1.0 - st);
+        float rim = hxBand(stud, 1.0, 1.25, wpx * 10.0) * (1.0 - band);
+        m *= 1.0 - 0.25 * rim;
+        float pulse = 0.5 + 0.5 * sin(id * 0.7 - uHxT * 1.3);
+        m = mix(m, vec3(0.1, 0.45, 0.45) * (0.9 + 0.2 * g), inlay);
+        hxGlow += vec3(0.05, 0.75, 0.62) * (band * (1.0 - st) * 0.12 + st * (0.3 + 0.9 * pulse * pulse));
+      } else if (kind > 2.5 && dIn < 0.2) {
+        // the inner reveal, shaded deeper toward the feet
+        ao *= 0.72;
+      }
+      diffuseColor.rgb *= m * ao;
+    }`,
   // turned lamp posts and balusters: grain only, their banding is in the geometry
   post: /* glsl */ `
     {
@@ -633,9 +741,22 @@ const DETAIL_GLSL: Record<Detail, string> = {
     }`,
 };
 
+/** the door lamps' warm wash on the arch, after the carved normal is known; fog still dims it */
+const KEYHOLE_LAMPS_GLSL = /* glsl */ `
+          {
+            vec3 nw = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
+            for (int i = 0; i < 2; i++) {
+              vec3 l = uHxLamp[i] - vHxW;
+              float d2 = dot(l, l);
+              float nl = max(dot(nw, l * inversesqrt(d2)), 0.0);
+              hxGlow += diffuseColor.rgb * vec3(1.0, 0.55, 0.22) * 2.6 * nl / (1.0 + 0.8 * d2 * d2 * 0.25);
+            }
+          }`;
+
 function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
   mat.onBeforeCompile = (s) => {
     s.uniforms.uHxT = hxTime;
+    s.uniforms.uHxLamp = hxLamps;
     s.vertexShader = s.vertexShader
       .replace(
         "#include <common>",
@@ -666,6 +787,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
         varying vec3 vHxN;
         varying vec3 vTile;
         uniform float uHxT;
+        uniform vec3 uHxLamp[2];
         vec3 hxGlow = vec3(0.0);
         float hxH = 0.0; // carved height (metres) the bumped details write; the normal follows it
         float hxHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -721,7 +843,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             float det = dot(sx, r1);
             vec3 grad = sign(det) * (dFdx(hxH) * r1 + dFdy(hxH) * r2);
             normal = normalize(abs(det) * normal - grad);
-          }`
+          }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "")
           : "#include <normal_fragment_maps>",
       )
       .replace(
@@ -761,6 +883,7 @@ interface Assets {
   doorBack: BufferGeometry;
   doorPortal: BufferGeometry;
   stone: MeshLambertMaterial;
+  keyholeMat: MeshLambertMaterial;
   columnMat: MeshLambertMaterial;
   postMat: MeshLambertMaterial;
   post: BufferGeometry;
@@ -884,6 +1007,7 @@ function getAssets(): Assets {
       const e = edge(END - 1.6, side, heightAt(END) + 2.5, 0.22);
       pushPost([e[0], heightAt(END), e[2]], 1.1);
       pushLantern(e[0], e[1], e[2], 1.15);
+      hxLamps.value[side < 0 ? 0 : 1]!.set(e[0], e[1], e[2]);
     }
     HEND = heightAt(END);
     hxStairs.endMain = END;
@@ -1079,28 +1203,31 @@ function getAssets(): Assets {
   const hole = new Path();
   keyholeOutline(hole, 0, 0);
   outer.holes.push(hole);
+  // a thin slab: 20 cm of stone, its chamfer still wide enough to hide the portal's edge
   const doorFrame = new ExtrudeGeometry(outer, {
-    depth: 0.5, bevelEnabled: true, bevelSize: 0.09, bevelThickness: 0.09, bevelSegments: 2, curveSegments: 40,
+    depth: 0.12, bevelEnabled: true, bevelSize: 0.07, bevelThickness: 0.04, bevelSegments: 2, curveSegments: 72,
   });
-  doorFrame.translate(0, 0, -0.2);
+  doorFrame.translate(0, 0, -0.06);
   doorFrame.deleteAttribute("uv");
   tint(doorFrame, (_x, y, z) => {
-    const s = (0.95 + 0.25 * smooth(0, 9, y)) * (z > 0.2 ? 1 : 0.8);
+    const s = (0.86 + 0.1 * smooth(0, 9, y)) * (z > -0.05 ? 1 : 0.8);
     return [IVORY[0] * s, IVORY[1] * s, IVORY[2] * s];
   });
+  faceKinds(doorFrame);
   const slab = new Shape();
   keyholeOutline(slab, DOOR_FRAME - 0.02, 0);
-  const doorBack = new ExtrudeGeometry(slab, { depth: 0.22, bevelEnabled: false, curveSegments: 40 });
-  doorBack.translate(0, 0, -0.42);
+  const doorBack = new ExtrudeGeometry(slab, { depth: 0.05, bevelEnabled: false, curveSegments: 72 });
+  doorBack.translate(0, 0, -0.15);
   doorBack.deleteAttribute("uv");
   tint(doorBack, (x, y) => {
     const d = Math.hypot(x, y - DOOR_CY);
     const s = 0.75 + 0.2 * Math.sin(d * 3.0) * smooth(4.2, 3.0, d);
     return [SAND[0] * s, SAND[1] * s, SAND[2] * s];
   });
+  faceKinds(doorBack);
   const open = new Shape();
   keyholeOutline(open, 0.06, 0);
-  const doorPortal = new ShapeGeometry(open, 40);
+  const doorPortal = new ShapeGeometry(open, 72);
   pathAt(path, END, P);
   pathTangent(path, END, T);
   const doorPos = P.clone();
@@ -1136,6 +1263,7 @@ function getAssets(): Assets {
   const stairMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "stair");
   const columnMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "column");
   const postMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "post");
+  const keyholeMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "keyhole");
   // between the stair's flare and the arcade, from far below the camera's start to above the door
   const koi = createKoi({
     count: 84, rMin: 18.5, rMax: 33, yMid: HEND - 22, yRange: 150, fogNear: FOG_NEAR, fogFar: FOG_FAR, skyGlsl: SKY_GLSL,
@@ -1203,7 +1331,7 @@ function getAssets(): Assets {
     lantern: new SphereGeometry(0.22, 28, 16),
     sky: new SphereGeometry(1200, 24, 16),
     points, doorFrame, doorBack, doorPortal,
-    stone, columnMat, postMat, wallMat, stairMat, koi, glow, skyMat, pointsMat,
+    stone, keyholeMat, columnMat, postMat, wallMat, stairMat, koi, glow, skyMat, pointsMat,
     balusterM: new Float32Array(balusters),
     postM: new Float32Array(posts),
     lanternM: new Float32Array(lanterns),
@@ -1248,7 +1376,9 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     door.position.copy(A.doorPos);
     door.rotation.y = A.doorYaw;
     const portal = new Mesh(A.doorPortal, portalMaterial);
-    door.add(new Mesh(A.doorFrame, A.stone), new Mesh(A.doorBack, A.stone), portal);
+    const doorBack = new Mesh(A.doorBack, A.keyholeMat);
+    doorBack.renderOrder = 1; // after the portal, so the depth test spares the carving behind it
+    door.add(new Mesh(A.doorFrame, A.keyholeMat), doorBack, portal);
     root.add(sky, column, stairs, rails, balusters, postMesh, lanterns, wall, sats, A.koi.mesh, points, door);
     return { A, root, sky, column, sats, instancedMeshes: [balusters, postMesh, lanterns, wall, sats] };
   }, [portalMaterial]);
