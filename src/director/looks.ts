@@ -55,8 +55,9 @@ export const looks: Record<string, Look> = {
   // mint spores, cap spots and the path are green and white; the coral walls next to the camera are
   // as bright but red, so red counts for less here and the walls stay out of it
   burrow: { ...neutral, bloom: 2, threshold: 0.5, knee: 0.2, spread: 0.75, counts: [0.45, 1, 1], vignette: 0.34 },
-  // daylight pastels sit at 0.9 across the whole frame: anything lower than this veils the scene
-  dollhouse: { ...neutral, bloom: 0.25, threshold: 1.15, knee: 0.1, spread: 0.6, vignette: 0.2 },
+  // daylight: sunlit sand and the pale band of the sky reach 2 in their strongest channel, and anything
+  // lower than this veils the whole scene. Only the sun, the sparkles and the lights indoors are above it.
+  dollhouse: { ...neutral, bloom: 0.25, threshold: 2.6, knee: 0.3, spread: 0.6, vignette: 0.2 },
   // lamps at 1.6, the moon at 0.9, windows at 0.55, against towers at 0.1
   orbit: { ...neutral, bloom: 1.8, threshold: 0.45, knee: 0.2, spread: 0.75, vignette: 0.32 },
 };
