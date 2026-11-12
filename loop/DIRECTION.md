@@ -4,6 +4,48 @@ The owner's channel into the loop. The director reads this at the start of every
 
 ## From the owner
 
+Nothing waiting. Write notes here in any form; the director turns each into backlog items at the
+top of the queue, then moves it below.
+
+## Questions for the owner
+
+The director writes here when something needs a decision only the owner can make, such as
+raising a budget or changing something `DESIGN.md` lists as fixed. The loop carries on with
+other work in the meantime.
+
+**From pass 001:**
+
+1. **The seam yardstick.** `scripts/look.ts seams` froze the outgoing scene at t=24.99 and
+   compared it with the incoming one at t=5, so its number was 0.01 s of camera travel, not a
+   seam: with pass 001's work it read 9.56% on helix→burrow (over the 7% budget) while the two
+   sides of that cut, compared at the same instant, differ by 0.002%. I changed it to compare
+   24.99 against 4.99 (commit `6858497`, one line) and tightened `seamRmse` from 0.07 to 0.01;
+   the seams now measure 0.00 to 0.28%. `DESIGN.md` still describes the old instants under
+   "Budgets". Say so if you want the old measure back; otherwise that line of `DESIGN.md` is
+   yours to update.
+2. **How to read "revert when one reviewer reports a regression and the frames show they are
+   right".** Read to the letter it would have reverted D1 (sol: thin shadow streaks on the sand
+   at dollhouse t=8.5, and they are there) and K1 (fable: the helix's amber glow is weaker than
+   at pass 000, and it is). I kept both, because the same reviewers scored those scenes a point
+   higher and the frames are clearly better overall, and put each regression at the top of its
+   scene's queue (D4, H3). With two reviewers I revert without judging (B1 and O1 went that way).
+   Is that the reading you want, or should one confirmed regression always revert?
+3. **The rail.** Two things would sharpen K4 before it is built in pass 002. What feels unsmooth
+   today: the straight run into every exit, the turns between them, or the way the look
+   direction and field of view move? And may the rail roll the camera right over (a loop, a
+   barrel roll), or should the horizon stay roughly level outside the orbit? Until you say, K4
+   keeps today's straight, level joints (so a scene on the new rail can meet one still on its
+   old track without a jolt) and puts the loops and banking in the 14 seconds between them.
+
+## Handled
+
+Notes the director has acted on, each with the pass number.
+
+**Pass 001** — queued as K4 (the seasonal rail, with the burrow as pilot), H5/D3/O4 (the other
+three scenes rebuilt around their seasons) and S1 (a fifth world designed by Fable, built by
+Opus; the entropy plan is written into that item) at the top of `BACKLOG.md`. K4 is pass 002's
+keystone.
+
 ```
 let's make the rail more smooth
 
@@ -29,13 +71,3 @@ Clarifications to the note above, from the owner on 2026-11-12:
 - "i'd love to see the original four scenes again on the new rail system": helix, burrow,
   dollhouse and orbit stay in the show, each rebuilt around its season's segment while keeping
   the premise and palette `DESIGN.md` gives it.
-
-## Questions for the owner
-
-The director writes here when something needs a decision only the owner can make, such as
-raising a budget or changing something `DESIGN.md` lists as fixed. The loop carries on with
-other work in the meantime.
-
-## Handled
-
-Notes the director has acted on, each with the pass number.
