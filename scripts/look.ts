@@ -3,23 +3,27 @@
 //
 //   bun scripts/look.ts shots <outDir> <scene:t> [<scene:t> ...]   frozen frames, 1920x1080
 //   bun scripts/look.ts sheet <outDir> [scene ...]                 3x3 contact sheet per scene
-//   bun scripts/look.ts perf  <out.json> [--frames|--loop] [scene ...]  frame cost at 4K, and a 92 s hitch run
+//   bun scripts/look.ts perf  <out.json> [--frames|--loop] [scene ...]  frame cost at 4K, and a two-lap hitch run
 //   bun scripts/look.ts seams <out.json>                           picture difference across each takeover
 //   bun scripts/look.ts gate  <outDir> [--since <git-ref>]         all of the above + typecheck, build, diff
 //
-// It starts its own vite dev server on a free port, so it works unchanged inside a git worktree.
+// Scenes and timeline come from src/scenes (see scripts/show.ts), so a new scene is picked up as
+// soon as it is registered. It starts its own vite dev server on a free port, so it works
+// unchanged inside a git worktree.
 // Set BASE=http://localhost:5173 to reuse a running one, GPU=0 to fall back to swiftshader.
 // `gate` exits 1 when anything is over loop/budget.json; `perf` and `seams` do so too.
 import { $, spawn, type Subprocess } from "bun";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
+import { ROOT, TIMING, at, sceneIds } from "./show";
 
-const ROOT = resolve(import.meta.dir, "..");
-const SCENES = ["helix", "burrow", "dollhouse", "orbit"];
+const SCENES = await sceneIds();
 /** local times a contact sheet shows: arrival, release, solo, portal opening, exit, portal full */
-const SHEET_T = [0, 2.5, 5, 8.5, 12, 15.5, 19, 22, 24.5];
-const PERF_T = [0, 2.5, 5, 8, 10, 12, 14, 16, 18, 20, 22, 24, 24.8];
+const SHEET_T = [0, 2.5, 5, 8.5, 12, 15.5, 19, 22, 24.5].map(at);
+const PERF_T = [0, 2.5, 5, 8, 10, 12, 14, 16, 18, 20, 22, 24, 24.8].map(at);
+/** two full laps of the show at ?speed=2, and a margin: the second lap proves nothing is built late */
+const LOOP_MS = (SCENES.length * TIMING.cycle + 12) * 1000;
 const GPU = process.env.GPU !== "0";
 
 const children: Subprocess[] = [];
@@ -253,7 +257,7 @@ const HITCHES = (ms: number, limit: number) => `(async () => {
       last = now;
       if (now - start > 1000) {
         deltas.push(d);
-        const seq = S.live.seq, t = S.live.time - seq * 20 + 5;
+        const seq = S.live.seq, t = S.live.time - seq * ${TIMING.cycle} + ${TIMING.arrival};
         if (d > ${limit}) hitches.push({ ms: Math.round(d), scene: names[seq % names.length], t: +t.toFixed(2), lap: Math.floor(seq / names.length) });
       }
       if (now - start > ${ms}) done(); else requestAnimationFrame(tick);
@@ -302,10 +306,9 @@ async function perf(out: string, scenes: string[], part: "all" | "frames" | "loo
   if (b) reportLogs(b);
   b?.close();
   if (part !== "frames") {
-    // 92 s at double speed is a little over two full loops: the second one proves nothing is built late
     const h = await browser(1920, 1080);
     await h.open("/?speed=2");
-    result.loop = await h.evaluate(HITCHES(92_000, limits.hitchMs));
+    result.loop = await h.evaluate(HITCHES(LOOP_MS, limits.hitchMs));
     if (result.loop.contextLost) result.breaches.push("the WebGL context was lost during the loop run: the measurement is void");
     for (const x of result.loop.hitches)
       result.breaches.push(`hitch: ${x.ms} ms frame in ${x.scene} at t=${x.t}, lap ${x.lap} (budget ${limits.hitchMs} ms)`);
@@ -331,9 +334,9 @@ async function seams(out: string) {
   const result: any = { budget: limits.seamRmse, seams: {}, breaches: [] as string[] };
   for (let i = 0; i < SCENES.length; i++) {
     const from = SCENES[i]!, to = SCENES[(i + 1) % SCENES.length]!;
-    await b.open(`/?scene=${from}&t=24.99`);
+    await b.open(`/?scene=${from}&t=${TIMING.total - 0.01}`);
     await b.screenshot(join(dir, "a.png"));
-    await b.open(`/?scene=${to}&t=5`);
+    await b.open(`/?scene=${to}&t=${TIMING.arrival}`);
     await b.screenshot(join(dir, "b.png"));
     const cmp = await $`compare -metric RMSE ${join(dir, "a.png")} ${join(dir, "b.png")} null:`.nothrow().quiet();
     const rmse = Number(/\(([\d.e-]+)\)/.exec(cmp.stderr.toString())?.[1] ?? NaN);
@@ -416,7 +419,7 @@ try {
     const since = flag("--since");
     breaches = await gate(args[0]!, since);
   } else {
-    console.error((await Bun.file(import.meta.path).text()).split("\n").slice(1, 12).join("\n").replace(/^\/\/ ?/gm, ""));
+    console.error((await Bun.file(import.meta.path).text()).split("\n").slice(1, 14).join("\n").replace(/^\/\/ ?/gm, ""));
     process.exitCode = 2;
   }
 } finally {

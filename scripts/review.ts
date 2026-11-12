@@ -2,7 +2,9 @@
 // The review panel for one pass of the loop: independent reviewers on different models, each
 // answering loop/review.schema.json about the frames and numbers in a gate directory.
 //
-//   bun scripts/review.ts <passDir> [--prev <prevPassDir>] [--only astra,sol,fable,opus]
+//   bun scripts/review.ts <passDir> [--prev <prevPassDir>] [--only astra,sol,fable,opus] [--dry]
+//
+// --dry prints the prompt, the schema and the image list, and calls nobody.
 //
 // Default panel: GPT-6 Astra and GPT-6.1 Sol through the Codex CLI, Claude Fable 5.2 through the
 // Claude CLI. When a Codex reviewer fails (the ChatGPT plan's usage window is spent, or anything
@@ -13,11 +15,11 @@
 import { spawn } from "bun";
 import { existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { ROOT, at, sceneIds } from "./show";
 
-const ROOT = resolve(import.meta.dir, "..");
-const SCENES = ["helix", "burrow", "dollhouse", "orbit"];
+const SCENES = await sceneIds();
 /** frames of each scene shown at full size: mid-ride, and the approach to the exit */
-const CLOSE_T = [8.5, 22];
+const CLOSE_T = [8.5, 22].map(at);
 const TIMEOUT_MS = 20 * 60_000;
 
 type Reviewer = { cli: "codex" | "claude"; model: string };
@@ -37,8 +39,9 @@ const flag = (name: string) => {
 };
 const prevArg = flag("--prev");
 const only = flag("--only")?.split(",");
+const dry = args.includes("--dry") && args.splice(args.indexOf("--dry"), 1).length > 0;
 if (args.length !== 1) {
-  console.error("usage: bun scripts/review.ts <passDir> [--prev <prevPassDir>] [--only astra,sol,fable,opus]");
+  console.error("usage: bun scripts/review.ts <passDir> [--prev <prevPassDir>] [--only astra,sol,fable,opus] [--dry]");
   process.exit(2);
 }
 const passDir = resolve(args[0]!);
@@ -47,13 +50,22 @@ const rel = (p: string) => relative(ROOT, p);
 
 const sheets = SCENES.map((s) => join(passDir, `${s}.jpg`));
 const closeFrames = SCENES.flatMap((s) => CLOSE_T.map((t) => join(passDir, "frames", `${s}-${t}.png`)));
-const prevSheets = prevDir ? SCENES.map((s) => join(prevDir, `${s}.jpg`)) : [];
-for (const f of [...sheets, ...closeFrames, ...prevSheets, join(passDir, "gate.json")])
+// a scene added in this pass has no sheet in the previous one
+const prevSheets = prevDir ? SCENES.map((s) => join(prevDir, `${s}.jpg`)).filter(existsSync) : [];
+const newScenes = prevDir ? SCENES.filter((s) => !existsSync(join(prevDir, `${s}.jpg`))) : [];
+for (const f of [...sheets, ...closeFrames, join(passDir, "gate.json")])
   if (!existsSync(f)) throw new Error(`missing ${rel(f)}: run \`bun scripts/look.ts gate ${rel(passDir)}\` first`);
 const images = [...sheets, ...closeFrames, ...prevSheets];
 const hasDiff = existsSync(join(passDir, "diff.patch"));
 
-const schemaText = await Bun.file(join(ROOT, "loop/review.schema.json")).text();
+// loop/review.schema.json is written for the first four scenes; the scene names in it are
+// replaced with the ones the show has now
+const schema = await Bun.file(join(ROOT, "loop/review.schema.json")).json();
+schema.properties.scores.required = SCENES;
+schema.properties.scores.properties = Object.fromEntries(SCENES.map((s) => [s, { type: "integer", minimum: 1, maximum: 10 }]));
+for (const list of ["regressions", "problems", "opportunities"]) schema.properties[list].items.properties.scene.enum = [...SCENES, "all"];
+const schemaText = JSON.stringify(schema);
+const schemaFile = join(passDir, "review.schema.json");
 const prompt = [
   await Bun.file(join(ROOT, "loop/REVIEWER.md")).text(),
   "## This pass",
@@ -66,6 +78,7 @@ const prompt = [
   `- Numbers: ${rel(join(passDir, "gate.json"))}, ${rel(join(passDir, "perf.json"))}, ${rel(join(passDir, "seams.json"))}`,
   hasDiff ? `- Diff: ${rel(join(passDir, "diff.patch"))}` : `- Diff: none, this is the baseline pass`,
   prevDir ? `- Previous pass's sheets: ${prevSheets.map(rel).join(", ")}` : `- Previous pass: none, so \`regressions\` is empty`,
+  ...(newScenes.length ? [`- New in this pass, so with nothing to compare against: ${newScenes.join(", ")}`] : []),
   "",
   "The images are attached when your harness supports attachments; otherwise open each path above with your file reading tool.",
   "",
@@ -79,7 +92,7 @@ async function run(name: string): Promise<{ ok: true } | { ok: false; why: strin
     cli === "codex"
       ? // medium effort stretches a ChatGPT plan's usage window; reviewers only read
         ["codex", "exec", "-m", model, "-s", "read-only", "--ephemeral", "-C", ROOT, "-c", 'model_reasoning_effort="medium"',
-          "--output-schema", join(ROOT, "loop/review.schema.json"), "-o", out, ...images.flatMap((f) => ["-i", f]), "-"]
+          "--output-schema", schemaFile, "-o", out, ...images.flatMap((f) => ["-i", f]), "-"]
       : ["claude", "-p", "--model", model, "--output-format", "json", "--json-schema", schemaText,
           "--allowedTools", "Read,Glob,Grep", "--no-session-persistence"];
   const tail = (s: string) => s.trim().split("\n").slice(-6).join("\n").slice(-600);
@@ -109,6 +122,11 @@ async function run(name: string): Promise<{ ok: true } | { ok: false; why: strin
 
 const wanted = only ?? PANEL;
 for (const n of wanted) if (!REVIEWERS[n]) throw new Error(`unknown reviewer ${n} (have ${Object.keys(REVIEWERS).join(", ")})`);
+if (dry) {
+  console.log(prompt + "\n## Schema\n\n" + JSON.stringify(schema, null, 1) + "\n\n## Images\n\n" + images.map(rel).join("\n"));
+  process.exit(0);
+}
+await Bun.write(schemaFile, schemaText);
 const results = Object.fromEntries(await Promise.all(wanted.map(async (n) => [n, await run(n)] as const)));
 const codexFailed = wanted.some((n) => REVIEWERS[n]!.cli === "codex" && !results[n]!.ok);
 if (!only && codexFailed) {
