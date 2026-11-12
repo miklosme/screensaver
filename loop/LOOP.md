@@ -44,7 +44,12 @@ commands in steps 6 and 7, without `--since` and `--prev`.
 Read `loop/DIRECTION.md`, `BACKLOG.md`, the last three entries of `loop/JOURNAL.md`, and
 `DESIGN.md`. Turn every new note under "From the owner" into backlog items at the top of the
 queue (or into the change it asks for), then move the note under "Handled" with this pass's
-number. Check that you are on `loop` with a clean tree and that the tag `pass-<NNN-1>` exists.
+number. Something the owner says in chat is a note too: write it under "From the owner" before
+acting on it, so it survives a fresh context.
+
+Check that you are on `loop` and that the tag `pass-<NNN-1>` exists. Uncommitted edits to the
+owner's files (`loop/DIRECTION.md`, `DESIGN.md`, `loop/budget.json`) are the owner steering:
+commit them as `pass <NNN>: owner notes`. Apart from those the tree is clean.
 
 ### 2. Plan
 
