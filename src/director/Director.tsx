@@ -33,10 +33,10 @@ const startIndex = Math.max(0, scenes.findIndex((s) => s.id === params.get("scen
 let frozenT = params.has("t") ? Number(params.get("t")) : null;
 const speed = params.has("speed") ? Number(params.get("speed")) : 1;
 
-function SceneSlot({ def, slot }: { def: SceneDef; slot: Slot }) {
+function SceneSlot({ def, index, slot }: { def: SceneDef; index: number; slot: Slot }) {
   const { Component } = def;
   return createPortal(
-    <Component clock={slot.clock} camera={slot.camera} portalMaterial={slot.portal} />,
+    <Component index={index} clock={slot.clock} camera={slot.camera} portalMaterial={slot.portal} />,
     slot.scene,
     { camera: slot.camera },
   );
@@ -192,7 +192,7 @@ export function Director() {
   return (
     <>
       {slots.map((slot, i) => (
-        <SceneSlot key={i} def={scenes[(startIndex + i) % scenes.length]!} slot={slot} />
+        <SceneSlot key={i} def={scenes[(startIndex + i) % scenes.length]!} index={(startIndex + i) % scenes.length} slot={slot} />
       ))}
     </>
   );

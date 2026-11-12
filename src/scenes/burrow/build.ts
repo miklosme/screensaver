@@ -1,10 +1,18 @@
-import { BufferAttribute, BufferGeometry, CatmullRomCurve3, Vector3 } from "three";
+import { BufferAttribute, BufferGeometry, Vector3 } from "three";
+import { createFrame, type Stretch } from "../rail";
 
 /**
- * Layout + procedural geometry of the burrow: a flat, single-level labyrinth made only of curves.
- * Round "junction" chambers (squashed spheroids) are joined by winding ribbed corridors. Openings
- * between the two are not modelled: the chamber shader discards the door-shaped hole and the
- * corridor shader discards whatever pokes inside a chamber spheroid (see materials.ts).
+ * Layout + procedural geometry of the burrow: a labyrinth made only of curves, grown around the
+ * stretch of rail the scene rides (../rail.ts). The main tunnel is swept along the rail itself,
+ * EYE below the camera, so it sweeps, dives and climbs exactly as the camera does; the rail's
+ * bank is left to the camera, so the tunnel stays upright and the lean shows. Round "junction"
+ * chambers (squashed spheroids) sit on the rail where it is level, each a little to the inside of
+ * the bend so the camera swings round whatever floats in the middle, and side corridors curl away
+ * from them. The last chamber is centred on the joint the stretch ends at.
+ *
+ * Openings between corridors and chambers are not modelled: the chamber shader discards the
+ * door-shaped hole and the corridor shader discards whatever pokes inside a chamber spheroid
+ * (see materials.ts).
  */
 
 export const EYE = 1.7;
@@ -50,14 +58,35 @@ function mulberry32(seed: number) {
 // layout
 // ---------------------------------------------------------------------------------------------
 
+/** one cross-section of a corridor: the middle of its floor, and the axes its profile is drawn in */
+export interface Station {
+  c: Vector3;
+  side: Vector3;
+  up: Vector3;
+}
+
+/** where a corridor meets a chamber: a point on the corridor's centreline at the wall, and the way out */
+export interface Door {
+  /** in plan (y is ignored) */
+  p: Vector3;
+  /** unit, in plan: along the corridor, pointing out of the chamber */
+  t: Vector3;
+  /** unit, in plan: from the chamber's centre towards the door */
+  dir: Vector3;
+}
+
 export interface Chamber {
+  /** centre in plan; y is the level of the floor's rim */
   c: Vector3;
   R: number;
   H: number;
+  /** height of the spheroid's centre above the floor's rim */
   yc: number;
   ridges: number;
   oculus: number;
-  doors: Vector3[];
+  /** how far the middle of the floor lies below its rim */
+  dish: number;
+  doors: Door[];
 }
 
 export interface GlowLight {
@@ -66,84 +95,10 @@ export interface GlowLight {
   r: number;
 }
 
-const v = (x: number, z: number, y = 0) => new Vector3(x, y, z);
-const dir = (x: number, z: number) => new Vector3(x, 0, z).normalize();
-const along = (c: Vector3, d: Vector3, dist: number, y = 0) => new Vector3(c.x + d.x * dist, y, c.z + d.z * dist);
+/** level of a chamber's floor at plan distance r from its centre */
+export const floorY = (ch: Chamber, r: number) => ch.c.y - ch.dish * (1 - smoothstep(ch.R * 0.25, ch.R * 0.85, r));
 
-/** resample a parametric range of a curve to (roughly) `step`-spaced points, uniform in arc length */
-function sampleRange(curve: CatmullRomCurve3, ta: number, tb: number, step: number, multiple = 1): Vector3[] {
-  const M = 1600;
-  const fine: Vector3[] = [];
-  const cum: number[] = [0];
-  for (let i = 0; i <= M; i++) {
-    fine.push(curve.getPoint(ta + ((tb - ta) * i) / M));
-    if (i > 0) cum.push(cum[i - 1]! + fine[i]!.distanceTo(fine[i - 1]!));
-  }
-  const total = cum[M]!;
-  const n = Math.max(multiple, Math.round(total / step / multiple) * multiple);
-  const out: Vector3[] = [];
-  let k = 0;
-  for (let i = 0; i <= n; i++) {
-    const s = (total * i) / n;
-    while (k < M - 1 && cum[k + 1]! < s) k++;
-    const f = (s - cum[k]!) / Math.max(1e-9, cum[k + 1]! - cum[k]!);
-    out.push(fine[k]!.clone().lerp(fine[k + 1]!, Math.min(1, Math.max(0, f))));
-  }
-  return out;
-}
-
-/** arc-length lookup table over the camera spline; `at` allocates nothing */
-export class PathTable {
-  readonly n: number;
-  readonly pos: Float32Array;
-  readonly cum: Float32Array;
-  readonly length: number;
-  constructor(curve: CatmullRomCurve3, n = 9000) {
-    this.n = n;
-    this.pos = new Float32Array((n + 1) * 3);
-    this.cum = new Float32Array(n + 1);
-    const p = new Vector3();
-    for (let i = 0; i <= n; i++) {
-      curve.getPoint(i / n, p);
-      this.pos[i * 3] = p.x;
-      this.pos[i * 3 + 1] = p.y;
-      this.pos[i * 3 + 2] = p.z;
-      if (i > 0) {
-        const dx = p.x - this.pos[i * 3 - 3]!;
-        const dy = p.y - this.pos[i * 3 - 2]!;
-        const dz = p.z - this.pos[i * 3 - 1]!;
-        this.cum[i] = this.cum[i - 1]! + Math.sqrt(dx * dx + dy * dy + dz * dz);
-      }
-    }
-    this.length = this.cum[n]!;
-  }
-  /** arc length at spline parameter t (0..1) */
-  sAt(t: number) {
-    return this.cum[Math.round(t * this.n)]!;
-  }
-  at(s: number, out: Vector3) {
-    const { cum, pos, n } = this;
-    const ss = Math.min(this.length, Math.max(0, s));
-    let lo = 0;
-    let hi = n;
-    while (hi - lo > 1) {
-      const mid = (lo + hi) >> 1;
-      if (cum[mid]! <= ss) lo = mid;
-      else hi = mid;
-    }
-    const a = cum[lo]!;
-    const b = cum[hi]!;
-    const f = b > a ? (ss - a) / (b - a) : 0;
-    const i = lo * 3;
-    const j = hi * 3;
-    out.set(
-      pos[i]! + (pos[j]! - pos[i]!) * f,
-      pos[i + 1]! + (pos[j + 1]! - pos[i + 1]!) * f,
-      pos[i + 2]! + (pos[j + 2]! - pos[i + 2]!) * f,
-    );
-    return out;
-  }
-}
+const planDist = (a: Vector3, b: Vector3) => Math.hypot(a.x - b.x, a.z - b.z);
 
 // ---------------------------------------------------------------------------------------------
 // geometry builders
@@ -189,43 +144,43 @@ function gridIndex(rows: number, cols: number) {
   return idx;
 }
 
-/** ribbed corridor swept along floor-level points */
-function buildCorridor(pts: Vector3[]): BufferGeometry {
+/** ribbed corridor swept along its stations */
+function buildCorridor(pts: Station[]): BufferGeometry {
   const rows = pts.length;
   const cols = PROFILE_SEGS;
   const position = new Float32Array(rows * (cols + 1) * 3);
   const pat = new Float32Array(rows * (cols + 1) * 2);
-  const T = new Vector3();
-  const side = new Vector3();
+  const hgt = new Float32Array(rows * (cols + 1));
   const centres: Vector3[] = [];
   let o = 0;
   let q = 0;
+  let k = 0;
   for (let i = 0; i < rows; i++) {
-    const p = pts[i]!;
-    T.copy(pts[Math.min(rows - 1, i + 1)]!).sub(pts[Math.max(0, i - 1)]!).normalize();
-    side.crossVectors(T, UP).normalize();
+    const { c: p, side, up } = pts[i]!;
     const s = i / RIB_SEGS;
     const fr = s - Math.floor(s) - 0.5;
     const ridge = Math.exp(-(fr * fr) / (2 * 0.115 * 0.115));
     // slow breathing of the bore so no two stretches are quite the same size
     const breathe = 1 + 0.05 * Math.sin(s * 0.9 + p.x * 0.3) + 0.03 * Math.sin(s * 0.37 + 1.7);
-    centres.push(new Vector3(p.x, PROFILE.hc, p.z));
+    centres.push(p.clone().addScaledVector(up, PROFILE.hc));
     for (let j = 0; j <= cols; j++) {
       const [x0, y0] = profilePoint((j / cols) * Math.PI * 2);
       const w = smoothstep(0.12, 1.3, y0);
       const m = 1 + w * (breathe - 1 + 0.07 - 0.2 * ridge);
       const x = x0 * m;
       const y = PROFILE.hc + (y0 - PROFILE.hc) * (y0 > PROFILE.hc ? m : 1);
-      position[o++] = p.x + side.x * x;
-      position[o++] = y;
-      position[o++] = p.z + side.z * x;
+      position[o++] = p.x + side.x * x + up.x * y;
+      position[o++] = p.y + side.y * x + up.y * y;
+      position[o++] = p.z + side.z * x + up.z * y;
       pat[q++] = s;
       pat[q++] = j / cols;
+      hgt[k++] = y;
     }
   }
   const geo = new BufferGeometry();
   geo.setAttribute("position", new BufferAttribute(position, 3));
   geo.setAttribute("pat", new BufferAttribute(pat, 2));
+  geo.setAttribute("hgt", new BufferAttribute(hgt, 1));
   geo.setIndex(gridIndex(rows, cols));
   finish(geo, cols, rows, (i) => centres[i]!);
   return geo;
@@ -239,8 +194,10 @@ function buildChamber(ch: Chamber): BufferGeometry {
   const psi1 = Math.acos(ch.oculus / ch.R);
   const position = new Float32Array(rows * (cols + 1) * 3);
   const pat = new Float32Array(rows * (cols + 1) * 2);
+  const hgt = new Float32Array(rows * (cols + 1));
   let o = 0;
   let q = 0;
+  let k = 0;
   for (let i = 0; i < rows; i++) {
     const vv = i / (rows - 1);
     const psi = psi0 + (psi1 - psi0) * vv;
@@ -252,22 +209,24 @@ function buildChamber(ch: Chamber): BufferGeometry {
       const ridge = Math.exp(-(fr * fr) / (2 * 0.15 * 0.15));
       const rho = ch.R * Math.cos(psi) * (1 - 0.055 * ridge * (1 - 0.6 * vv) - 0.012 * Math.sin(vv * 40));
       position[o++] = ch.c.x + Math.sin(th) * rho;
-      position[o++] = y;
+      position[o++] = ch.c.y + y;
       position[o++] = ch.c.z + Math.cos(th) * rho;
       pat[q++] = s;
       pat[q++] = vv;
+      hgt[k++] = y;
     }
   }
   const geo = new BufferGeometry();
   geo.setAttribute("position", new BufferAttribute(position, 3));
   geo.setAttribute("pat", new BufferAttribute(pat, 2));
+  geo.setAttribute("hgt", new BufferAttribute(hgt, 1));
   geo.setIndex(gridIndex(rows, cols));
-  const c = new Vector3(ch.c.x, ch.yc, ch.c.z);
+  const c = new Vector3(ch.c.x, ch.c.y + ch.yc, ch.c.z);
   finish(geo, cols, rows, () => c);
   return geo;
 }
 
-/** chamber floor: a very shallow dish with concentric ripples in the pattern coordinate */
+/** chamber floor: a shallow dish with concentric ripples in the pattern coordinate */
 function buildFloor(ch: Chamber): BufferGeometry {
   const cols = 72;
   const rows = 14;
@@ -280,9 +239,10 @@ function buildFloor(ch: Chamber): BufferGeometry {
     const r = (ch.R * i) / (rows - 1);
     for (let j = 0; j <= cols; j++) {
       const th = (j / cols) * Math.PI * 2;
+      // the dish is shallow enough to light as if it were flat
       normal[o + 1] = 1;
       position[o++] = ch.c.x + Math.sin(th) * r;
-      position[o++] = 0;
+      position[o++] = floorY(ch, r);
       position[o++] = ch.c.z + Math.cos(th) * r;
       pat[q++] = r / 1.6 + 0.5;
       pat[q++] = j / cols;
@@ -292,6 +252,7 @@ function buildFloor(ch: Chamber): BufferGeometry {
   geo.setAttribute("position", new BufferAttribute(position, 3));
   geo.setAttribute("normal", new BufferAttribute(normal, 3));
   geo.setAttribute("pat", new BufferAttribute(pat, 2));
+  geo.setAttribute("hgt", new BufferAttribute(new Float32Array(rows * (cols + 1)), 1));
   geo.setIndex(gridIndex(rows, cols));
   return geo;
 }
@@ -342,24 +303,34 @@ export function sweepTube(pts: Vector3[], closed: boolean, radius: number, radia
 }
 
 /** the bead that trims a doorway, lying on the chamber's spheroid */
-function buildDoorFrame(ch: Chamber, d: Vector3): BufferGeometry {
+function buildDoorFrame(ch: Chamber, door: Door): BufferGeometry {
   const pts: Vector3[] = [];
   const K = 0.95;
   const n = 56;
   const phiA = 0.5;
-  const perp = new Vector3(d.z, 0, -d.x);
+  const { t } = door;
+  const perp = new Vector3(t.z, 0, -t.x);
   for (let i = 0; i <= n; i++) {
     const phi = phiA + ((Math.PI * 2 - 2 * phiA) * i) / n;
     const [x, y] = profilePoint(phi, K);
     const e = (y - ch.yc) / ch.H;
     const rho = ch.R * Math.sqrt(Math.max(0.05, 1 - e * e));
-    const f = Math.sqrt(Math.max(0.01, rho * rho - x * x)) - 0.06;
-    const p = new Vector3(ch.c.x + d.x * f + perp.x * x, y, ch.c.z + d.z * f + perp.z * x);
-    if (i === 0) pts.push(p.clone().setY(-0.5));
+    // where the corridor's outline, carried along the corridor, leaves the spheroid
+    const qx = door.p.x - ch.c.x + perp.x * x;
+    const qz = door.p.z - ch.c.z + perp.z * x;
+    const qt = qx * t.x + qz * t.z;
+    const f = -qt + Math.sqrt(Math.max(0.01, qt * qt - qx * qx - qz * qz + rho * rho)) - 0.06;
+    const p = new Vector3(ch.c.x + qx + t.x * f, ch.c.y + y, ch.c.z + qz + t.z * f);
+    if (i === 0) pts.push(p.clone().setY(ch.c.y - 0.5));
     pts.push(p);
-    if (i === n) pts.push(p.clone().setY(-0.5));
+    if (i === n) pts.push(p.clone().setY(ch.c.y - 0.5));
   }
-  return sweepTube(pts, false, 0.27, 10, d.clone().negate());
+  const geo = sweepTube(pts, false, 0.27, 10, t.clone().negate());
+  const pos = geo.getAttribute("position") as BufferAttribute;
+  const hgt = new Float32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) hgt[i] = pos.getY(i) - ch.c.y;
+  geo.setAttribute("hgt", new BufferAttribute(hgt, 1));
+  return geo;
 }
 
 function bake(geo: BufferGeometry, lights: GlowLight[]) {
@@ -403,136 +374,159 @@ function bake(geo: BufferGeometry, lights: GlowLight[]) {
 // ---------------------------------------------------------------------------------------------
 
 export const HOOP = { rx: 1.7, ry: 2.1, y: 2.6 } as const;
+/** the hoop's centre hangs this far above the camera's line, as it always has */
+const HOOP_LIFT = 0.3;
 
-export function buildWorld() {
-  // --- chambers -------------------------------------------------------------------------------
-  const c1 = v(0, 0);
-  const c2 = v(-7, -22);
-  const c3 = v(33, -22);
-  const d1in = dir(0, 1);
-  const d1out = dir(-0.94, -0.34);
-  const d1ahead = dir(0.26, -0.966);
-  const d1right = dir(0.966, 0.26);
-  const b2 = v(-15.6, -13.2);
-  const d2in = dir(b2.x - c2.x, b2.z - c2.z);
-  const d2out = dir(0.85, -0.527);
-  const d2a = dir(0.1, -0.995);
-  const d2b = dir(-0.9, -0.44);
-  // The last corridor swings round so that it meets its chamber already aimed at the hoop in the
-  // middle: from the doorway on, the camera only has to go straight.
-  const cc2 = v(15.8, -24);
-  const d3in = dir(-1, 0);
+/** how far inside a chamber's wall a corridor's geometry starts, and how far outside it a fork runs straight */
+const IN = 1.5;
+const OUT = 2.5;
+/** the tunnel starts this far behind where the camera is at t = 0 */
+const BEHIND = 7;
 
-  const chambers: Chamber[] = [
-    { c: c1, R: 6, H: 6.5, yc: 2, ridges: 14, oculus: 1.0, doors: [d1in, d1out, d1ahead, d1right] },
-    { c: c2, R: 6, H: 7.5, yc: 2, ridges: 14, oculus: 1.0, doors: [d2in, d2out, d2a, d2b] },
-    { c: c3, R: 11, H: 10.5, yc: 2.5, ridges: 26, oculus: 1.8, doors: [d3in] },
-  ];
-  const [ch1, ch2, ch3] = chambers as [Chamber, Chamber, Chamber];
+interface ChamberSpec {
+  R: number;
+  H: number;
+  yc: number;
+  ridges: number;
+  oculus: number;
+  dish?: number;
+}
 
-  // --- the route (floor level; the camera rides EYE above it) -----------------------------------
-  const IN = 1.5; // how far inside the chamber wall a corridor centreline starts
-  const OUT = 2.5;
-  // final straight run into the hoop
-  const approach = d3in; // unit vector from the hoop towards the arriving camera
-  const rise = (HOOP.y - EYE - 0.3) / 5.5;
-  const onLine = (dist: number) => along(c3, approach, dist, HOOP.y - EYE - dist * rise);
+interface ForkSpec {
+  ch: Chamber;
+  /** which way the fork leaves, in degrees to the left of the camera's way through the chamber */
+  leave: number;
+  /** degrees it curls through, positive to the left */
+  curl: number;
+  length: number;
+  lure: [number, number, number];
+}
 
-  const route: Vector3[] = [
-    // Corridor A is the one place the burrow runs straight: the camera arrives in it, and has to
-    // hold a dead straight line until it is released (see ../rail.ts). Points 1..5 are collinear.
-    v(2.5, 53),
-    v(0, 45),
-    v(0, 36.5), // 2: camera start
-    v(0, 22),
-    along(c1, d1in, ch1.R + OUT), // 4
-    along(c1, d1in, ch1.R - IN), // 5: corridor A ends
-    v(-2.5, 1.5),
-    along(c1, d1out, ch1.R - IN), // 7: corridor B starts
-    along(c1, d1out, ch1.R + OUT),
-    v(-12.6, -5.2),
-    v(-15.4, -9),
-    b2,
-    along(c2, d2in, ch2.R + OUT),
-    along(c2, d2in, ch2.R - IN), // 13: corridor B ends
-    v(c2.x + 1.6, c2.z + 3.1),
-    along(c2, d2out, ch2.R - IN), // 15: corridor C starts
-    along(c2, d2out, ch2.R + OUT),
-    v(4.5, -29.2),
-    v(8.5, -30.3),
-    v(12.5, -28.6),
-    cc2,
-    along(c3, d3in, ch3.R + OUT),
-    along(c3, d3in, ch3.R - IN), // 22: corridor C ends
-    onLine(7.5),
-    onLine(5),
-    onLine(2.5),
-    onLine(0), // 26: the hoop
-    onLine(-3),
-    onLine(-6),
-  ];
-  const START = 2;
-  const HOOP_INDEX = 26;
-  const spline = new CatmullRomCurve3(route, false, "centripetal");
-  const table = new PathTable(spline);
-  const tOf = (index: number) => index / (route.length - 1);
-  const sStart = table.sAt(tOf(START)) + 3.5;
-  const sHoop = table.sAt(tOf(HOOP_INDEX));
+export function buildWorld(stretch: Stretch) {
+  const f = createFrame();
+  /** the tunnel's cross-section under the camera at rail distance d */
+  const station = (d: number): Station => {
+    stretch.frame(d, f);
+    return { c: f.position.clone().addScaledVector(f.up, -EYE), side: f.right.clone(), up: f.up.clone() };
+  };
+  /** the camera's heading in plan at rail distance d (0 = -Z, positive to the left) */
+  const headingAt = (d: number) => {
+    stretch.frame(d, f);
+    return Math.atan2(-f.tangent.x, -f.tangent.z);
+  };
+  const ahead = (heading: number) => new Vector3(-Math.sin(heading), 0, -Math.cos(heading));
 
-  // --- corridors --------------------------------------------------------------------------------
-  const flat = (pts: Vector3[]) => pts.map((p) => p.setY(0));
+  // --- chambers: on the rail where it runs level, a little to the inside of its bend ----------------
+  const chambers: Chamber[] = [];
+  const mids: number[] = [];
+  const onRail = (d: number, inside: number, spec: ChamberSpec) => {
+    const st = station(d);
+    const ch: Chamber = { ...spec, dish: spec.dish ?? 0, c: st.c.clone().addScaledVector(st.side, inside), doors: [] };
+    chambers.push(ch);
+    mids.push(d);
+    return ch;
+  };
+  const J = stretch.joint;
+  // junction 1 sits in summer's first sweep (to the right), junction 2 in the long curl to the left
+  const ch1 = onRail(J + 14, 2.6, { R: 6, H: 6.5, yc: 2, ridges: 14, oculus: 1.0 });
+  const ch2 = onRail(J + 52, -2.6, { R: 6, H: 7.5, yc: 2, ridges: 14, oculus: 1.0 });
+  // the dead end is centred on the joint, and its floor is dished so the hoop hangs clear of it
+  const ch3 = onRail(stretch.exit, 0, { R: 11, H: 10.5, yc: 2.5, ridges: 26, oculus: 1.8, dish: HOOP.y - HOOP_LIFT - EYE });
+
+  /** rail distance, walking from a chamber's middle in steps of `step`, at which the floor line is r from its centre */
+  const crossing = (i: number, step: number, r: number) => {
+    let d = mids[i]!;
+    while (planDist(station(d).c, chambers[i]!.c) < r) d += step;
+    return d;
+  };
+  const railDoor = (i: number, step: number) => {
+    const ch = chambers[i]!;
+    const d = crossing(i, step, ch.R * 0.97);
+    const p = station(d).c;
+    ch.doors.push({ p, t: ahead(headingAt(d)).multiplyScalar(Math.sign(step)), dir: new Vector3(p.x - ch.c.x, 0, p.z - ch.c.z).normalize() });
+  };
+  railDoor(0, -0.02);
+  railDoor(0, 0.02);
+  railDoor(1, -0.02);
+  railDoor(1, 0.02);
+  railDoor(2, -0.02);
+
+  // --- the main tunnel: swept along the rail, from chamber to chamber ---------------------------
+  const sweep = (from: number, to: number) => {
+    const n = Math.max(RIB_SEGS, Math.round((to - from) / RIB_STEP / RIB_SEGS) * RIB_SEGS);
+    const pts: Station[] = [];
+    for (let i = 0; i <= n; i++) pts.push(station(from + ((to - from) * i) / n));
+    return pts;
+  };
   const mainCorridors = [
-    [0, 5],
-    [7, 13],
-    [15, 22],
-  ].map(([a, b]) => flat(sampleRange(spline, tOf(a!), tOf(b!), RIB_STEP, RIB_SEGS)));
+    sweep(-BEHIND, crossing(0, -0.02, ch1.R - IN)),
+    sweep(crossing(0, 0.02, ch1.R - IN), crossing(1, -0.02, ch2.R - IN)),
+    sweep(crossing(1, 0.02, ch2.R - IN), crossing(2, -0.02, ch3.R - IN)),
+  ];
 
-  const sideDefs: { ch: Chamber; d: Vector3; mids: Vector3[]; lure: [number, number, number] }[] = [
-    { ch: ch1, d: d1right, mids: [v(14, 2.5), v(19, 6), v(20.5, 12), v(17, 17.5)], lure: [0.25, 1.0, 0.7] },
-    { ch: ch1, d: d1ahead, mids: [v(3.5, -13.5), v(8, -17), v(14, -16), v(19, -12)], lure: [0.55, 0.3, 1.0] },
-    { ch: ch2, d: d2a, mids: [v(-7, -36), v(-11, -40.5), v(-17, -41), v(-21, -37)], lure: [1.0, 0.55, 0.2] },
-    { ch: ch2, d: d2b, mids: [v(-20, -27), v(-24, -23), v(-24.5, -17), v(-21, -12.5)], lure: [0.2, 0.75, 1.0] },
+  // --- forks: level corridors that leave a junction and curl out of sight -------------------------
+  const forks: ForkSpec[] = [
+    // junction 1: both on the outside of the sweep, one curling on ahead and one back the way we came
+    { ch: ch1, leave: -65, curl: 110, length: 20, lure: [0.25, 1.0, 0.7] },
+    { ch: ch1, leave: -118, curl: -70, length: 20, lure: [0.55, 0.3, 1.0] },
+    // junction 2: both on the outside of the curl, parting like a wishbone
+    { ch: ch2, leave: -115, curl: -130, length: 24, lure: [1.0, 0.55, 0.2] },
+    { ch: ch2, leave: -55, curl: 130, length: 24, lure: [0.2, 0.75, 1.0] },
   ];
   const lures: GlowLight[] = [];
-  const sideCorridors = sideDefs.map((def) => {
-    const curve = new CatmullRomCurve3(
-      [along(def.ch.c, def.d, def.ch.R - IN), along(def.ch.c, def.d, def.ch.R + OUT), ...def.mids],
-      false,
-      "centripetal",
-    );
-    const pts = flat(sampleRange(curve, 0, 1, RIB_STEP, RIB_SEGS));
-    const at = pts[Math.floor(pts.length * 0.62)]!;
-    lures.push({ p: new Vector3(at.x, 2.4, at.z), c: [def.lure[0] * 3.2, def.lure[1] * 3.2, def.lure[2] * 3.2], r: 4.5 });
+  const sideCorridors = forks.map((fork) => {
+    const { ch } = fork;
+    const start = headingAt(mids[chambers.indexOf(ch)]!) + (fork.leave * Math.PI) / 180;
+    const dir = ahead(start);
+    const n = Math.round(fork.length / RIB_STEP / RIB_SEGS) * RIB_SEGS;
+    const step = fork.length / n;
+    // straight through the wall, then the curl eases in
+    const bend = (s: number) => ((fork.curl * Math.PI) / 180) * smoothstep(IN + OUT, fork.length + 4, s) ** 1.2;
+    const p = new Vector3(ch.c.x, ch.c.y, ch.c.z).addScaledVector(dir, ch.R - IN);
+    const pts: Station[] = [];
+    for (let i = 0; i <= n; i++) {
+      const h = start + bend(i * step);
+      pts.push({ c: p.clone(), side: new Vector3(Math.cos(h), 0, -Math.sin(h)), up: UP });
+      p.addScaledVector(ahead(start + bend((i + 0.5) * step)), step);
+    }
+    ch.doors.push({ p: new Vector3(ch.c.x, 0, ch.c.z).addScaledVector(dir, ch.R * 0.97), t: dir, dir });
+    const at = pts[Math.floor(pts.length * 0.62)]!.c;
+    lures.push({ p: new Vector3(at.x, at.y + 2.4, at.z), c: [fork.lure[0] * 3.2, fork.lure[1] * 3.2, fork.lure[2] * 3.2], r: 4.5 });
     return pts;
   });
   const corridorPts = [...mainCorridors, ...sideCorridors];
 
-  // --- the thread that leads the way ---------------------------------------------------------
+  // --- the thread that leads the way: the rail's own line, laid on the floor ------------------------
   const threadPts: Vector3[] = [];
   {
-    const p = new Vector3();
-    const end = sHoop - 0.35;
-    const n = Math.round(end / 0.3);
+    const from = -BEHIND + 1;
+    const end = stretch.exit - 0.35;
+    const n = Math.round((end - from) / 0.3);
     for (let i = 0; i <= n; i++) {
-      table.at((end * i) / n, p);
-      threadPts.push(new Vector3(p.x, 0.035, p.z));
+      const st = station(from + ((end - from) * i) / n);
+      const r = planDist(st.c, ch3.c);
+      if (r < ch3.R) st.c.y = floorY(ch3, r);
+      threadPts.push(st.c.addScaledVector(st.up, 0.035));
     }
   }
 
   // --- baked light ------------------------------------------------------------------------------
-  const hoopPos = new Vector3(c3.x, HOOP.y, c3.z);
+  const hoopPos = stretch.frame(stretch.exit).position.clone();
+  hoopPos.y += HOOP_LIFT;
+  const above = (ch: Chamber, h: number) => new Vector3(ch.c.x, ch.c.y + h, ch.c.z);
+  const sights = [above(ch1, 2.7), above(ch2, 2.9)];
   const lights: GlowLight[] = [
-    { p: new Vector3(c1.x, 2.7, c1.z), c: [2.6, 1.15, 1.0], r: 3.6 },
-    { p: new Vector3(c1.x, ch1.yc + ch1.H - 0.6, c1.z), c: [1.6, 0.9, 1.1], r: 3.2 },
-    { p: new Vector3(c2.x, 2.9, c2.z), c: [2.4, 1.3, 0.75], r: 3.6 },
-    { p: new Vector3(c2.x, ch2.yc + ch2.H - 0.6, c2.z), c: [1.3, 0.8, 1.4], r: 3.4 },
+    { p: sights[0]!, c: [2.6, 1.15, 1.0], r: 3.6 },
+    { p: above(ch1, ch1.yc + ch1.H - 0.6), c: [1.6, 0.9, 1.1], r: 3.2 },
+    { p: sights[1]!, c: [2.4, 1.3, 0.75], r: 3.6 },
+    { p: above(ch2, ch2.yc + ch2.H - 0.6), c: [1.3, 0.8, 1.4], r: 3.4 },
     { p: hoopPos, c: [1.0, 2.2, 1.9], r: 4.2 },
-    { p: new Vector3(c3.x, ch3.yc + ch3.H - 0.8, c3.z), c: [1.9, 1.0, 1.5], r: 6.5 },
+    { p: above(ch3, ch3.yc + ch3.H - 0.8), c: [1.9, 1.0, 1.5], r: 6.5 },
     ...lures,
   ];
   for (let i = 0; i < threadPts.length; i += 4) {
     const p = threadPts[i]!;
-    lights.push({ p: new Vector3(p.x, 0.12, p.z), c: [0.07, 0.3, 0.24], r: 0.9 });
+    lights.push({ p: new Vector3(p.x, p.y + 0.085, p.z), c: [0.07, 0.3, 0.24], r: 0.9 });
   }
 
   // --- geometry ---------------------------------------------------------------------------------
@@ -563,39 +557,43 @@ export function buildWorld() {
   for (const pts of corridorPts)
     for (let i = 2; i < pts.length - 2; i += 3) {
       if (rnd() > 0.55) continue;
-      const p = pts[i]!;
-      const a = rnd() * 6.283;
-      const rr = Math.sqrt(rnd()) * 1.15;
-      addMote(p.x + Math.cos(a) * rr, 0.5 + rnd() * 3.2, p.z + Math.sin(a) * rr);
+      const { c, side, up } = pts[i]!;
+      const x = Math.cos(rnd() * 6.283) * Math.sqrt(rnd()) * 1.15;
+      const y = 0.5 + rnd() * 3.2;
+      addMote(c.x + side.x * x + up.x * y, c.y + side.y * x + up.y * y, c.z + side.z * x + up.z * y);
     }
   for (const ch of chambers) {
     const count = Math.round(ch.R * ch.R * 2.2);
     for (let i = 0; i < count; i++) {
       const a = rnd() * 6.283;
       const rr = Math.sqrt(rnd()) * ch.R * 0.8;
-      addMote(ch.c.x + Math.cos(a) * rr, 0.4 + rnd() * rnd() * ch.H * 0.9, ch.c.z + Math.sin(a) * rr);
+      addMote(ch.c.x + Math.cos(a) * rr, ch.c.y + 0.4 + rnd() * rnd() * ch.H * 0.9, ch.c.z + Math.sin(a) * rr);
     }
   }
   const motes = new BufferGeometry();
   motes.setAttribute("position", new BufferAttribute(new Float32Array(motePos), 3));
   motes.setAttribute("seed", new BufferAttribute(new Float32Array(moteSeed), 4));
 
-  const hoopYaw = Math.atan2(approach.x, approach.z);
+  // the hoop ends up square-on to the camera, which arrives along the rail's tangent at the joint
+  const arrive = stretch.frame(stretch.exit).tangent.clone().negate();
+  const hoopYaw = Math.atan2(arrive.x, arrive.z);
 
   return {
     chambers,
-    table,
-    sStart,
-    sHoop,
     corridors,
     corridorPts,
     shells,
     floors,
     frames,
     thread,
+    /** the thread's course, for whatever must keep off it */
+    route: threadPts,
+    sights,
     hoop,
     hoopPos,
     hoopYaw,
+    /** unit vector in plan from the hoop towards the arriving camera */
+    arrive,
     motes,
   };
 }

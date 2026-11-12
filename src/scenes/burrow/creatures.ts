@@ -10,7 +10,7 @@ import {
   Vector2,
   Vector3,
 } from "three";
-import { HOOP, PROFILE, type Chamber, type PathTable } from "./build";
+import { HOOP, PROFILE, floorY, type Chamber, type Station } from "./build";
 import type { Shared } from "./materials";
 
 /**
@@ -44,22 +44,23 @@ const troughY = (x: number) => PROFILE.hc - PROFILE.bLo * Math.cbrt(Math.max(0, 
 
 const inChamber = (chambers: Chamber[], p: Vector3, grow = 0) =>
   chambers.some((ch) => {
-    const ey = (p.y - ch.yc) / (ch.H + grow);
+    const ey = (p.y - ch.c.y - ch.yc) / (ch.H + grow);
     return ((p.x - ch.c.x) ** 2 + (p.z - ch.c.z) ** 2) / (ch.R + grow) ** 2 + ey * ey < 1;
   });
 
 export interface CreatureInput {
   chambers: Chamber[];
-  corridorPts: Vector3[][];
-  table: PathTable;
-  sHoop: number;
+  corridorPts: Station[][];
+  /** the thread's course across the floors */
+  route: Vector3[];
   hoopPos: Vector3;
+  /** unit vector in plan from the hoop towards the arriving camera */
+  arrive: Vector3;
 }
 
 export function buildCreatures(world: CreatureInput, shared: Shared) {
   const { chambers, corridorPts } = world;
   const rnd = mulberry32(31337);
-  const UP = new Vector3(0, 1, 0);
 
   // -------------------------------------------------------------------------------------------
   // eyes
@@ -71,17 +72,14 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
     eyePos.push(p.x - inward.x * r * 0.3, p.y - inward.y * r * 0.3, p.z - inward.z * r * 0.3, r);
     eyeAxis.push(inward.x, inward.y, inward.z, rnd());
   };
-  const T = new Vector3();
-  const side = new Vector3();
   const p = new Vector3();
   const n = new Vector3();
+  const mid = new Vector3();
   for (const pts of corridorPts) {
     // row 0, 10, 20 .. lie in the hollows between two ribs
     for (let i = 10; i < pts.length - 10; i += 10) {
       if (rnd() > 0.5) continue;
-      const c = pts[i]!;
-      T.copy(pts[i + 1]!).sub(pts[i - 1]!).normalize();
-      side.crossVectors(T, UP).normalize();
+      const { c, side, up: bed } = pts[i]!;
       const sgn = rnd() < 0.5 ? -1 : 1;
       const phi = 1.3 + rnd() * 1.15; // from just below the widest point to high on the vault
       const s = Math.sin(phi);
@@ -90,9 +88,11 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       const e = 2 / (up ? PROFILE.nUp : PROFILE.nLo);
       const x = PROFILE.a * Math.abs(s) ** e * 1.05;
       const y = PROFILE.hc + (up ? PROFILE.bUp * 1.05 : PROFILE.bLo) * Math.sign(cs) * Math.abs(cs) ** e;
-      p.set(c.x + side.x * x * sgn, y, c.z + side.z * x * sgn);
+      p.copy(c).addScaledVector(side, x * sgn).addScaledVector(bed, y);
       if (inChamber(chambers, p, 0.6)) continue;
-      n.set(c.x - p.x, (PROFILE.hc - p.y) * 0.5, c.z - p.z).normalize();
+      // towards the tunnel's axis, flattened a little
+      mid.copy(c).addScaledVector(bed, y + (PROFILE.hc - y) * 0.5);
+      n.copy(mid).sub(p).normalize();
       addEye(p, n, 0.13 + 0.2 * rnd() ** 2);
     }
   }
@@ -106,8 +106,8 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       const dx = Math.sin(th);
       const dz = Math.cos(th);
       // not in a doorway
-      if (y < 5 && ch.doors.some((d) => d.x * dx + d.z * dz > Math.cos(2.6 / ch.R))) continue;
-      p.set(ch.c.x + dx * rho, y, ch.c.z + dz * rho);
+      if (y < 5 && ch.doors.some((d) => d.dir.x * dx + d.dir.z * dz > Math.cos(2.6 / ch.R))) continue;
+      p.set(ch.c.x + dx * rho, ch.c.y + y, ch.c.z + dz * rho);
       n.set(-dx * rho / (ch.R * ch.R), -(y - ch.yc) / (ch.H * ch.H), -dz * rho / (ch.R * ch.R)).normalize();
       addEye(p, n, (0.16 + 0.3 * rnd() ** 2.5) * (ch.R > 8 ? 1.5 : 1));
       k++;
@@ -224,19 +224,16 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
   for (const pts of corridorPts) {
     for (let i = 3; i < pts.length - 3; i += 2) {
       if (rnd() > 0.3) continue;
-      const c = pts[i]!;
-      T.copy(pts[i + 1]!).sub(pts[i - 1]!).normalize();
-      side.crossVectors(T, UP).normalize();
+      const { c, side, up } = pts[i]!;
       const sgn = rnd() < 0.5 ? -1 : 1;
       const x = (0.95 + rnd() * 0.5) * sgn;
-      p.set(c.x + side.x * x, troughY(x), c.z + side.z * x);
+      p.copy(c).addScaledVector(side, x).addScaledVector(up, troughY(x));
       if (inChamber(chambers, p, 0.3)) continue;
       cluster(p.x, p.y - 0.03, p.z, 0.22 + rnd() ** 2 * 0.55, -side.x * sgn * 0.25, -side.z * sgn * 0.25);
     }
   }
   // the thread's course across the chamber floors, to keep clear of
-  const route: Vector3[] = [];
-  for (let s = 0; s < world.sHoop; s += 0.5) route.push(world.table.at(s, new Vector3()));
+  const route = world.route;
   const nearRoute = (x: number, z: number, d: number) => route.some((q) => (q.x - x) ** 2 + (q.z - z) ** 2 < d * d);
   for (const ch of chambers) {
     const big = ch.R > 8;
@@ -248,8 +245,8 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       const z = ch.c.z + Math.cos(a) * r;
       if (nearRoute(x, z, 2.1)) continue;
       // doorways stay open
-      if (ch.doors.some((d) => d.x * Math.sin(a) + d.z * Math.cos(a) > Math.cos(2.4 / r) && r > ch.R * 0.7)) continue;
-      cluster(x, -0.02, z, (0.3 + rnd() ** 2 * (big ? 1.5 : 0.9)) * (0.6 + 0.6 * (r / ch.R)), 0, 0);
+      if (ch.doors.some((d) => d.dir.x * Math.sin(a) + d.dir.z * Math.cos(a) > Math.cos(2.4 / r) && r > ch.R * 0.7)) continue;
+      cluster(x, floorY(ch, r) - 0.02, z, (0.3 + rnd() ** 2 * (big ? 1.5 : 0.9)) * (0.6 + 0.6 * (r / ch.R)), 0, 0);
       k++;
     }
   }
@@ -257,12 +254,11 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
   {
     const N = 26;
     const ch = chambers[chambers.length - 1]!;
-    const d = ch.doors[0]!;
-    const facing = Math.atan2(d.x, d.z);
+    const facing = Math.atan2(world.arrive.x, world.arrive.z);
     for (let i = 0; i < N; i++) {
       const a = facing + 0.62 + ((Math.PI * 2 - 1.24) * i) / (N - 1);
       const r = HOOP.rx + 1.5 + 0.25 * Math.sin(i * 2.4);
-      addShroom(world.hoopPos.x + Math.sin(a) * r, -0.02, world.hoopPos.z + Math.cos(a) * r, 0.42 + 0.3 * rnd(), -Math.sin(a) * 0.12, -Math.cos(a) * 0.12);
+      addShroom(world.hoopPos.x + Math.sin(a) * r, floorY(ch, r) - 0.02, world.hoopPos.z + Math.cos(a) * r, 0.42 + 0.3 * rnd(), -Math.sin(a) * 0.12, -Math.cos(a) * 0.12);
     }
   }
 
