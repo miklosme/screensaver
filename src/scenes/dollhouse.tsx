@@ -2,31 +2,41 @@ import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import {
   BackSide,
+  BoxGeometry,
+  BufferAttribute,
   BufferGeometry,
   CatmullRomCurve3,
   Color,
   CustomBlending,
   CylinderGeometry,
+  DataTexture,
   DstColorFactor,
   ExtrudeGeometry,
   DoubleSide,
   FrontSide,
   InstancedMesh,
+  LatheGeometry,
+  LinearFilter,
+  LinearMipmapLinearFilter,
   Matrix4,
   MeshLambertMaterial,
   Object3D,
   Path,
   Quaternion,
   PlaneGeometry,
+  RedFormat,
   ShaderMaterial,
   Shape,
   ShapeGeometry,
   SphereGeometry,
   TorusGeometry,
+  UnsignedByteType,
+  Vector2,
   Vector3,
   ZeroFactor,
   type Group,
 } from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { RAIL, RAIL_LEAD_IN, RAIL_LEAD_OUT, createRide } from "./rail";
 import type { SceneProps } from "./types";
 import { createGarden, glScreen, onScreen } from "./dollhouse/garden";
@@ -117,6 +127,17 @@ function ground(x: number, z: number) {
   );
 }
 
+/** `ground` in GLSL */
+const GROUND_GLSL = /* glsl */ `
+  float groundAt(vec2 p) {
+    float d = length(p - vec2(0.0, 18.0));
+    float m1 = smoothstep(26.0, 90.0, d);
+    float m2 = smoothstep(90.0, 260.0, d);
+    return m1 * (4.2 * sin(p.x * 0.035 + 1.3) * cos(p.y * 0.03 + 0.4) + 2.8 * sin((p.x + p.y) * 0.021 + 0.5) + 1.4 * sin(p.x * 0.08 - p.y * 0.06)) +
+      m2 * (16.0 * sin(p.x * 0.012 + 2.0) * sin(p.y * 0.013 + 1.0) + 7.0);
+  }
+`;
+
 /** Round-headed arch outline, feet at y0, springline at hs, half width a. */
 function archPath<T extends Path>(p: T, a: number, hs: number, y0: number): T {
   p.moveTo(-a, y0);
@@ -159,20 +180,6 @@ function groundNormal(x: number, z: number, out: Vector3) {
   return out.set(ground(x - e, z) - ground(x + e, z), 2 * e, ground(x, z - e) - ground(x, z + e)).normalize();
 }
 const _n = new Vector3();
-/** Matrix that flattens geometry along the sun direction onto the dune tangent plane at (x, z). */
-function shadowMatrix(x: number, z: number, out: Matrix4) {
-  const n = groundNormal(x, z, _n);
-  const c = n.x * x + n.y * (ground(x, z) + 0.05) + n.z * z;
-  const k = 1 / n.dot(SUN_DIR);
-  const L = SUN_DIR;
-  // p' = p - L * (n.p - c) / (n.L)
-  return out.set(
-    1 - L.x * n.x * k, -L.x * n.y * k, -L.x * n.z * k, L.x * c * k,
-    -L.y * n.x * k, 1 - L.y * n.y * k, -L.y * n.z * k, L.y * c * k,
-    -L.z * n.x * k, -L.z * n.y * k, 1 - L.z * n.z * k, L.z * c * k,
-    0, 0, 0, 1,
-  );
-}
 
 // ───────────────────────────── layout ─────────────────────────────
 // Thin doorway D1 (the one we orbit and fly through)
@@ -408,7 +415,7 @@ const FOG_GLSL = /* glsl */ `
  * faces. Shared by the ground and by every shadow lying on it, so a shadow is exactly the sand
  * without the sun.
  */
-const SAND_GLSL = /* glsl */ `
+const NOISE_GLSL = /* glsl */ `
   float hash12(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
@@ -420,6 +427,9 @@ const SAND_GLSL = /* glsl */ `
     f = f * f * (3.0 - 2.0 * f);
     return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), f.x), mix(hash12(i + vec2(0.0, 1.0)), hash12(i + 1.0), f.x), f.y);
   }
+`;
+const SAND_GLSL = /* glsl */ `
+  ${NOISE_GLSL}
   vec3 sandAlbedo(vec3 w, float d) {
     float hgt = w.y;
     // paler than anything that grows on it
@@ -573,8 +583,9 @@ function makeInteriorMaterial(pal: number, R: number) {
   });
 }
 
-function makeTerrainMaterial() {
+function makeTerrainMaterial(shadow: DataTexture) {
   return new ShaderMaterial({
+    uniforms: { uShadow: { value: shadow } },
     vertexShader: /* glsl */ `
       varying vec3 vW;
       varying vec3 vN;
@@ -592,12 +603,15 @@ function makeTerrainMaterial() {
       varying vec3 vW;
       varying vec3 vN;
       varying float vD;
+      uniform sampler2D uShadow;
       ${FOG_GLSL}
       ${SUN_GLSL}
       ${SAND_GLSL}
+      ${SHADOW_MAP_GLSL}
       void main() {
         vec3 n = rippleNormal(normalize(vN), vW, vD);
-        vec3 col = sandAlbedo(vW, vD) * sunLight(n, 1.0);
+        float shade = castShade(vW);
+        vec3 col = sandAlbedo(vW, vD) * sunLight(n, 1.0 - shade);
         // a few grains catch the sun as the eye moves past
         vec2 g = vW.xz * 9.0;
         vec2 cell = floor(g);
@@ -606,7 +620,7 @@ function makeTerrainMaterial() {
         vec3 v = normalize(vW - cameraPosition);
         float glint = pow(max(0.0, sin(h * 91.0 + dot(v, vec3(23.0, 17.0, 29.0)))), 12.0);
         float dotm = 1.0 - smoothstep(0.06, 0.16, length(g - at));
-        float spark = step(0.965, h) * glint * dotm * (1.0 - smoothstep(4.0, 16.0, vD)) * (1.0 - smoothstep(0.08, 0.16, fwidth(g.x)));
+        float spark = (1.0 - shade) * step(0.965, h) * glint * dotm * (1.0 - smoothstep(4.0, 16.0, vD)) * (1.0 - smoothstep(0.08, 0.16, fwidth(g.x)));
         col += vec3(1.0, 0.95, 0.85) * spark * 4.0 * max(0.0, dot(n, SUN));
         gl_FragColor = vec4(applyFog(col, vD), 1.0);
         #include <tonemapping_fragment>
@@ -617,7 +631,7 @@ function makeTerrainMaterial() {
 }
 
 /**
- * Shadows lying on the sand. A shadow multiplies what is under it by how much darker the ground is
+ * Shadows lying on the sand (still things' shadows are baked instead, see bakeShadows). A shadow multiplies what is under it by how much darker the ground is
  * out of the sun than in it (fading out in the haze), so it costs almost nothing to draw. CAST:
  * geometry flattened onto the ground along the sun, its edge softened where the surface turns
  * side-on to the sun. FLAT: a flat silhouette flattened the same way, lighter towards its far end.
@@ -702,6 +716,602 @@ function makeShadowMaterial(kind: "CAST" | "FLAT" | "CONTACT" | "TINT", vertexSh
   });
 }
 
+// ───────────────────────────── baked shadows ─────────────────────────────
+/**
+ * Every still thing's shadow on the sand is baked once, at mount, into one terrain-space mask that
+ * the sand shader reads. Each texel casts a ray from the dune towards the sun and asks how much of
+ * it the trees, domes, hoops, doorways and the stele block, with a penumbra that widens with the
+ * distance to the caster. So a shadow follows every curve of the ground it falls on, sharp at a
+ * foot and soft at a crown's far edge, and costs one texture read.
+ *
+ * The mask is warped so that its texels crowd around the garden in the middle: about 6 cm apart
+ * there, a couple of metres at the edge of the haze.
+ */
+const SH_N = 2048;
+const SH_K = 60;
+const SH_EXT = 360;
+const SH_CZ = 18;
+const SH_AMAX = SH_EXT / (SH_EXT + SH_K);
+/** world offset from the mask's centre -> -1 .. 1 across it */
+const shTo = (d: number) => d / (Math.abs(d) + SH_K) / SH_AMAX;
+const shFrom = (a: number) => {
+  const b = a * SH_AMAX;
+  return (SH_K * b) / (1 - Math.abs(b));
+};
+const SHADOW_MAP_GLSL = /* glsl */ `
+  /** 0 in the sun, 1 in full shadow */
+  float castShade(vec3 w) {
+    vec2 d = w.xz - vec2(0.0, ${SH_CZ.toFixed(1)});
+    vec2 a = d / (abs(d) + ${SH_K.toFixed(1)}) / ${SH_AMAX.toFixed(6)};
+    return texture2D(uShadow, a * 0.5 + 0.5).r;
+  }
+`;
+
+/** a still thing, as far as its shadow goes: where on the ground it can fall, and how much of the sun it takes from a point */
+interface Caster {
+  x0: number;
+  z0: number;
+  x1: number;
+  z1: number;
+  /** 0 .. 1, for the ray from (px, py, pz) towards the sun; `texel` is the mask's spacing there */
+  occ(px: number, py: number, pz: number, texel: number): number;
+}
+const PEN0 = 0.03;
+const PEN1 = 0.035;
+const penumbra = (t: number, texel: number) => PEN0 + PEN1 * t + 0.7 * texel;
+/** 1 inside (sd < 0), 0 outside, a smooth ramp `w` either side of the edge */
+const softIn = (sd: number, w: number) => 1 - smoothstep(-w, w, sd);
+
+/** the ground under a box (x0..x1, y0..y1, z0..z1) that its shadow may reach */
+function footprint(x0: number, x1: number, y1: number, z0: number, z1: number, base: number) {
+  const L = (y1 - (base - 8)) / SUN_DIR.y;
+  const sx = -SUN_DIR.x * L;
+  const sz = -SUN_DIR.z * L;
+  const pad = 1 + PEN1 * L;
+  return {
+    x0: Math.min(x0, x0 + sx) - pad,
+    x1: Math.max(x1, x1 + sx) + pad,
+    z0: Math.min(z0, z0 + sz) - pad,
+    z1: Math.max(z1, z1 + sz) + pad,
+  };
+}
+
+function ellipsoidCaster(cx: number, cy: number, cz: number, rx: number, ry: number, rz: number): Caster {
+  const S = SUN_DIR;
+  const dx = S.x / rx;
+  const dy = S.y / ry;
+  const dz = S.z / rz;
+  const dl = Math.hypot(dx, dy, dz);
+  const [ux, uy, uz] = [dx / dl, dy / dl, dz / dl];
+  const rm = (rx + ry + rz) / 3;
+  return {
+    ...footprint(cx - rx, cx + rx, cy + ry, cz - rz, cz + rz, ground(cx, cz)),
+    occ(px, py, pz, texel) {
+      const qx = (px - cx) / rx;
+      const qy = (py - cy) / ry;
+      const qz = (pz - cz) / rz;
+      const tq = -(qx * ux + qy * uy + qz * uz);
+      if (tq < 0) return qx * qx + qy * qy + qz * qz < 1 ? 1 : 0;
+      const d = Math.hypot(qx + ux * tq, qy + uy * tq, qz + uz * tq);
+      return softIn(d - 1, penumbra(tq / dl, texel) / rm);
+    },
+  };
+}
+
+/** squared distance between the ray o + S t (t >= 0) and the segment a..b, and the t of the closest point */
+function raySegment(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, ax: number, ay: number, az: number, bx: number, by: number, bz: number) {
+  const ex = bx - ax;
+  const ey = by - ay;
+  const ez = bz - az;
+  const wx = ox - ax;
+  const wy = oy - ay;
+  const wz = oz - az;
+  const a = dx * dx + dy * dy + dz * dz;
+  const b = dx * ex + dy * ey + dz * ez;
+  const c = ex * ex + ey * ey + ez * ez;
+  const d = dx * wx + dy * wy + dz * wz;
+  const e = ex * wx + ey * wy + ez * wz;
+  const den = a * c - b * b;
+  let s = den > 1e-9 ? (a * e - b * d) / den : 0;
+  s = Math.min(1, Math.max(0, s));
+  let t = (b * s - d) / a;
+  if (t < 0) {
+    t = 0;
+    s = Math.min(1, Math.max(0, e / c));
+  }
+  const qx = ox + dx * t - (ax + ex * s);
+  const qy = oy + dy * t - (ay + ey * s);
+  const qz = oz + dz * t - (az + ez * s);
+  return { d2: qx * qx + qy * qy + qz * qz, t };
+}
+
+function capsuleCaster(ax: number, ay: number, az: number, bx: number, by: number, bz: number, r: number): Caster {
+  const S = SUN_DIR;
+  return {
+    ...footprint(Math.min(ax, bx) - r, Math.max(ax, bx) + r, Math.max(ay, by) + r, Math.min(az, bz) - r, Math.max(az, bz) + r, ground(ax, az)),
+    occ(px, py, pz, texel) {
+      const { d2, t } = raySegment(px, py, pz, S.x, S.y, S.z, ax, ay, az, bx, by, bz);
+      return softIn(Math.sqrt(d2) - r, penumbra(t, texel));
+    },
+  };
+}
+
+/** a half torus (TorusGeometry(1, tube, .., PI)) placed at (x, y, z), turned by yaw, scaled by (sx, sy, sz) */
+function hoopCaster(x: number, y: number, z: number, yaw: number, sx: number, sy: number, sz: number, tube: number): Caster {
+  const S = SUN_DIR;
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  // into the hoop's own space: undo the yaw, then the scale
+  const local = (vx: number, vy: number, vz: number): [number, number, number] => [(c * vx - s * vz) / sx, vy / sy, (s * vx + c * vz) / sz];
+  const [dx, dy, dz] = local(S.x, S.y, S.z);
+  const dl = Math.hypot(dx, dy, dz);
+  const SEG = 12;
+  const arc = Array.from({ length: SEG + 1 }, (_, i) => [Math.cos((Math.PI * i) / SEG), Math.sin((Math.PI * i) / SEG)] as const);
+  const sm = (sx + sy + sz) / 3;
+  const R = Math.max(sx, sz) * (1 + tube);
+  return {
+    ...footprint(x - R, x + R, y + sy * (1 + tube), z - R, z + R, ground(x, z)),
+    occ(px, py, pz, texel) {
+      const [ox, oy, oz] = local(px - x, py - y, pz - z);
+      let best = Infinity;
+      let bt = 0;
+      for (let i = 0; i < SEG; i++) {
+        const [a0, a1] = arc[i]!;
+        const [b0, b1] = arc[i + 1]!;
+        const { d2, t } = raySegment(ox, oy, oz, dx / dl, dy / dl, dz / dl, a0, a1, 0, b0, b1, 0);
+        if (d2 < best) {
+          best = d2;
+          bt = t;
+        }
+      }
+      return softIn(Math.sqrt(best) - tube, penumbra(bt / dl, texel) / sm);
+    },
+  };
+}
+
+/** signed distance to a round-headed arch of half width a and springline hs (open to y = -inf) */
+const archSd = (x: number, y: number, a: number, hs: number) => (y < hs ? Math.abs(x) - a : Math.hypot(x, y - hs) - a);
+
+/**
+ * A flat upright shape: a doorway's band (inner > 0) or a filled arch (inner = 0), standing at
+ * (x, y, z) facing yaw, scaled by `scale`.
+ */
+function archCaster(x: number, y: number, z: number, yaw: number, scale: number, a: number, hs: number, band: number): Caster {
+  const S = SUN_DIR;
+  const ex = [Math.cos(yaw), 0, -Math.sin(yaw)] as const;
+  const nz = [Math.sin(yaw), 0, Math.cos(yaw)] as const;
+  const dn = S.x * nz[0] + S.z * nz[2];
+  const A = (a + band) * scale;
+  const top = (hs + a + band) * scale;
+  return {
+    ...footprint(x - A, x + A, y + top, z - A, z + A, ground(x, z)),
+    occ(px, py, pz, texel) {
+      if (Math.abs(dn) < 1e-4) return 0;
+      const t = ((x - px) * nz[0] + (z - pz) * nz[2]) / dn;
+      if (t <= 0) return 0;
+      const qx = px + S.x * t - x;
+      const qy = py + S.y * t - y;
+      const qz = pz + S.z * t - z;
+      const lx = (qx * ex[0] + qz * ex[2]) / scale;
+      const ly = qy / scale;
+      let sd = archSd(lx, ly, a + band, hs);
+      if (band > 0 && a > 0) sd = Math.max(sd, -archSd(lx, ly, a, hs));
+      return softIn(sd * scale, penumbra(t, texel));
+    },
+  };
+}
+
+/** bakes the casters into the mask: 0 in the sun, 255 in full shadow */
+function bakeShadows(casters: Caster[], out: Uint8Array) {
+  const N = SH_N;
+  const X = new Float64Array(N);
+  const TX = new Float64Array(N);
+  for (let i = 0; i < N; i++) X[i] = shFrom(((i + 0.5) / N) * 2 - 1);
+  for (let i = 0; i < N; i++) TX[i] = Math.abs(X[Math.min(N - 1, i + 1)]! - X[Math.max(0, i - 1)]!) / 2;
+  const index = (d: number) => Math.min(N - 1, Math.max(0, Math.floor((shTo(d) * 0.5 + 0.5) * N)));
+  const vis = new Float32Array(N * N).fill(1);
+  const gy = new Float32Array(N * N).fill(NaN);
+  for (const c of casters) {
+    const i0 = index(c.x0);
+    const i1 = index(c.x1);
+    const j0 = index(c.z0 - SH_CZ);
+    const j1 = index(c.z1 - SH_CZ);
+    for (let j = j0; j <= j1; j++) {
+      const z = X[j]! + SH_CZ;
+      for (let i = i0; i <= i1; i++) {
+        const k = j * N + i;
+        let g = gy[k]!;
+        if (g !== g) g = gy[k] = ground(X[i]!, z);
+        const o = c.occ(X[i]!, g + 0.02, z, Math.max(TX[i]!, TX[j]!));
+        if (o > 0) vis[k] = vis[k]! * (1 - o);
+      }
+    }
+  }
+  for (let k = 0; k < N * N; k++) out[k] = Math.round((1 - vis[k]!) * 255);
+}
+
+// ───────────────────────────── the exit door ─────────────────────────────
+/** the stele's outer outline: half width and springline */
+const ST_A = P_A + 1.45;
+const ST_HS = P_HS + 0.55;
+/** where the leaves' hinges stand (the leaf groups' origin, at the middle of a leaf's thickness) */
+const LEAF_Z = 0.1 + 0.025;
+const DOOR_Y = HERO_Y + PLINTH;
+
+/**
+ * Shared by everything the door is made of: where the leaves are (from uOpen, their swing in
+ * radians) and how much sun reaches a point past them, and past the stele behind the door.
+ */
+const DOOR_GLSL = /* glsl */ `
+  uniform float uOpen;
+  const float P_A = ${P_A.toFixed(4)};
+  const float P_HS = ${P_HS.toFixed(4)};
+  const float ST_A = ${ST_A.toFixed(4)};
+  const float ST_HS = ${ST_HS.toFixed(4)};
+  const float DOOR_Y = ${DOOR_Y.toFixed(4)};
+  const float LEAF_Z = ${LEAF_Z.toFixed(4)};
+  float sdBox(vec2 p, vec2 c, vec2 h) {
+    vec2 d = abs(p - c) - h;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+  }
+  float archSd(vec2 q, float a, float hs) { return q.y < hs ? abs(q.x) - a : length(q - vec2(0.0, hs)) - a; }
+  /** a leaf in its own plane: q.x from the hinge (0) to the meeting edge (P_A), q.y from its foot */
+  float leafSd(vec2 q) {
+    float body = sdBox(q, vec2(P_A * 0.5, (P_HS - 1.0) * 0.5), vec2(P_A * 0.5, (P_HS + 1.0) * 0.5));
+    return min(body, max(length(q - vec2(P_A, P_HS)) - P_A, q.x - P_A));
+  }
+  float softIn(float sd, float w) { return 1.0 - smoothstep(-w, w, sd); }
+  /** how much of the sun the leaf hinged at h (running along e, facing n) takes from p */
+  float leafOcc(vec3 p, vec3 h, vec3 e, vec3 n) {
+    float dn = dot(SUN, n);
+    if (abs(dn) < 1e-3) return 0.0;
+    float t = dot(h - p, n) / dn;
+    if (t <= 0.0) return 0.0;
+    vec3 q = p + SUN * t - h;
+    return softIn(leafSd(vec2(dot(q, e), q.y)), 0.012 + 0.045 * t);
+  }
+  /** distance in plan from p to the segment a..b */
+  float segDist(vec2 p, vec2 a, vec2 b) {
+    vec2 ab = b - a;
+    float k = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
+    return length(p - a - ab * k);
+  }
+  vec3 leafAxisR() { return vec3(-cos(uOpen), 0.0, sin(uOpen)); }
+  vec3 leafAxisL() { return vec3(cos(uOpen), 0.0, sin(uOpen)); }
+  /** how much sun reaches p past the two leaves, and with stele = true past the stele as well */
+  float doorSun(vec3 p, bool stele) {
+    vec3 hR = vec3(P_A, DOOR_Y, LEAF_Z);
+    vec3 hL = vec3(-P_A, DOOR_Y, LEAF_Z);
+    float v = (1.0 - leafOcc(p, hR, leafAxisR(), vec3(sin(uOpen), 0.0, cos(uOpen)))) *
+      (1.0 - leafOcc(p, hL, leafAxisL(), vec3(-sin(uOpen), 0.0, cos(uOpen))));
+    if (stele && p.z < 0.0) {
+      float t = -p.z / SUN.z;
+      vec3 q = p + SUN * t;
+      v *= 1.0 - softIn(archSd(vec2(q.x, q.y - DOOR_Y), ST_A, ST_HS), 0.015 + 0.04 * t);
+    }
+    return v;
+  }
+  /** the dark line where the door meets the plinth, under the stele's foot and under each leaf's edge */
+  float doorContact(vec3 p) {
+    // each pool leans a little away from the sun, the way the light under a thing is skewed
+    vec2 q = p.xz + normalize(SUN.xz) * 0.3;
+    float d = length(vec2(max(abs(q.x) - ST_A, 0.0), max(abs(q.y) - 0.28, 0.0)));
+    float ao = 1.0 - 0.55 * pow(1.0 - smoothstep(0.0, 1.6, d), 2.0);
+    vec2 hR = vec2(P_A, LEAF_Z);
+    vec2 hL = vec2(-P_A, LEAF_Z);
+    ao *= 1.0 - 0.65 * pow(1.0 - smoothstep(0.0, 1.3, segDist(q, hR, hR + leafAxisR().xz * P_A) - 0.04), 2.0);
+    ao *= 1.0 - 0.65 * pow(1.0 - smoothstep(0.0, 1.3, segDist(q, hL, hL + leafAxisL().xz * P_A) - 0.04), 2.0);
+    return ao;
+  }
+`;
+
+/**
+ * The materials of the door: LEAF (panelled, its relief a height function shaded by the sun),
+ * SURROUND (the moulded coral frame, painted wood with a little wear), PLINTH (inlaid rings, and
+ * the door's shadows lying on it) and BRASS (hinges and knobs).
+ */
+function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: { value: number }) {
+  return new ShaderMaterial({
+    defines: { [kind]: "" },
+    uniforms: { uOpen: open },
+    side: kind === "PLINTH" ? DoubleSide : FrontSide,
+    vertexShader: /* glsl */ `
+      varying vec3 vOb;
+      varying vec3 vNo;
+      varying vec3 vW;
+      varying vec3 vN;
+      varying vec3 vBx;
+      varying vec3 vBy;
+      varying vec3 vBz;
+      #ifdef SURROUND
+        attribute vec3 aProf;
+        varying vec3 vProf;
+      #endif
+      void main() {
+        vOb = position;
+        vNo = normal;
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vW = w.xyz;
+        mat3 m = mat3(modelMatrix);
+        vN = normalize(m * normal);
+        vBx = normalize(m[0]);
+        vBy = normalize(m[1]);
+        vBz = normalize(m[2]);
+        #ifdef SURROUND
+          vProf = aProf;
+        #endif
+        gl_Position = projectionMatrix * viewMatrix * w;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying vec3 vOb;
+      varying vec3 vNo;
+      varying vec3 vW;
+      varying vec3 vN;
+      varying vec3 vBx;
+      varying vec3 vBy;
+      varying vec3 vBz;
+      #ifdef SURROUND
+        varying vec3 vProf;
+      #endif
+      const float PI = 3.14159265;
+      const float TAU = 6.2831853;
+      ${FOG_GLSL}
+      ${SUN_GLSL}
+      ${NOISE_GLSL}
+      ${DOOR_GLSL}
+      #ifdef LEAF
+        /** negative inside a panel: two inset panels and an arched one, framed by stiles and rails */
+        float panelSd(vec2 p) {
+          float lo = sdBox(p, vec2(-P_A * 0.5, 1.135), vec2(P_A * 0.5 - 0.27, 0.815));
+          float up = sdBox(p, vec2(-P_A * 0.5, 2.85), vec2(P_A * 0.5 - 0.27, 0.37));
+          float arch = max(length(p - vec2(-P_A, P_HS)) - (P_A - 0.27), max(P_HS + 0.3 - p.y, max(p.x + 0.27, -P_A + 0.27 - p.x)));
+          return min(min(lo, up), arch);
+        }
+        /** the arched panels of the two leaves make one sunburst: its rays, 0 / 1 */
+        float rays(vec2 p) {
+          float ang = atan(p.y - P_HS, p.x + P_A) / (PI * 0.5) * 7.0;
+          return smoothstep(-0.25, 0.25, sin(ang * PI));
+        }
+        float relief(vec2 p) {
+          float s = -panelSd(p);
+          // a bevel down into each panel, then its field raised again
+          float h = -0.032 * smoothstep(0.0, 0.05, s) + 0.02 * smoothstep(0.09, 0.17, s);
+          h += 0.007 * rays(p) * smoothstep(0.17, 0.2, s) * step(P_HS, p.y);
+          // a bead along the lock rail
+          float onRail = step(-P_A + 0.27, p.x) * step(p.x, -0.27);
+          h += 0.014 * (1.0 - smoothstep(0.012, 0.04, abs(p.y - 2.215))) * onRail;
+          // the edges are rounded off
+          h -= 0.02 * (1.0 - smoothstep(0.0, 0.06, p.x + P_A));
+          h -= 0.016 * (1.0 - smoothstep(0.0, 0.05, -p.x));
+          return h;
+        }
+      #endif
+      void main() {
+        vec3 n = normalize(vN);
+        vec3 col;
+        float sun = 1.0;
+        float occ = 1.0;
+        vec3 extra = vec3(0.0);
+        #ifdef LEAF
+          vec2 p = vOb.xy;
+          // the two broad faces carry the relief; the leaf's thin edge does not
+          float face = vNo.z > 0.5 ? 1.0 : vNo.z < -0.5 ? -1.0 : 0.0;
+          float s = -panelSd(p);
+          float fw = fwidth(s) + 1e-4;
+          if (face != 0.0) {
+            float e = 0.004;
+            float h0 = relief(p);
+            vec3 nO = normalize(vec3(-(relief(p + vec2(e, 0.0)) - h0) / e, -(relief(p + vec2(0.0, e)) - h0) / e, face));
+            n = normalize(vBx * nO.x + vBy * nO.y + vBz * nO.z);
+          }
+          float f2 = face * face;
+          col = ${glPaint("#4c84d8")};
+          col = mix(col, ${glPaint("#6c9de6")}, smoothstep(0.15, 0.19, s) * f2);
+          col = mix(col, ${glPaint("#8fb6ee")}, 0.6 * rays(p) * smoothstep(0.17, 0.21, s) * step(P_HS, p.y) * f2);
+          // a cream pinstripe round every panel
+          col = mix(col, ${glPaint("#f5ecd9")}, f2 * (1.0 - smoothstep(0.007, 0.007 + fw * 1.5, abs(s + 0.065))));
+          col = mix(col, ${glPaint("#f5ecd9")}, f2 * (1.0 - smoothstep(0.005, 0.005 + fw * 1.5, abs(p.y - 2.215))) * step(-P_A + 0.27, p.x) * step(p.x, -0.27));
+          // brushed paint over the grain of the wood
+          col *= 0.965 + 0.06 * vnoise(vec2(p.x * 38.0, p.y * 1.6));
+          // dark in the bottom of each groove
+          occ = 1.0 - 0.4 * f2 * (smoothstep(-0.005, 0.02, s) - smoothstep(0.03, 0.09, s));
+          occ *= mix(0.72, 1.0, smoothstep(0.0, 0.6, p.y));
+        #endif
+        #ifdef SURROUND
+          float u = vProf.x;
+          float wu = vProf.z - vProf.x;
+          float along = vProf.y;
+          col = mix(${glPaint("#f5ecd9")}, ${glPaint("#f49680")}, smoothstep(0.265, 0.285, u));
+          // painted wood: brush strokes along the boards, and the grain under them
+          float grain = sin(u * 150.0 + vnoise(vec2(along * 0.35, u * 3.0)) * 10.0);
+          float gfade = 1.0 - smoothstep(0.3, 1.0, fwidth(u * 150.0));
+          col *= 0.965 + 0.05 * vnoise(vec2(along * 0.9, u * 26.0)) + 0.018 * grain * gfade;
+          // a little wear on the proud edges, where the paint has rubbed back to pale wood
+          float ridge = max(1.0 - smoothstep(0.0, 0.045, wu), 1.0 - smoothstep(0.012, 0.04, abs(u - 0.12)));
+          float rub = smoothstep(0.52, 0.78, vnoise(vec2(along * 2.2, u * 5.0 + 3.0)) * 0.7 + vnoise(vec2(along * 9.0, u * 20.0)) * 0.3);
+          col = mix(col, ${glPaint("#f4dcc4")}, ridge * rub * 0.85);
+          // the crease at the foot of each moulding
+          occ = 1.0 - 0.3 * (1.0 - smoothstep(0.0, 0.035, abs(u - 0.3))) - 0.25 * (1.0 - smoothstep(0.0, 0.03, abs(wu - 0.41)));
+          occ *= smoothstep(-0.3, 1.1, vOb.y);
+          sun = doorSun(vW, false);
+        #endif
+        #ifdef PLINTH
+          if (dot(n, cameraPosition - vW) < 0.0) n = -n;
+          float r = length(vW.xz);
+          float y = vW.y - ${HERO_Y.toFixed(4)};
+          float fr = fwidth(r) + 1e-4;
+          float top = smoothstep(0.85, 0.95, n.y);
+          vec3 cream = ${glPaint("#f3e6cc")};
+          vec3 mint = ${glPaint("#a2dcbf")};
+          vec3 coral = ${glPaint("#f3a488")};
+          col = r < 6.43 ? cream : mint;
+          // a quiet inlay of rings round the door: a double mint line, a ring of beads, a coral band
+          float line = (1.0 - smoothstep(0.03, 0.03 + fr, abs(r - 5.62))) + (1.0 - smoothstep(0.014, 0.014 + fr, abs(r - 5.8)));
+          col = mix(col, mint, clamp(line, 0.0, 1.0) * top);
+          float ang = atan(vW.z, vW.x);
+          float cell = (fract(ang / TAU * 40.0) - 0.5) * TAU / 40.0 * r;
+          float bead = 1.0 - smoothstep(0.06, 0.06 + fr, length(vec2(cell, r - 4.95)));
+          col = mix(col, mod(floor(ang / TAU * 40.0), 2.0) < 0.5 ? mint : coral, bead * top);
+          float band = smoothstep(4.18 - fr, 4.18, r) - smoothstep(4.36, 4.36 + fr, r);
+          col = mix(col, coral, band * top);
+          col = mix(col, cream, (1.0 - smoothstep(0.015, 0.015 + fr, abs(r - 4.27))) * top);
+          col = mix(col, cream, (1.0 - smoothstep(0.02, 0.02 + fr, abs(r - 7.72))) * top * step(6.43, r));
+          // terrazzo: a faint mottle and a scatter of specks
+          vec2 g = vW.xz * 34.0;
+          float speck = step(0.9, hash12(floor(g))) * (1.0 - smoothstep(0.2, 0.25, length(fract(g) - 0.5))) * (1.0 - smoothstep(0.1, 0.35, fwidth(g.x)));
+          col *= (0.97 + 0.05 * vnoise(vW.xz * 1.7)) * (1.0 - 0.1 * speck);
+          // the sides are in their own shade where they meet the tier below
+          occ = r < 6.43 ? mix(0.62, 1.0, smoothstep(0.1, 0.29, y)) : mix(0.5, 1.0, smoothstep(-0.5, 0.1, y));
+          occ *= doorContact(vW);
+          sun = doorSun(vW, true);
+        #endif
+        #ifdef BRASS
+          col = ${glPaint("#e8b84a")};
+          vec3 v = normalize(cameraPosition - vW);
+          extra = KEY * pow(max(dot(n, normalize(v + SUN)), 0.0), 60.0) * 1.6 + ${glScreen("#f4ead0")} * 0.25 * pow(1.0 - max(dot(n, v), 0.0), 3.0);
+        #endif
+        vec3 lit = propLight(col, n, sun * occ) * mix(0.62, 1.0, occ) + extra * sun;
+        gl_FragColor = vec4(applyFog(lit, length(cameraPosition - vW)), 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+}
+
+/**
+ * The coral surround: a moulding profile swept along the opening's edge, up one leg, over the arch
+ * and down the other. The profile runs from the inner reveal (a cream bead) across a flat field to
+ * an ogee on the outer edge; the outer edge follows the stele's own outline, so the band is wider
+ * over the top than at the sides. `aProf` is (distance from the opening, length along it, width).
+ */
+function surroundGeometry() {
+  const outer = (phi: number) => {
+    const c = Math.cos(phi);
+    const s = Math.sin(phi);
+    if (Math.abs(c) > 1e-6) {
+      const d = ST_A / Math.abs(c);
+      if (P_HS + d * s <= ST_HS) return d;
+    }
+    const oy = P_HS - ST_HS;
+    const b = oy * s;
+    return -b + Math.sqrt(b * b - oy * oy + ST_A * ST_A);
+  };
+  const path: { x: number; y: number; nx: number; ny: number; w: number }[] = [];
+  const LEG = 8;
+  for (let i = 0; i < LEG; i++) path.push({ x: P_A, y: -1 + ((P_HS + 1) * i) / LEG, nx: 1, ny: 0, w: ST_A - P_A });
+  const ARC = 120;
+  for (let i = 0; i <= ARC; i++) {
+    const phi = (Math.PI * i) / ARC;
+    const c = Math.cos(phi);
+    const s = Math.sin(phi);
+    path.push({ x: P_A * c, y: P_HS + P_A * s, nx: c, ny: s, w: outer(phi) - P_A });
+  }
+  for (let i = LEG - 1; i >= 0; i--) path.push({ x: -P_A, y: -1 + ((P_HS + 1) * i) / LEG, nx: -1, ny: 0, w: ST_A - P_A });
+  // (distance across, height in z, measured from the outer edge); repeated points make a crisp edge
+  const PROF: [number, number, number][] = [
+    [0, -0.09, 0], [0, 0.1, 0], [0, 0.1, 0],
+    [0.02, 0.165, 0], [0.06, 0.205, 0], [0.12, 0.225, 0], [0.18, 0.212, 0], [0.225, 0.175, 0], [0.25, 0.13, 0], [0.25, 0.13, 0],
+    [0.29, 0.12, 0], [0.31, 0.105, 0], [0.34, 0.08, 0], [0.39, 0.065, 0], [0.45, 0.06, 0],
+    [0.48, 0.06, 1], [0.44, 0.07, 1], [0.42, 0.1, 1], [0.42, 0.1, 1], [0.4, 0.105, 1], [0.35, 0.125, 1], [0.3, 0.16, 1], [0.25, 0.2, 1],
+    [0.2, 0.222, 1], [0.14, 0.235, 1], [0.08, 0.243, 1], [0.035, 0.24, 1], [0.01, 0.22, 1], [0, 0.18, 1], [0, 0.18, 1], [0, -0.09, 1],
+  ];
+  const pos: number[] = [];
+  const prof: number[] = [];
+  let along = 0;
+  path.forEach((q, i) => {
+    if (i > 0) along += Math.hypot(q.x - path[i - 1]!.x, q.y - path[i - 1]!.y);
+    for (const [pu, pz, fromOuter] of PROF) {
+      const u = fromOuter ? q.w - pu : pu;
+      pos.push(q.x + q.nx * u, q.y + q.ny * u, pz);
+      prof.push(u, along, q.w);
+    }
+  });
+  const M = PROF.length;
+  const index: number[] = [];
+  for (let i = 0; i < path.length - 1; i++)
+    for (let j = 0; j < M - 1; j++) {
+      const a = i * M + j;
+      const b = a + 1;
+      const c = a + M;
+      const d = c + 1;
+      index.push(a, b, c, b, d, c);
+    }
+  const g = new BufferGeometry();
+  g.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute("aProf", new BufferAttribute(new Float32Array(prof), 3));
+  g.setIndex(index);
+  g.computeVertexNormals();
+  return g;
+}
+
+/** the plinth, turned: a cream drum with a bevelled rim on a broad mint tier that sinks into the sand */
+function plinthGeometry() {
+  const P: [number, number][] = [
+    [0, 0.3], [6.08, 0.3], [6.22, 0.293], [6.32, 0.273], [6.385, 0.235], [6.41, 0.18], [6.42, 0.13], [6.47, 0.12],
+    [7.94, 0.12], [8.07, 0.113], [8.16, 0.092], [8.215, 0.055], [8.24, 0.0], [8.42, -0.6],
+  ];
+  return new LatheGeometry(P.map(([r, y]) => new Vector2(r, y)), 180);
+}
+
+/** the brass on one leaf (in its space: hinge at x = 0, the leaf towards -x): three hinges and a knob on each face */
+function hardwareGeometry() {
+  const parts: BufferGeometry[] = [];
+  const FRONT = 0.07;
+  const BACK = -0.02;
+  const knob = [
+    [0, 0], [0.1, 0], [0.1, 0.012], [0.088, 0.022], [0.035, 0.03], [0.024, 0.045], [0.024, 0.07], [0.045, 0.082],
+    [0.08, 0.105], [0.092, 0.13], [0.086, 0.155], [0.065, 0.175], [0.035, 0.186], [0, 0.19],
+  ].map(([r, y]) => new Vector2(r, y));
+  for (const [z, turn] of [[FRONT, Math.PI / 2], [BACK, -Math.PI / 2]] as const) {
+    const k = new LatheGeometry(knob, 28);
+    k.rotateX(turn);
+    k.translate(-P_A + 0.3, 2.215, z);
+    parts.push(k);
+    for (const y of [0.6, 1.75, 2.9]) {
+      const strap = new BoxGeometry(0.62, 0.095, 0.014);
+      strap.translate(-0.31, y, z + Math.sign(z - 0.025) * 0.007);
+      const end = new CylinderGeometry(0.075, 0.075, 0.014, 24);
+      end.rotateX(Math.PI / 2);
+      end.translate(-0.62, y, z + Math.sign(z - 0.025) * 0.007);
+      parts.push(strap, end);
+    }
+  }
+  for (const y of [0.6, 1.75, 2.9]) {
+    const barrel = new CylinderGeometry(0.048, 0.048, 0.34, 18);
+    barrel.translate(0, y, 0.025);
+    const cap = new SphereGeometry(0.05, 14, 8);
+    cap.translate(0, y + 0.19, 0.025);
+    parts.push(barrel, cap);
+  }
+  for (const p of parts) if (p.index === null) throw new Error("hardware parts must be indexed");
+  // mergeGeometries needs the same attributes on every part
+  const merged = mergeGeometries(parts.map((p) => {
+    p.deleteAttribute("uv");
+    return p;
+  }));
+  for (const p of parts) p.dispose();
+  return merged;
+}
+
+/** the keystone over the arch */
+function keystoneGeometry() {
+  const k = new Shape();
+  const y0 = P_HS + P_A - 0.1;
+  const y1 = ST_HS + ST_A - 0.08;
+  // its sides run towards the arch's centre, as a real keystone's do
+  const spread = (y: number) => 0.3 * ((y - P_HS) / (y0 - P_HS));
+  k.moveTo(-spread(y0), y0);
+  k.lineTo(spread(y0), y0);
+  k.lineTo(spread(y1), y1);
+  k.lineTo(-spread(y1), y1);
+  k.lineTo(-spread(y0), y0);
+  const g = new ExtrudeGeometry(k, { depth: 0.16, bevelEnabled: true, bevelSize: 0.06, bevelThickness: 0.06, bevelSegments: 3 });
+  g.translate(0, 0, 0.04);
+  return g;
+}
+
 function makeSkyMaterial() {
   return new ShaderMaterial({
     side: BackSide,
@@ -749,10 +1359,6 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
   const loops = useRef<InstancedMesh>(null);
   const clouds = useRef<InstancedMesh>(null);
   const stones = useRef<InstancedMesh>(null);
-  const blobShadows = useRef<InstancedMesh>(null);
-  const trunkShadows = useRef<InstancedMesh>(null);
-  const loopShadows = useRef<InstancedMesh>(null);
-  const domeShadows = useRef<InstancedMesh>(null);
   const contacts = useRef<InstancedMesh>(null);
   const tints = useRef<InstancedMesh>(null);
 
@@ -787,59 +1393,21 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     // thin doorway
     const frame = frameGeometry(D_A, D_HS, 0.42, 0.26);
     const opening = new ShapeGeometry(archPath(new Shape(), D_A + 0.02, D_HS, -0.6), 28);
-    // flat silhouettes used only to cast the projected shadows
-    const fs = new Shape();
-    const FA = D_A + 0.42;
-    fs.moveTo(-FA, 0);
-    fs.lineTo(-FA, D_HS);
-    fs.absarc(0, D_HS, FA, Math.PI, 0, true);
-    fs.lineTo(FA, 0);
-    fs.lineTo(D_A, 0);
-    fs.lineTo(D_A, D_HS);
-    fs.absarc(0, D_HS, D_A, 0, Math.PI, false);
-    fs.lineTo(-D_A, 0);
-    fs.lineTo(-FA, 0);
-    const frameFlat = new ShapeGeometry(fs, 20);
-    const steleFlat = new ShapeGeometry(archPath(new Shape(), P_A + 1.45, P_HS + 0.55, -PLINTH), 24);
     const hutShell = new SphereGeometry(1, 36, 14, 0, Math.PI * 2, 0, Math.PI * 0.62);
     const hutCap = new SphereGeometry(1, 16, 10);
 
-    // hero stele
-    const steleShape = archPath(new Shape(), P_A + 1.45, P_HS + 0.55, -1);
-    const steleBack = new ExtrudeGeometry(steleShape, {
-      depth: 0.1,
+    // hero stele: a thin back, the moulded surround and its keystone, the portal and two leaves
+    const steleBack = new ExtrudeGeometry(archPath(new Shape(), ST_A - 0.03, ST_HS, -1), {
+      depth: 0.04,
       bevelEnabled: true,
-      bevelSize: 0.05,
-      bevelThickness: 0.05,
+      bevelSize: 0.03,
+      bevelThickness: 0.03,
       bevelSegments: 2,
       curveSegments: 36,
     });
-    steleBack.translate(0, 0, -0.22);
-    const steleFront = frameGeometry(P_A, P_HS, 1.45, 0.3, -1);
-    // lift the outer springline so the band is even
-    steleFront.dispose();
-    const sf = new Shape();
-    const A = P_A + 1.45;
-    const HS = P_HS + 0.55;
-    sf.moveTo(-A, -1);
-    sf.lineTo(-A, HS);
-    sf.absarc(0, HS, A, Math.PI, 0, true);
-    sf.lineTo(A, -1);
-    sf.lineTo(P_A, -1);
-    sf.lineTo(P_A, P_HS);
-    sf.absarc(0, P_HS, P_A, 0, Math.PI, false);
-    sf.lineTo(-P_A, -1);
-    sf.lineTo(-A, -1);
-    const steleRing = new ExtrudeGeometry(sf, {
-      depth: 0.2,
-      bevelEnabled: true,
-      bevelSize: 0.07,
-      bevelThickness: 0.07,
-      bevelSegments: 3,
-      curveSegments: 36,
-    });
-    steleRing.translate(0, 0, -0.07);
-    const trim = frameGeometry(P_A, P_HS, 0.3, 0.16, 0);
+    steleBack.translate(0, 0, -0.13);
+    const surround = surroundGeometry();
+    const keystone = keystoneGeometry();
     const portal = new ShapeGeometry(archPath(new Shape(), P_A + 0.03, P_HS, 0), 40);
     // one door leaf (the right-hand one, hinge at x = 0 of its own space, leaf towards -x)
     const ls = new Shape();
@@ -854,25 +1422,10 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       bevelSize: 0.02,
       bevelThickness: 0.02,
       bevelSegments: 1,
-      curveSegments: 24,
+      curveSegments: 40,
     });
-    // raised round-headed panel on the leaf
-    const lp = new Shape();
-    const pa = P_A * 0.5 - 0.32;
-    lp.moveTo(-pa, 0.45);
-    lp.lineTo(pa, 0.45);
-    lp.lineTo(pa, P_HS + 0.2);
-    lp.absarc(0, P_HS + 0.2, pa, 0, Math.PI, false);
-    lp.lineTo(-pa, 0.45);
-    const leafPanel = new ExtrudeGeometry(lp, {
-      depth: 0.03,
-      bevelEnabled: true,
-      bevelSize: 0.03,
-      bevelThickness: 0.03,
-      bevelSegments: 2,
-      curveSegments: 16,
-    });
-    leafPanel.translate(-P_A * 0.5, 0, 0.06);
+    const hardware = hardwareGeometry();
+    const plinth = plinthGeometry();
 
     const disc = new CylinderGeometry(1, 1.06, 1, 48);
     disc.translate(0, 0.5, 0);
@@ -883,52 +1436,60 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     contact.rotateX(-Math.PI / 2);
     const bigBall = new SphereGeometry(1, 32, 16);
     const loop = new TorusGeometry(1, 0.11, 10, 40, Math.PI);
-    const lowLoop = new TorusGeometry(1, 0.11, 6, 28, Math.PI);
     const sky = new SphereGeometry(900, 32, 20);
     return {
       terrain,
       frame,
-      frameFlat,
-      steleFlat,
       opening,
       hutShell,
       hutCap,
       steleBack,
-      steleRing,
-      trim,
+      surround,
+      keystone,
       portal,
       leaf,
-      leafPanel,
+      hardware,
+      plinth,
       disc,
       trunk,
       ball,
       contact,
-      lowLoop,
       bigBall,
       loop,
       sky,
     } satisfies Record<string, BufferGeometry>;
   }, []);
 
+  // the still shadows on the sand, baked in the layout effect below
+  const shadowMap = useMemo(() => {
+    const tex = new DataTexture(new Uint8Array(SH_N * SH_N), SH_N, SH_N, RedFormat, UnsignedByteType);
+    tex.magFilter = LinearFilter;
+    tex.minFilter = LinearMipmapLinearFilter;
+    tex.generateMipmaps = true;
+    tex.anisotropy = 4;
+    return tex;
+  }, []);
+  useEffect(() => () => shadowMap.dispose(), [shadowMap]);
+
   const mat = useMemo(() => {
+    const open = { value: 0 };
     /** `c` is the colour on screen of its sunny side; "#ffffff" leaves the albedo to the instance colours */
     const lambert = (c: string, key: string, glsl = "", ao = "1.0") =>
       sunlit(new MeshLambertMaterial({ color: c === "#ffffff" ? c : painted(c) }), key, glsl, ao);
     const FRAME_AO = "smoothstep(-0.3, 1.1, vOb.y)";
     return {
-      terrain: makeTerrainMaterial(),
+      terrain: makeTerrainMaterial(shadowMap),
+      open,
+      leaf: makeDoorMaterial("LEAF", open),
+      surround: makeDoorMaterial("SURROUND", open),
+      plinth: makeDoorMaterial("PLINTH", open),
+      brass: makeDoorMaterial("BRASS", open),
       sky: makeSkyMaterial(),
       frames: FRAME_COLORS.map((c) => lambert(c, "frame", "", FRAME_AO)),
       huts: HUT_COLORS.map((c) => lambert(c, "hut", "", "smoothstep(-0.37, 0.2, vOb.y)")),
       interiors: DOORS.map((d) => makeInteriorMaterial(d.pal, d.R / d.scale)),
-      stele: lambert("#f49680", "frame", "", FRAME_AO),
       steleBack: lambert("#f4b49c", "frame", "", FRAME_AO),
-      trim: lambert("#f5ecd9", "plain"),
-      leaf: lambert("#4c84d8", "plain"),
-      leafPanel: lambert("#7aaaea", "plain"),
-      knob: lambert("#f4c44c", "plain"),
-      plinth: lambert("#f3e6cc", "plinth", "", "smoothstep(0.64, 0.95, vOb.y)"),
-      plinth2: lambert("#a2dcbf", "plinth2", "", "smoothstep(0.8, 1.0, vOb.y)"),
+      trim: lambert("#f5e0cc", "plain"),
       // the underside of a crown is in its own shade
       crown: lambert("#ffffff", "crown", PATTERNS.crown, "smoothstep(-1.1, 0.15, vOb.y)"),
       dome: lambert("#ffffff", "dome", PATTERNS.dome, "smoothstep(0.1, 0.55, vOb.y)"),
@@ -938,25 +1499,10 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       }),
       stone: lambert("#ffffff", "stone", PATTERNS.stone),
       trunk: lambert("#b98a94", "trunk", "", "smoothstep(0.0, 0.3, vOb.y)"),
-      cast: makeShadowMaterial("CAST"),
-      flat: makeShadowMaterial("FLAT"),
       contact: makeShadowMaterial("CONTACT"),
       tint: makeShadowMaterial("TINT"),
       cloud: sunlit(new MeshLambertMaterial({ color: "#ffffff", emissive: "#8f96ad", fog: false }), "cloud"),
     };
-  }, []);
-
-  const shadows = useMemo(() => {
-    const o = new Object3D();
-    const doors = DOORS.map((d) => {
-      o.position.set(d.x, ground(d.x, d.z), d.z);
-      o.rotation.set(0, Math.atan2(d.fx, d.fz), 0);
-      o.scale.setScalar(d.scale);
-      o.updateMatrix();
-      return shadowMatrix(d.x, d.z, new Matrix4()).multiply(o.matrix);
-    });
-    const stele = shadowMatrix(0, -9, new Matrix4()).multiply(new Matrix4().makeTranslation(0, HERO_Y + PLINTH, 0));
-    return { doors, stele };
   }, []);
 
   const garden = useMemo(() => {
@@ -968,6 +1514,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       rnd: mulberry32(4711),
       fogGlsl: FOG_GLSL,
       sun: SUN_DIR,
+      groundGlsl: GROUND_GLSL,
       shadowMaterial: (vs) => makeShadowMaterial("CAST", vs),
     });
   }, [cam]);
@@ -978,12 +1525,8 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     const rnd = mulberry32(20251);
     const o = new Object3D();
     const c = new Color();
-    const sm = new Matrix4();
     const zero = new Matrix4().makeScale(0, 0, 0);
-    const BS = blobShadows.current!;
-    const TS = trunkShadows.current!;
-    const LS = loopShadows.current!;
-    const DS = domeShadows.current!;
+    const casters: Caster[] = [];
     const CT = contacts.current!;
     const clear = clearOf(cam.curve.getPoints(80));
     // soft dark pools where things meet the ground: an ellipse rx by rz turned by yaw, laid on the dune
@@ -1023,40 +1566,37 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       o.scale.set(1 + hgt * 0.25, hgt, 1 + hgt * 0.25);
       o.updateMatrix();
       T.setMatrixAt(n, o.matrix);
-      shadowMatrix(x, z, sm);
-      TS.setMatrixAt(n, o.matrix.premultiply(sm));
+      casters.push(capsuleCaster(x, y - 0.1, z, x, y + hgt, z, 0.07 * (1 + hgt * 0.25)));
       o.position.set(x, y + hgt + cr * squash * 0.55, z);
       o.scale.set(cr, cr * squash, cr);
       o.updateMatrix();
       K.setMatrixAt(n, o.matrix);
       K.setColorAt(n, c.setRGB(...crownCols[ci]!));
-      BS.setMatrixAt(n, o.matrix.premultiply(sm));
+      casters.push(ellipsoidCaster(x, y + hgt + cr * squash * 0.55, z, cr, cr * squash, cr));
       contact(x + SUN_DIR.x * -0.15, z - SUN_DIR.z * 0.15, 0.35 + hgt * 0.09, 0.35 + hgt * 0.09, 0, 0.8);
       n++;
     }
-    // hut domes cast blobs too
-    DOORS.forEach((d, i) => {
-      const slot = T.count + i;
-      if (!d.hut) return BS.setMatrixAt(slot, zero);
+    // every doorway's band, and the domes of the huts
+    for (const d of DOORS) {
+      const gy = ground(d.x, d.z);
+      casters.push(archCaster(d.x, gy, d.z, Math.atan2(d.fx, d.fz), d.scale, D_A, D_HS, 0.42));
+      if (!d.hut) continue;
       const dw = D_A * d.scale;
       const l = Math.hypot(d.fx, d.fz);
       const hx = d.x - (d.fx / l) * dw * 2.05;
       const hz = d.z - (d.fz / l) * dw * 2.05;
-      o.position.set(hx, ground(d.x, d.z) - 0.1, hz);
-      o.rotation.set(0, 0, 0);
-      o.scale.set(dw * 2.3, dw * 2.9, dw * 2.3);
-      o.updateMatrix();
-      BS.setMatrixAt(slot, o.matrix.premultiply(shadowMatrix(hx, hz, sm)));
+      casters.push(ellipsoidCaster(hx, gy - 0.1, hz, dw * 2.3, dw * 2.9, dw * 2.3));
+      casters.push(ellipsoidCaster(hx, gy - 0.1 + dw * 2.9, hz, dw * 0.3, dw * 0.3, dw * 0.3));
       contact(hx, hz, dw * 2.75, dw * 2.75, 0, 0.75);
-    });
+    }
+    // the stele, standing on its plinth
+    casters.push(archCaster(0, DOOR_Y, 0, 0, 1, ST_A, ST_HS, 0));
     // every doorway darkens the sand along its foot, and the stele's plinth sits in a pool
     for (const d of DOORS) {
       const w = (D_A + 0.42) * d.scale;
       contact(d.x, d.z, w * 1.25, 0.9 * d.scale + 0.3, Math.atan2(d.fx, d.fz), 0.7);
     }
     contact(0, 0, 9.4, 9.4, 0, 0.75);
-    BS.instanceMatrix.needsUpdate = true;
-    TS.instanceMatrix.needsUpdate = true;
     T.instanceMatrix.needsUpdate = true;
     K.instanceMatrix.needsUpdate = true;
     if (K.instanceColor) K.instanceColor.needsUpdate = true;
@@ -1080,12 +1620,11 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       o.updateMatrix();
       Dm.setMatrixAt(n, o.matrix);
       Dm.setColorAt(n, c.setRGB(...domeCols[ci]!));
-      DS.setMatrixAt(n, o.matrix.premultiply(shadowMatrix(x, z, sm)));
+      casters.push(ellipsoidCaster(x, ground(x, z) - s * 0.25, z, s, s * tall, s));
       contact(x, z, s * 1.22, s * 1.22, 0, 0.6);
       n++;
     }
     Dm.instanceMatrix.needsUpdate = true;
-    DS.instanceMatrix.needsUpdate = true;
     if (Dm.instanceColor) Dm.instanceColor.needsUpdate = true;
 
     // bulbous hoops leaping over the dunes
@@ -1104,16 +1643,16 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       if (!clear(x, z, s + 5)) continue;
       o.position.set(x, ground(x, z) - s * 0.12, z);
       o.rotation.set(0, rot, 0);
-      o.scale.set(s, s * (0.8 + rnd() * 0.7), s * fat);
+      const tall = 0.8 + rnd() * 0.7;
+      o.scale.set(s, s * tall, s * fat);
       o.updateMatrix();
       L.setMatrixAt(n, o.matrix);
       L.setColorAt(n, c.setRGB(...loopCols[ci]!));
-      LS.setMatrixAt(n, o.matrix.premultiply(shadowMatrix(x, z, sm)));
+      casters.push(hoopCaster(x, ground(x, z) - s * 0.12, z, rot, s, s * tall, s * fat, 0.11));
       // both feet
       for (const side of [-1, 1]) contact(x + Math.cos(rot) * s * side, z - Math.sin(rot) * s * side, 0.5 * s * 0.22 * fat + 0.5, 0.5 * s * 0.22 * fat + 0.5, rot, 0.7);
       n++;
     }
-    LS.instanceMatrix.needsUpdate = true;
     L.instanceMatrix.needsUpdate = true;
     if (L.instanceColor) L.instanceColor.needsUpdate = true;
 
@@ -1177,10 +1716,18 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     for (let i = garden.drifts.length; i < Tn.count; i++) Tn.setMatrixAt(i, zero);
     Tn.instanceMatrix.needsUpdate = true;
     if (Tn.instanceColor) Tn.instanceColor.needsUpdate = true;
-    for (const p of garden.pinwheels) contact(p.x, p.z, 0.3 * p.size + 0.15, 0.3 * p.size + 0.15, 0, 0.8);
+    for (const p of garden.pinwheels) {
+      contact(p.x, p.z, 0.3 * p.size + 0.15, 0.3 * p.size + 0.15, 0, 0.8);
+      casters.push(capsuleCaster(p.x, ground(p.x, p.z), p.z, p.x, p.top, p.z, 0.045 * p.size));
+    }
     for (let i = nc; i < CT.count; i++) CT.setMatrixAt(i, zero);
     CT.instanceMatrix.needsUpdate = true;
-  }, [cam, garden]);
+
+    const t0 = performance.now();
+    bakeShadows(casters, shadowMap.image.data as Uint8Array);
+    shadowMap.needsUpdate = true;
+    if (import.meta.env.DEV) console.debug(`dollhouse: baked ${casters.length} shadows in ${(performance.now() - t0).toFixed(0)} ms`);
+  }, [cam, garden, shadowMap]);
 
   useFrame(() => {
     const t = Math.min(25, Math.max(0, clock.t));
@@ -1204,6 +1751,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     // double doors swing open towards us
     const k = smoothstep(13.2, 18.5, t);
     const open = k * 1.95;
+    mat.open.value = open;
     if (leafR.current) leafR.current.rotation.y = open;
     if (leafL.current) leafL.current.rotation.y = -open;
   });
@@ -1242,30 +1790,23 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
         );
       })}
 
-      {DOORS.map((d, i) => (
-        <mesh key={i} geometry={geo.frameFlat} material={mat.flat} matrix={shadows.doors[i]} matrixAutoUpdate={false} frustumCulled={false} />
-      ))}
-      <mesh geometry={geo.steleFlat} material={mat.flat} matrix={shadows.stele} matrixAutoUpdate={false} frustumCulled={false} />
 
       {/* the stele: the real way out */}
       <group position={[0, HERO_Y, 0]}>
-        <mesh geometry={geo.disc} material={mat.plinth2} position={[0, -0.6, 0]} scale={[8.2, 0.72, 8.2]} />
-        <mesh geometry={geo.disc} material={mat.plinth} position={[0, -0.6, 0]} scale={[6.4, 0.6 + PLINTH, 6.4]} />
+        <mesh geometry={geo.plinth} material={mat.plinth} />
         <group position={[0, PLINTH, 0]}>
           <mesh geometry={geo.steleBack} material={mat.steleBack} />
-          <mesh geometry={geo.steleRing} material={mat.stele} />
-          <mesh geometry={geo.trim} material={mat.trim} position={[0, 0, 0.14]} />
+          <mesh geometry={geo.surround} material={mat.surround} />
+          <mesh geometry={geo.keystone} material={mat.trim} />
           <mesh geometry={geo.portal} material={portalMaterial} position={[0, 0, -0.02]} />
           <group ref={leafR} position={[P_A, 0, 0.1]}>
             <mesh geometry={geo.leaf} material={mat.leaf} />
-            <mesh geometry={geo.leafPanel} material={mat.leafPanel} />
-            <mesh geometry={geo.ball} material={mat.knob} position={[-P_A + 0.32, 2.3, 0.14]} scale={0.13} />
+            <mesh geometry={geo.hardware} material={mat.brass} />
           </group>
           <group ref={leafL} position={[-P_A, 0, 0.1]}>
             <group scale={[-1, 1, 1]}>
               <mesh geometry={geo.leaf} material={mat.leaf} />
-              <mesh geometry={geo.leafPanel} material={mat.leafPanel} />
-              <mesh geometry={geo.ball} material={mat.knob} position={[-P_A + 0.32, 2.3, 0.14]} scale={0.13} />
+              <mesh geometry={geo.hardware} material={mat.brass} />
             </group>
           </group>
         </group>
@@ -1273,10 +1814,6 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
       <instancedMesh ref={trunks} args={[geo.trunk, mat.trunk, TREES]} frustumCulled={false} />
       <instancedMesh ref={crowns} args={[geo.ball, mat.crown, TREES]} frustumCulled={false} />
-      <instancedMesh ref={trunkShadows} args={[geo.trunk, mat.cast, TREES]} frustumCulled={false} />
-      <instancedMesh ref={blobShadows} args={[geo.ball, mat.cast, TREES + DOORS.length]} frustumCulled={false} />
-      <instancedMesh ref={loopShadows} args={[geo.lowLoop, mat.cast, 16]} frustumCulled={false} />
-      <instancedMesh ref={domeShadows} args={[geo.ball, mat.cast, 22]} frustumCulled={false} />
       <instancedMesh ref={contacts} args={[geo.contact, mat.contact, CONTACTS]} frustumCulled={false} />
       <instancedMesh ref={tints} args={[geo.contact, mat.tint, TINTS]} frustumCulled={false} />
       <instancedMesh ref={domes} args={[geo.bigBall, mat.dome, 22]} frustumCulled={false} />

@@ -64,6 +64,8 @@ export interface GardenOptions {
   fogGlsl: string;
   /** the scene's sun, pointing towards it */
   sun: { x: number; y: number; z: number };
+  /** GLSL defining `float groundAt(vec2 xz)`, the same dunes as `ground` */
+  groundGlsl: string;
   /** a cast-shadow material around the given vertex shader, which sets vW and vA (see dollhouse.tsx) */
   shadowMaterial: (vertexShader: string) => ShaderMaterial;
 }
@@ -72,8 +74,8 @@ export interface Garden {
   root: Group;
   /** each flower drift: centre, radius and petal colour (linear light), for the shadow and the fallen petals under it */
   drifts: { x: number; z: number; r: number; hue: RGB }[];
-  /** foot of each pinwheel stalk */
-  pinwheels: { x: number; z: number; size: number }[];
+  /** foot of each pinwheel stalk, and the height of its hub (the stalk's shadow is baked with the scene's) */
+  pinwheels: { x: number; z: number; size: number; top: number }[];
   update(t: number): void;
   dispose(): void;
 }
@@ -249,7 +251,7 @@ export function createGarden(o: GardenOptions): Garden {
       const size = 0.9 + rnd() ** 1.5 * 1.7;
       if (!o.clear(x, z, 4 + size)) continue;
       place.set([x, ground(x, z) + STALK * size - 0.1, z, size], n * 4);
-      pinwheels.push({ x, z, size });
+      pinwheels.push({ x, z, size, top: ground(x, z) + STALK * size - 0.1 });
       spin.set([rnd() * TAU, (rnd() < 0.5 ? -1 : 1) * (1.2 + rnd() * 2.6) / size, rnd() * TAU, 0], n * 4);
       hue.set(hues[Math.floor(rnd() * hues.length)]!, n * 3);
       n++;
@@ -286,7 +288,13 @@ export function createGarden(o: GardenOptions): Garden {
         varying float vA;
         varying vec2 vQ;
         const vec3 SUN = vec3(${o.sun.x.toFixed(4)}, ${o.sun.y.toFixed(4)}, ${o.sun.z.toFixed(4)});
+        ${o.groundGlsl}
         void main() {
+          // the stalk's shadow is baked into the sand with every other still thing's
+          if (aPart < 0.5) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+          }
           vec3 p = position;
           if (aPart > 0.5) {
             float a = aSpin.z + uT * aSpin.y;
@@ -295,11 +303,15 @@ export function createGarden(o: GardenOptions): Garden {
           }
           float c = cos(aSpin.x), s = sin(aSpin.x);
           p.xz = mat2(c, s, -s, c) * p.xz;
-          vec3 w = aPlace.xyz + p * aPlace.w;
-          // flattened onto the dune along the sun; the sails' shadow is a little lighter
-          w -= SUN * (dot(aPlane.xyz, w) - aPlane.w) / dot(aPlane.xyz, SUN);
+          vec3 w0 = aPlace.xyz + p * aPlace.w;
+          // slid along the sun onto the dune: first onto its tangent plane under the stalk, then
+          // onto the dune itself, so the shadow lies on the sand however it curves
+          float k = (dot(aPlane.xyz, w0) - aPlane.w) / dot(aPlane.xyz, SUN);
+          for (int i = 0; i < 3; i++) k = (w0.y - groundAt(w0.xz - SUN.xz * k) - 0.04) / SUN.y;
+          vec3 w = w0 - SUN * k;
           vW = w;
-          vA = aPart < 0.5 ? 1.0 : 0.85;
+          // the sails' shadow is a little lighter, and paler still far off, where it would only flicker
+          vA = 0.85 * (1.0 - 0.6 * smoothstep(25.0, 110.0, length(cameraPosition - w)));
           vQ = vec2(0.0);
           gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
         }`),
