@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { RAIL, createRide } from "./rail";
 import { TIMING, type SceneProps } from "./types";
 import { createSky } from "./orbit/sky";
+import { mergeGeometries, toCreasedNormals } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 /**
  * ORBIT — the inside-out world.
@@ -27,6 +28,13 @@ const DOOR_R = 2.68;
 const DOOR_Z = HUT_Z - 4.6;
 const PORTAL_Z = DOOR_Z + 0.14;
 const PLAZA_R = 14;
+const LEAF_T = 0.22; // leaf thickness, bevel included
+const HUT_WINDOWS = [0, Math.PI * 0.5, Math.PI, Math.PI * 0.25, Math.PI * 0.75];
+const HUT_WIN_R = 4.36;
+const HUT_WIN_Y = 2.15;
+/** the stepped base: radius and top of each tier, bottom first */
+const STEP_R = [7.6, 6.7, 5.8];
+const STEP_Y = [0.42, 0.62, 0.82];
 
 /** camera way-points: [s, z, h] */
 const WAY: [number, number, number][] = [
@@ -82,17 +90,109 @@ vec3 lampAt(vec3 p) {
 }`;
 
 /**
- * The moon hangs at the +z end of the cylinder. Far silhouettes catch a cool rim on the side that
- * faces it, added after the air so towers part from the sky and from each other. Lit materials only
- * (they have `normal` and `vViewPosition`); kept under the bloom threshold so it reads as an edge.
+ * The moon hangs at the +z end of the cylinder. Middle-distance silhouettes catch a faint cool rim
+ * on the side that faces it, added after the air so towers part from the sky and from each other.
+ * It is gated hard to moon-facing normals and dies out again in the far air, so the town overhead
+ * sinks into depth instead of being outlined. Lit materials only (they have `normal` and
+ * `vViewPosition`); kept under the bloom threshold so it reads as an edge.
  */
 const RIM_GLSL = /* glsl */ `
   {
     vec3 nW = transpose(mat3(viewMatrix)) * normal;
     float graze = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0);
-    float rim = graze * graze * graze * (0.45 + 0.55 * smoothstep(-0.5, 0.6, nW.z)) * smoothstep(0.08, 0.45, ${EXT_GLSL});
-    gl_FragColor.rgb += vec3(0.17, 0.25, 0.52) * rim;
+    float e = ${EXT_GLSL};
+    float rim = graze * graze * graze * graze * smoothstep(0.2, 0.85, nW.z)
+      * smoothstep(0.08, 0.3, e) * (1.0 - 0.8 * smoothstep(0.42, 0.75, e));
+    gl_FragColor.rgb += vec3(0.17, 0.25, 0.52) * 0.6 * rim;
   }`;
+
+/** overlapping round shingles in cell units (rows run up `sv.y`): x is the tone, y a height for a bump */
+const SHINGLE_GLSL = /* glsl */ `
+vec2 shingle(vec2 sv) {
+  sv.x += 0.5 * mod(floor(sv.y), 2.0);
+  vec2 f = fract(sv);
+  float d = length(vec2(f.x - 0.5, max(0.5 - f.y, 0.0)));
+  float tile = smoothstep(0.52, 0.44, d);
+  float hem = tile * smoothstep(0.34, 0.44, d);
+  float tone = fract(sin(dot(floor(sv), vec2(12.99, 78.23))) * 43758.5);
+  return vec2(mix(0.5, (0.8 + 0.5 * f.y) * (0.88 + 0.24 * tone), tile) + 0.5 * hem, tile * (1.0 - 0.7 * f.y));
+}`;
+
+// ---------------------------------------------------------------- the moon-gate hut's own shading
+const HUT_ORIGIN = `vec3(0.0, ${(-R).toFixed(1)}, ${HUT_Z.toFixed(1)})`;
+const GATE_C = `vec3(0.0, ${DOOR_H.toFixed(2)}, ${(DOOR_Z - HUT_Z).toFixed(2)})`;
+const HUT_PARS = /* glsl */ `
+varying vec3 vHp;
+${SHINGLE_GLSL}
+/** a height field h (world units) tilts the view-space normal; scale-true, from screen derivatives */
+vec3 bumpN(vec3 surfPos, vec3 n, float h, float face) {
+  vec3 dpx = dFdx(surfPos);
+  vec3 dpy = dFdy(surfPos);
+  vec3 r1 = cross(dpy, n);
+  vec3 r2 = cross(n, dpx);
+  float det = dot(dpx, r1) * face;
+  vec3 g = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  return normalize(abs(det) * n - g);
+}
+/** warm light thrown by the gold ring of the gate onto a hut-local point, falling off with distance */
+vec3 gateWash(vec3 p, vec3 nW) {
+  vec3 q = p - ${GATE_C};
+  float rho = max(length(q.xy), 1e-3);
+  vec3 L = vec3(q.xy * (2.86 / rho), 0.0) - q;
+  float d = max(length(L), 1e-3);
+  float lam = 0.3 + 0.7 * max(dot(nW, L / d), 0.0);
+  return vec3(1.0, 0.58, 0.2) * lam / (1.0 + d * d * 1.1);
+}
+float hash12(vec2 p) { return fract(sin(dot(p, vec2(12.99, 78.23))) * 43758.5); }
+`;
+
+/** a 4-point star: two thin rhombi */
+const STAR_GLSL = /* glsl */ `
+float sdStar(vec2 p, float s) {
+  p = abs(p);
+  return min(p.x / s + p.y / (s * 0.24), p.x / (s * 0.24) + p.y / s) * s * 0.23 - s * 0.23;
+}`;
+
+/**
+ * Patches a hut material: `pattern` runs once the normal is known (it may change `diffuseColor`,
+ * `normal` and `hutGlow`), then the gate's warm wash and, with `rim`, a cool moon rim are added.
+ */
+function hutShader(mat: THREE.Material, key: string, pattern: string, wash: number, rim = 0, leaf = false) {
+  mat.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>\nvarying vec3 vHp;${leaf ? "\nattribute vec2 aq;\nvarying vec2 vQ;\nvarying float vNz;" : ""}`,
+      )
+      .replace(
+        "#include <project_vertex>",
+        `#include <project_vertex>
+        vHp = (modelMatrix * vec4(transformed, 1.0)).xyz - ${HUT_ORIGIN};
+        ${leaf ? "vQ = aq; vNz = normal.z;" : ""}`,
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>\n${HUT_PARS}${leaf ? `\nvarying vec2 vQ;\nvarying float vNz;\n${STAR_GLSL}` : ""}`,
+      )
+      .replace("#include <normal_fragment_maps>", `#include <normal_fragment_maps>\nvec3 hutGlow = vec3(0.0);\n{\n${pattern}\n}`)
+      .replace(
+        "#include <lights_fragment_end>",
+        `#include <lights_fragment_end>
+        {
+          vec3 nW = inverseTransformDirection(normal, viewMatrix);
+          totalEmissiveRadiance += hutGlow + (diffuseColor.rgb * 1.7 + 0.05) * gateWash(vHp, nW) * ${wash.toFixed(2)};
+          ${
+            rim > 0
+              ? `float g = 1.0 - clamp(abs(dot(normal, normalize(vViewPosition))), 0.0, 1.0);
+          totalEmissiveRadiance += vec3(0.32, 0.55, 1.0) * g * g * g * smoothstep(-0.25, 0.75, nW.z) * ${rim.toFixed(2)};`
+              : ""
+          }
+        }`,
+      );
+  };
+  mat.customProgramCacheKey = () => `orbit-hut-${key}`;
+}
 
 /**
  * Chains a material's own shader patch with distance extinction: the colour sinks into AIR by
@@ -890,23 +990,94 @@ function buildWorld() {
   pointsGeo.setAttribute("aData", new THREE.Float32BufferAttribute(pData, 4));
 
   // hut
+  // a round wall under a flared eave, then a bell of shingles up to a gold finial
   const hutGeo = lathe(
-    [[4.3, 0], [4.36, 1.5], [4.1, 3.5], [3.4, 5.6], [2.2, 7.4], [0.9, 8.6], [0.25, 9.2], [0.16, 10], [0, 10.3]],
-    28,
+    [
+      [4.3, 0], [4.36, 1.5], [4.32, 3.15], [4.42, 3.26], [4.68, 3.36], [4.7, 3.5], [4.5, 3.6], [4.12, 4.0],
+      [3.55, 5.1], [2.75, 6.4], [1.85, 7.6], [1.05, 8.5], [0.5, 9.0], [0.3, 9.1], [0, 9.12],
+    ],
+    96,
   );
+  const finialGeo2 = lathe(
+    [[0.001, 8.95], [0.5, 8.95], [0.56, 9.08], [0.42, 9.2], [0.2, 9.3], [0.15, 9.42], [0.3, 9.6], [0.32, 9.72],
+      [0.2, 9.86], [0.08, 9.98], [0.06, 10.1], [0.001, 10.12]],
+    32,
+  );
+  // a gold crescent moon cradles the cyan orb
+  const crescentGeo = (() => {
+    const sh = new THREE.Shape();
+    const n = 40;
+    const ro = 0.62;
+    const ri = 0.5;
+    const off = 0.24; // the inner circle is shifted right, so the horns open that way
+    const a0 = Math.acos((ro * ro - ri * ri + off * off) / (2 * ro * off));
+    for (let i = 0; i <= n; i++) {
+      const a = a0 + ((2 * Math.PI - 2 * a0) * i) / n;
+      if (i === 0) sh.moveTo(ro * Math.cos(a), ro * Math.sin(a));
+      else sh.lineTo(ro * Math.cos(a), ro * Math.sin(a));
+    }
+    const b0 = Math.atan2(ro * Math.sin(a0), ro * Math.cos(a0) - off);
+    for (let i = 0; i <= n; i++) {
+      const b = 2 * Math.PI - b0 - ((2 * Math.PI - 2 * b0) * i) / n;
+      sh.lineTo(off + ri * Math.cos(b), ri * Math.sin(b));
+    }
+    return toCreasedNormals(
+      new THREE.ExtrudeGeometry(sh, { depth: 0.04, bevelEnabled: true, bevelThickness: 0.03, bevelSize: 0.03, bevelSegments: 2, curveSegments: 1 }).translate(-0.12, 0, -0.02),
+      0.9,
+    );
+  })();
   const porchGeo = new THREE.CylinderGeometry(3.02, 3.02, 4.6, 32, 1, true).rotateX(Math.PI / 2);
   const frameGeo = new THREE.TorusGeometry(2.86, 0.23, 10, 56);
   const portalGeo = new THREE.CircleGeometry(2.9, 48);
-  const leafGeoL = new THREE.CylinderGeometry(DOOR_R, DOOR_R, 0.12, 24, 1, false, Math.PI, Math.PI)
-    .rotateX(Math.PI / 2)
-    .translate(DOOR_R, 0, 0);
-  const leafGeoR = new THREE.CylinderGeometry(DOOR_R, DOOR_R, 0.12, 24, 1, false, 0, Math.PI)
-    .rotateX(Math.PI / 2)
-    .translate(-DOOR_R, 0, 0);
-  const trimGeoL = new THREE.TorusGeometry(1.7, 0.07, 6, 24, Math.PI).rotateZ(Math.PI / 2).translate(DOOR_R, 0, -0.07);
-  const trimGeoR = new THREE.TorusGeometry(1.7, 0.07, 6, 24, Math.PI).rotateZ(-Math.PI / 2).translate(-DOOR_R, 0, -0.07);
-  const stepGeo = new THREE.CylinderGeometry(1, 1.02, 1.2, 40).translate(0, -0.6, 0);
-  const roundWinGeo = new THREE.CircleGeometry(0.55, 16);
+  // The leaves: thick half-discs with a rounded bevel all round. `aq` keeps door-centred
+  // coordinates for the lattice, which is cut in the shader.
+  const leafGeo = (side: 1 | -1) => {
+    const bev = 0.045;
+    const rr = DOOR_R - bev;
+    const a0 = Math.acos(bev / rr);
+    const shape = new THREE.Shape();
+    const n = 72;
+    for (let i = 0; i <= n; i++) {
+      const a = -a0 + (2 * a0 * i) / n;
+      const x = side * Math.cos(a) * rr;
+      const y = Math.sin(a) * rr;
+      if (i === 0) shape.moveTo(x, y);
+      else shape.lineTo(x, y);
+    }
+    shape.lineTo(side * bev, -Math.sin(a0) * rr);
+    let g: THREE.BufferGeometry = new THREE.ExtrudeGeometry(shape, {
+      depth: LEAF_T - 2 * bev,
+      bevelEnabled: true,
+      bevelThickness: bev,
+      bevelSize: bev,
+      bevelSegments: 4,
+      curveSegments: 1,
+    }).translate(0, 0, -(LEAF_T / 2 - bev));
+    g.deleteAttribute("uv");
+    g = toCreasedNormals(g, 0.9);
+    const pos = g.getAttribute("position");
+    const aq = new Float32Array(pos.count * 2);
+    for (let i = 0; i < pos.count; i++) {
+      aq[i * 2] = pos.getX(i);
+      aq[i * 2 + 1] = pos.getY(i);
+    }
+    g.setAttribute("aq", new THREE.BufferAttribute(aq, 2));
+    return g.translate(-side * DOOR_R, 0, 0);
+  };
+  const leafGeoL = leafGeo(-1);
+  const leafGeoR = leafGeo(1);
+  const trimGeoL = new THREE.TorusGeometry(1.7, 0.06, 8, 48, Math.PI).rotateZ(Math.PI / 2).translate(DOOR_R, 0, -LEAF_T / 2);
+  const trimGeoR = new THREE.TorusGeometry(1.7, 0.06, 8, 48, Math.PI).rotateZ(-Math.PI / 2).translate(-DOOR_R, 0, -LEAF_T / 2);
+  const stepGeo = new THREE.CylinderGeometry(1, 1.02, 1.2, 128).translate(0, -0.6, 0);
+  const roundWinGeo = new THREE.CircleGeometry(0.55, 24);
+  // gold rims round the hut's porthole windows, merged into one draw
+  const winFrameGeo = mergeGeometries(
+    HUT_WINDOWS.map((a) =>
+      new THREE.TorusGeometry(0.6, 0.07, 6, 28)
+        .rotateY(Math.PI / 2 - a)
+        .translate(Math.cos(a) * HUT_WIN_R, HUT_WIN_Y, Math.sin(a) * HUT_WIN_R),
+    ),
+  );
   const beamGeo = new THREE.CylinderGeometry(0.05, 0.2, 56, 8, 1, true).translate(0, 28, 0);
   const beamGeo2 = new THREE.CylinderGeometry(0.4, 1.3, 56, 12, 1, true).translate(0, 28, 0);
   const finialGeo = new THREE.SphereGeometry(0.34, 12, 8);
@@ -957,7 +1128,13 @@ function buildWorld() {
       .replace("#include <begin_vertex>", "#include <begin_vertex>\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz;");
     sh.fragmentShader = sh.fragmentShader
       .replace("#include <common>", `#include <common>\nvarying vec3 vWp;\n${LAMP_PARS}`)
-      .replace("#include <map_fragment>", "#include <map_fragment>\n{ vec3 L = lampAt(vWp); diffuseColor.rgb += diffuseColor.rgb * L * 2.0 + L * 0.32; }");
+      .replace(
+        "#include <map_fragment>",
+        `#include <map_fragment>
+        { vec3 L = lampAt(vWp); diffuseColor.rgb += diffuseColor.rgb * L * 2.0 + L * 0.32; }
+        // the hut's stepped base sits on the paving: a soft contact shadow round its foot
+        diffuseColor.rgb *= mix(0.45, 1.0, smoothstep(${STEP_R[0]!.toFixed(2)}, ${(STEP_R[0]! + 1.5).toFixed(2)}, length(vec2(vWp.x, vWp.z - ${HUT_Z.toFixed(1)}))) + step(0.0, vWp.y));`,
+      );
   });
   const bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true });
   // Towers: brick courses, a string course under every row of windows, a plinth and a cornice.
@@ -1018,7 +1195,7 @@ function buildWorld() {
   // Roofs: overlapping round shingles, a pale ridge at every hem.
   domeMat.defines = { USE_UV: "" };
   withAir(domeMat, "dome", 0.75, (sh) => {
-    sh.fragmentShader = sh.fragmentShader.replace(
+    sh.fragmentShader = sh.fragmentShader.replace("#include <common>", `#include <common>\n${SHINGLE_GLSL}`).replace(
       "#include <color_fragment>",
       /* glsl */ `#include <color_fragment>
       {
@@ -1027,13 +1204,7 @@ function buildWorld() {
         #ifdef USE_FOG
           fade *= 1.0 - 0.85 * smoothstep(0.0, 0.55, ${EXT_GLSL});
         #endif
-        sv.x += 0.5 * mod(floor(sv.y), 2.0);
-        vec2 f = fract(sv);
-        float d = length(vec2(f.x - 0.5, max(0.5 - f.y, 0.0)));
-        float tile = smoothstep(0.52, 0.44, d);
-        float hem = tile * smoothstep(0.34, 0.44, d);
-        float tone = fract(sin(dot(floor(sv), vec2(12.99, 78.23))) * 43758.5);
-        diffuseColor.rgb *= mix(1.0, mix(0.5, (0.8 + 0.5 * f.y) * (0.88 + 0.24 * tone), tile) + 0.5 * hem, fade);
+        diffuseColor.rgb *= mix(1.0, shingle(sv).x, fade);
       }`,
     );
   }, true);
@@ -1048,8 +1219,128 @@ function buildWorld() {
   const stoneMat = new THREE.MeshLambertMaterial({ emissive: "#0c0f33" });
   withAir(stoneMat, "stone", 0.85);
   const hutMat = new THREE.MeshLambertMaterial({ color: "#c9cdf2", emissive: "#1c2256" });
+  // Hut: an ashlar wall darkening into its footing, a gold bead under the eave, a shingled bell.
+  hutShader(
+    hutMat,
+    "body",
+    /* glsl */ `
+    // the porch tube runs out through the eave to the gate: nothing of the hut inside it
+    if (vHp.z < 0.0 && length(vHp.xy - vec2(0.0, ${DOOR_H.toFixed(2)})) < 3.0) discard;
+    float y = vHp.y;
+    float rr = length(vHp.xz);
+    float aa = atan(vHp.z, vHp.x);
+    float h = 0.0;
+    if (y < 3.2) {
+      float row = floor(y / 0.46);
+      float bx = aa * (4.34 / 0.92) + 0.5 * mod(row, 2.0);
+      float fy = fract(y / 0.46);
+      float jd = min(min(fy, 1.0 - fy) * 0.46, min(fract(bx), 1.0 - fract(bx)) * 0.92);
+      float joint = 1.0 - smoothstep(0.012, 0.03, jd);
+      float tone = hash12(vec2(floor(bx), row));
+      diffuseColor.rgb *= (0.9 + 0.14 * tone) * (1.0 - 0.3 * joint);
+      h = -0.012 * joint;
+      diffuseColor.rgb *= mix(0.35, 1.0, smoothstep(${STEP_Y[2]!.toFixed(2)}, 1.9, y)); // its footing in the step
+    } else if (y < 3.62) {
+      diffuseColor.rgb = vec3(0.3, 0.27, 0.62);
+      float bead = 1.0 - smoothstep(0.02, 0.02 + fwidth(y) * 1.5, abs(y - 3.43));
+      hutGlow += vec3(1.0, 0.66, 0.3) * 1.3 * bead;
+    } else {
+      float N = 9.0 * exp2(clamp(floor(log2(rr / 0.62)), 0.0, 2.0));
+      vec2 sh = shingle(vec2(aa * 0.15915 * N, (y - 3.62) / 0.4));
+      diffuseColor.rgb = vec3(0.4, 0.36, 0.86) * sh.x;
+      h = 0.035 * sh.y;
+      diffuseColor.rgb *= mix(0.55, 1.0, smoothstep(3.62, 4.3, y)); // under the eave
+    }
+    normal = bumpN(-vViewPosition, normal, h, faceDirection);`,
+    0.9,
+    0.55,
+  );
+  const porchMat = new THREE.MeshLambertMaterial({ color: "#b4b8ea", emissive: "#1c2256" });
+  hutShader(porchMat, "porch", "", 1.2, 0.4);
+  // Base: masonry tiers, each tread shaded where the tier above stands on it, each riser where it
+  // meets the tread below, and the hut's own contact shadow on the top tread.
+  const stepMat = new THREE.MeshLambertMaterial({ color: "#bfc3ee", emissive: "#161b4a" });
+  hutShader(
+    stepMat,
+    "step",
+    /* glsl */ `
+    vec3 n0 = inverseTransformDirection(normal, viewMatrix);
+    float rr = length(vHp.xz);
+    float aa = atan(vHp.z, vHp.x);
+    float y = vHp.y;
+    float h = 0.0;
+    float ao = 1.0;
+    float joint = 0.0;
+    float tone = 0.5;
+    if (n0.y > 0.6) {
+      float i = clamp(floor((y - ${STEP_Y[0]!.toFixed(2)}) / 0.2 + 0.5), 0.0, 2.0);
+      float rOut = ${STEP_R[0]!.toFixed(2)} - 0.9 * i;
+      float rIn = i < 1.5 ? rOut - 0.9 : 4.36;
+      float bx = aa * (rOut - 0.45) / 1.1 + 0.37 * i;
+      float ring = i < 1.5 ? 0.0 : 1.0;
+      float fr = (rr - rIn) / (rOut - rIn);
+      float jd = min(min(fract(bx), 1.0 - fract(bx)) * 1.1, ring > 0.5 ? abs(fr - 0.5) * (rOut - rIn) : 9.0);
+      joint = 1.0 - smoothstep(0.012, 0.035, jd);
+      tone = hash12(vec2(floor(bx), i + step(0.5, fr) * ring * 7.0));
+      ao = mix(i < 1.5 ? 0.45 : 0.25, 1.0, smoothstep(0.0, i < 1.5 ? 0.55 : 1.4, rr - rIn));
+      ao *= 1.0 + 0.22 * smoothstep(rOut - 0.1, rOut - 0.015, rr); // worn bright arris
+    } else {
+      float i = clamp(floor((${STEP_R[0]!.toFixed(2)} - rr) / 0.9 + 0.5), 0.0, 2.0);
+      float yTop = ${STEP_Y[0]!.toFixed(2)} + 0.2 * i;
+      float yb = i < 0.5 ? 0.0 : yTop - 0.2;
+      float bx = aa * (${STEP_R[0]!.toFixed(2)} - 0.9 * i) / 0.75 + 0.5 * mod(i, 2.0);
+      joint = 1.0 - smoothstep(0.01, 0.03, min(fract(bx), 1.0 - fract(bx)) * 0.75);
+      tone = hash12(vec2(floor(bx), i + 13.0));
+      ao = mix(0.4, 1.0, smoothstep(yb, yb + 0.16, y));
+      ao *= 1.0 + 0.25 * smoothstep(yTop - 0.05, yTop - 0.005, y);
+    }
+    diffuseColor.rgb *= (0.88 + 0.18 * tone) * (1.0 - 0.35 * joint) * ao;
+    h = -0.01 * joint;
+    normal = bumpN(-vViewPosition, normal, h, faceDirection);`,
+    1.0,
+  );
   const goldMat = new THREE.MeshLambertMaterial({ color: "#ffc66a", emissive: "#d98a25", emissiveIntensity: 0.9 });
-  const leafMat = new THREE.MeshLambertMaterial({ color: "#3b2f7d", emissive: "#120c3a" });
+  // Leaves: indigo enamel in a gilded frame, a sunburst engraved behind a pierced crescent moon,
+  // stars and a ring of round piercings. The cut-outs glow gold, hot enough to bloom.
+  const leafMat = new THREE.MeshLambertMaterial({ color: "#33296e", emissive: "#0e0a30" });
+  hutShader(
+    leafMat,
+    "leaf",
+    /* glsl */ `
+    vec2 q = vec2(abs(vQ.x), vQ.y);
+    float rho = length(q);
+    float ang = atan(q.y, q.x);
+    float cap = smoothstep(0.8, 0.97, abs(vNz));
+    vec2 c1 = vec2(0.98, 0.4);
+    float moon = max(length(q - c1) - 0.56, -(length(q - c1 - vec2(-0.22, 0.16)) - 0.47));
+    float stars = min(
+      min(sdStar(q - vec2(0.8, -0.62), 0.36), sdStar(q - vec2(1.34, -0.28), 0.17)),
+      min(sdStar(q - vec2(0.44, -1.2), 0.2), sdStar(q - vec2(0.36, 0.06), 0.14)));
+    float k = clamp(floor(ang / 0.17 + 0.5), -8.0, 8.0);
+    float dots = length(q - 2.07 * vec2(cos(k * 0.17), sin(k * 0.17))) - 0.075;
+    float hole = min(min(moon, stars), dots);
+    float fw = fwidth(hole) + 1e-4;
+    float cut = (1.0 - smoothstep(-fw, fw, hole)) * cap;
+    // relief: a raised gilded frame and stile, sunburst rays engraved inside the gold arc
+    float fr = fwidth(rho) + 1e-4;
+    float frame = max(smoothstep(2.4 - fr, 2.45 + fr, rho), smoothstep(0.22 + fr, 0.16 - fr, q.x));
+    float perp = rho * abs(fract(ang / 0.1309 + 0.5) - 0.5) * 0.1309;
+    float groove = (1.0 - smoothstep(0.008, 0.02 + fwidth(perp), perp)) * smoothstep(0.3, 0.45, rho) * smoothstep(1.6, 1.5, rho);
+    float lip = smoothstep(0.0, 0.045, hole);
+    float h = (0.028 * frame - 0.008 * groove) * lip - 0.014 * (1.0 - lip);
+    h *= cap;
+    normal = bumpN(-vViewPosition, normal, h, faceDirection);
+    vec3 gilt = vec3(0.46, 0.27, 0.07);
+    float gild = max(frame * cap, 1.0 - cap);
+    diffuseColor.rgb = mix(diffuseColor.rgb * (0.92 + 0.16 * hash12(floor(q * 7.0))), gilt, gild);
+    diffuseColor.rgb *= 1.0 - 0.4 * groove * cap;
+    hutGlow += vec3(1.0, 0.62, 0.26) * (0.18 * groove + 0.45 * (1.0 - lip)) * cap;
+    hutGlow += vec3(1.0, 0.66, 0.3) * 2.8 * cut;
+    diffuseColor.rgb *= 1.0 - cut;`,
+    0.75,
+    0,
+    true,
+  );
   const roundWinMat = new THREE.MeshBasicMaterial({ color: new THREE.Color("#ffb347").multiplyScalar(1.6), side: THREE.DoubleSide });
   const beamMat = new THREE.MeshBasicMaterial({
     color: "#7fefff",
@@ -1141,10 +1432,10 @@ function buildWorld() {
     geo: {
       groundGeo, bodyGeo, domeGeos, windowGeo, treeGeo, postGeo, bulbGeo, archGeo, pillarGeo, pointsGeo,
       roadGeo, plazaGeo, hutGeo, porchGeo, frameGeo, portalGeo, leafGeoL, leafGeoR, trimGeoL, trimGeoR, stepGeo, roundWinGeo,
-      beamGeo, beamGeo2, finialGeo, moonGeo,
+      winFrameGeo, beamGeo, beamGeo2, finialGeo, finialGeo2, crescentGeo, moonGeo,
     },
     mat: {
-      groundMat, bodyMat, domeMat, windowMat, treeMat, postMat, bulbMat, stoneMat, hutMat, goldMat, leafMat,
+      groundMat, bodyMat, domeMat, windowMat, treeMat, postMat, bulbMat, stoneMat, hutMat, porchMat, stepMat, goldMat, leafMat,
       roadMat, plazaMat, roundWinMat, beamMat, beamMat2, finialMat, pointsMat, moonMat,
     },
   };
@@ -1191,31 +1482,34 @@ function buildObjects(w: World, portalMaterial: THREE.Material) {
   const hut = new THREE.Group();
   hut.position.set(0, -R, HUT_Z);
   root.add(hut);
-  [7.6, 6.7, 5.8].forEach((r, i) => {
-    const s = mesh(geo.stepGeo, mat.hutMat, hut);
+  STEP_R.forEach((r, i) => {
+    const s = mesh(geo.stepGeo, mat.stepMat, hut);
     s.scale.set(r, 1, r);
-    s.position.y = 0.42 + i * 0.2;
+    s.position.y = STEP_Y[i]!;
   });
   mesh(geo.hutGeo, mat.hutMat, hut);
-  mesh(geo.porchGeo, mat.hutMat, hut).position.set(0, DOOR_H, -2.3);
+  mesh(geo.porchGeo, mat.porchMat, hut).position.set(0, DOOR_H, -2.3);
   mesh(geo.frameGeo, mat.goldMat, hut).position.set(0, DOOR_H, DOOR_Z - HUT_Z - 0.04);
   mesh(geo.portalGeo, portalMaterial, hut).position.set(0, DOOR_H, PORTAL_Z - HUT_Z);
   const leafL = new THREE.Group();
   leafL.position.set(-DOOR_R, DOOR_H, DOOR_Z - HUT_Z);
   mesh(geo.leafGeoL, mat.leafMat, leafL);
   mesh(geo.trimGeoL, mat.goldMat, leafL);
-  mesh(geo.trimGeoL, mat.goldMat, leafL).position.z = 0.14;
+  mesh(geo.trimGeoL, mat.goldMat, leafL).position.z = LEAF_T;
   const leafR = new THREE.Group();
   leafR.position.set(DOOR_R, DOOR_H, DOOR_Z - HUT_Z);
   mesh(geo.leafGeoR, mat.leafMat, leafR);
   mesh(geo.trimGeoR, mat.goldMat, leafR);
-  mesh(geo.trimGeoR, mat.goldMat, leafR).position.z = 0.14;
+  mesh(geo.trimGeoR, mat.goldMat, leafR).position.z = LEAF_T;
   hut.add(leafL, leafR);
-  for (const a of [0, Math.PI * 0.5, Math.PI, Math.PI * 0.25, Math.PI * 0.75]) {
+  for (const a of HUT_WINDOWS) {
     const wdw = mesh(geo.roundWinGeo, mat.roundWinMat, hut);
-    wdw.position.set(Math.cos(a) * 4.25, 3.4, Math.sin(a) * 4.25);
+    wdw.position.set(Math.cos(a) * (HUT_WIN_R - 0.02), HUT_WIN_Y, Math.sin(a) * (HUT_WIN_R - 0.02));
     wdw.rotation.y = Math.PI / 2 - a;
   }
+  mesh(geo.winFrameGeo, mat.goldMat, hut);
+  mesh(geo.finialGeo2, mat.goldMat, hut);
+  mesh(geo.crescentGeo, mat.goldMat, hut).position.y = 10.4;
   mesh(geo.finialGeo, mat.finialMat, hut).position.y = 10.4;
   mesh(geo.beamGeo, mat.beamMat, hut).position.y = 10.4;
   mesh(geo.beamGeo2, mat.beamMat2, hut).position.y = 10.4;
