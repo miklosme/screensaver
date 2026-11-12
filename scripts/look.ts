@@ -336,7 +336,10 @@ async function seams(out: string) {
     const from = SCENES[i]!, to = SCENES[(i + 1) % SCENES.length]!;
     await b.open(`/?scene=${from}&t=${TIMING.total - 0.01}`);
     await b.screenshot(join(dir, "a.png"));
-    await b.open(`/?scene=${to}&t=${TIMING.arrival}`);
+    // The same instant on the other side: while `from` is 0.01 s short of its end, the scene in
+    // its portal is 0.01 s short of its arrival. Comparing against the arrival itself measured
+    // 0.01 s of camera travel (2.7 to 9.6% RMSE at pass 001) on top of the seam.
+    await b.open(`/?scene=${to}&t=${TIMING.arrival - 0.01}`);
     await b.screenshot(join(dir, "b.png"));
     const cmp = await $`compare -metric RMSE ${join(dir, "a.png")} ${join(dir, "b.png")} null:`.nothrow().quiet();
     const rmse = Number(/\(([\d.e-]+)\)/.exec(cmp.stderr.toString())?.[1] ?? NaN);
