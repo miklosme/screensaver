@@ -63,8 +63,8 @@ of one small enough to finish in a single sitting.
 ### 3. Dispatch
 
 Spawn every worker in a single message so they run in parallel: the Agent tool with
-`isolation: "worktree"`, and `model: "opus"` (or `"fable"` for a keystone). Each prompt is
-self-contained and follows this shape:
+`isolation: "worktree"`, and `model: "opus"` with `effort: "medium"` (for a keystone,
+`model: "fable"` with `effort: "high"`). Each prompt is self-contained and follows this shape:
 
 ```
 You are a worker in this repository's improvement loop. Read loop/WORKER.md first and follow it.
