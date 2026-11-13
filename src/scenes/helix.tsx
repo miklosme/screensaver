@@ -22,6 +22,7 @@ import {
   ShapeGeometry,
   SphereGeometry,
   Vector3,
+  Vector4,
   type Material,
 } from "three";
 import { TIMING, type SceneProps } from "./types";
@@ -373,6 +374,93 @@ const POST_PROFILE: ProfilePt[] = [
   [0.12, POST_H, 0.9, 1], [0, POST_H - 0.04, 0.8, 1],
 ];
 
+/**
+ * The stair lamps' turned post, built from pieces: each piece is a smooth curve with exact normals,
+ * and the joints between pieces are crisp arrises. It stands on a bell-shaped console that juts
+ * from the slab's outer end, so the lamp sits beyond the hand rail, out of the climb's way.
+ * Each piece: [r(u), y(u)] for u in 0..1, samples, brass, shade at u = 0 and u = 1.
+ */
+type Piece = [(u: number) => [number, number], number, number, number, number];
+const torus = (cr: number, cy: number, rad: number, a0: number, a1: number) => (u: number): [number, number] => {
+  const a = a0 + (a1 - a0) * u;
+  return [cr + rad * Math.cos(a), cy + rad * Math.sin(a)];
+};
+const seg = (r0: number, y0: number, r1: number, y1: number) => (u: number): [number, number] => [r0 + (r1 - r0) * u, y0 + (y1 - y0) * u];
+const HALF_PI = Math.PI / 2;
+/** height of the globe's centre above the tread the post stands on, and the globe's radius */
+const LAMP_Y = 2.33;
+const GLOBE_R = 0.165;
+/** how far beyond the slab's outer end the post stands */
+const LAMP_OUT = 0.07;
+const LAMP_PIECES: Piece[] = [
+  // the console: an onion drop under the slab, ending in a bead at the tread
+  [(u) => [0.18 * Math.pow(Math.sin(u * HALF_PI), 0.65) + 0.004, -0.62 + 0.56 * u], 14, 0, 0.45, 0.7],
+  [torus(0.17, -0.035, 0.03, -HALF_PI, HALF_PI), 8, 0, 0.7, 0.9],
+  // the plinth, a torus and a cove
+  [seg(0.17, -0.005, 0.17, 0.08), 2, 0, 0.55, 0.75],
+  [seg(0.17, 0.08, 0.152, 0.08), 1, 0, 0.9, 0.9],
+  [torus(0.152, 0.114, 0.034, -HALF_PI, HALF_PI), 10, 0, 0.8, 1.05],
+  [seg(0.152, 0.148, 0.128, 0.148), 1, 0, 1.0, 0.95],
+  [(u) => [0.092 + 0.036 * (1 - u) * (1 - u), 0.148 + 0.075 * Math.sqrt(u)], 8, 0, 0.75, 0.9],
+  // a brass astragal, the lower shaft with a little entasis, a brass collar, the upper shaft
+  [torus(0.092, 0.243, 0.02, -HALF_PI, HALF_PI), 8, 1, 0.8, 1.0],
+  [(u) => [0.09 - 0.008 * u + 0.004 * Math.sin(Math.PI * u), 0.263 + 0.72 * u], 8, 0, 0.9, 1.0],
+  [(u) => [0.082 + 0.012 * Math.sin(u * HALF_PI), 0.983 + 0.012 * (1 - Math.cos(u * HALF_PI))], 4, 1, 0.75, 0.9],
+  [torus(0.094, 1.025, 0.03, -HALF_PI, HALF_PI), 12, 1, 0.9, 1.1],
+  [(u) => [0.094 - 0.012 * (1 - Math.cos(u * HALF_PI)), 1.055 + 0.012 * Math.sin(u * HALF_PI)], 4, 1, 0.95, 0.8],
+  [(u) => [0.082 - 0.01 * u + 0.003 * Math.sin(Math.PI * u), 1.067 + 0.79 * u], 8, 0, 0.85, 1.0],
+  // the capital collar, a waisted neck and a tulip cup with a rolled lip
+  [seg(0.072, 1.857, 0.088, 1.857), 1, 1, 0.85, 0.9],
+  [torus(0.088, 1.885, 0.028, -HALF_PI, HALF_PI), 10, 1, 0.9, 1.1],
+  [(u) => [0.058 + 0.03 * (1 - u) * (1 - u), 1.913 + 0.08 * u], 6, 1, 0.8, 0.9],
+  [(u) => [0.058 + 0.076 * Math.pow(Math.sin(u * HALF_PI), 1.6), 1.993 + 0.2 * u], 12, 1, 0.9, 1.15],
+  [torus(0.122, 2.193, 0.012, 0, Math.PI), 8, 1, 1.15, 1.2],
+  [seg(0.11, 2.193, 0.0, 2.13), 3, 1, 1.0, 0.8],
+];
+/** `fine` scales every piece's samples down for the distant lamps */
+function turned(pieces: Piece[], seg: number, fine = 1): BufferGeometry {
+  const pos: number[] = [], nor: number[] = [], col: number[] = [], idx: number[] = [];
+  let rows = 0;
+  for (const [fn, n0, brass, sh0, sh1] of pieces) {
+    const n = Math.max(1, Math.round(n0 * fine));
+    const base: V3 = brass ? AMBER : SAND;
+    for (let j = 0; j <= n; j++) {
+      const u = j / n;
+      const [r, y] = fn(u);
+      const e = 1e-3;
+      const a = fn(Math.max(0, u - e)), b = fn(Math.min(1, u + e));
+      let nr = b[1] - a[1], ny = -(b[0] - a[0]);
+      const l = Math.hypot(nr, ny) || 1;
+      nr /= l; ny /= l;
+      const sh = sh0 + (sh1 - sh0) * u;
+      for (let i = 0; i <= seg; i++) {
+        const th = (i / seg) * TAU;
+        const c = Math.cos(th), s = Math.sin(th);
+        pos.push(r * c, y, r * s);
+        nor.push(nr * c, ny, nr * s);
+        col.push(base[0] * sh, base[1] * sh, base[2] * sh);
+        if (j < n && i < seg) {
+          const p0 = (rows + j) * (seg + 1) + i, p1 = p0 + seg + 1;
+          idx.push(p0, p0 + 1, p1, p0 + 1, p1 + 1, p1);
+        }
+      }
+    }
+    rows += n + 1;
+  }
+  const g = new BufferGeometry();
+  g.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute("normal", new BufferAttribute(new Float32Array(nor), 3));
+  g.setAttribute("color", new BufferAttribute(new Float32Array(col), 3));
+  g.setIndex(idx);
+  return g;
+}
+/** the lamps' warm light: the nearest few, in world space, w their strength; set each frame */
+const POOL_N = 10;
+/** stair lamps drawn with the fine post and globe; the rest use coarse ones */
+const LAMP_NEAR = 6;
+const RAIL_R = 0.095;
+const hxPool = { value: Array.from({ length: POOL_N }, () => new Vector4()) };
+
 // ---------------------------------------------------------------------------------------------
 // shaders
 // ---------------------------------------------------------------------------------------------
@@ -388,7 +476,9 @@ const SKY_GLSL = /* glsl */ `
   }
 `;
 
-type Detail = "plain" | "strata" | "wall" | "stair" | "column" | "post" | "globe" | "keyhole";
+type Detail = "plain" | "strata" | "wall" | "stair" | "column" | "post" | "globe" | "lamp" | "keyhole" | "satellite";
+/** details lit by the stair lamps' warm pools */
+const POOLED: Detail[] = ["stair", "column", "post", "strata"];
 /** details that carve the surface: they write a height into `hxH` and the normal follows it */
 const BUMPED: Detail[] = ["stair", "column", "post", "keyhole"];
 
@@ -578,6 +668,13 @@ const DETAIL_GLSL: Record<Detail, string> = {
         ao *= 1.0 - 0.35 * bead;
       }
       ao *= mix(0.45, 1.0, smoothstep(3.0, 4.9, length(vHxW.xz)));   // where it meets the newel
+      for (int i = 0; i < ${POOL_N}; i++) {                     // a soft shadow round each lamp's foot
+        vec4 L = uHxPool[i];
+        if (L.w <= 0.0) break;
+        vec3 f = vHxW - L.xyz + vec3(0.0, ${glf(LAMP_Y)}, 0.0);
+        float blob = 1.0 - smoothstep(0.12, 0.62, length(f.xz));
+        ao *= 1.0 - 0.6 * blob * blob * step(abs(f.y), 0.02 + 0.98 * step(4.5, kind)) * step(f.y, 0.03);
+      }
       if (kind < 2.5) {
         vec3 teal = vec3(0.03, 0.2, 0.34);
         vec3 gold = vec3(0.98, 0.66, 0.2);
@@ -739,7 +836,36 @@ const DETAIL_GLSL: Record<Detail, string> = {
       diffuseColor.rgb *= mix(vec3(0.72, 0.5, 0.42), vec3(1.25, 1.12, 1.02), pow(ndv, 0.8));
       diffuseColor.rgb += vec3(0.5, 0.35, 0.18) * pow(ndv, 6.0);
     }`,
+  // the stair lamps' glass: a white-hot core seen through warm amber glass that darkens toward the
+  // limb, with a thin bright rim where the glass turns away, so bloom keeps a round silhouette
+  lamp: /* glsl */ `
+    {
+      float ndv = clamp(abs(dot(normalize(vHxN), normalize(cameraPosition - vHxW))), 0.0, 1.0);
+      float core = pow(ndv, 14.0);
+      vec3 glass = mix(vec3(0.22, 0.06, 0.01), vec3(0.72, 0.3, 0.07), smoothstep(0.0, 0.9, ndv));
+      diffuseColor.rgb = glass + vec3(2.4, 1.5, 0.75) * core + vec3(0.5, 0.22, 0.06) * pow(1.0 - ndv, 8.0);
+    }`,
+  // the hanging stairs: the same sandstone, cooler and bluer the further off they hang
+  satellite: /* glsl */ `
+    diffuseColor.rgb *= vec3(1.04, 0.93, 0.8) * (0.93 + 0.07 * sin(vHxW.y * 2.6 + sin(vHxW.x * 0.7 + vHxW.z * 0.9) * 1.5));`,
 };
+
+/** the stair lamps' warm pools: inverse-square with a soft wrap, after the carved normal is known */
+const POOL_GLSL = /* glsl */ `
+          {
+            vec3 nw = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
+            float acc = 0.0;
+            for (int i = 0; i < ${POOL_N}; i++) {
+              vec4 L = uHxPool[i];
+              if (L.w <= 0.0) break;
+              vec3 l = L.xyz - vHxW;
+              float d2 = dot(l, l);
+              float wrap = clamp((dot(nw, l * inversesqrt(d2)) + 0.35) / 1.35, 0.0, 1.0);
+              float win = clamp(1.0 - d2 / 150.0, 0.0, 1.0);
+              acc += L.w * wrap * win * win / (5.0 + d2);
+            }
+            hxGlow += diffuseColor.rgb * vec3(1.0, 0.56, 0.24) * 6.0 * acc;
+          }`;
 
 /** the door lamps' warm wash on the arch, after the carved normal is known; fog still dims it */
 const KEYHOLE_LAMPS_GLSL = /* glsl */ `
@@ -757,6 +883,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
   mat.onBeforeCompile = (s) => {
     s.uniforms.uHxT = hxTime;
     s.uniforms.uHxLamp = hxLamps;
+    s.uniforms.uHxPool = hxPool;
     s.vertexShader = s.vertexShader
       .replace(
         "#include <common>",
@@ -788,6 +915,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
         varying vec3 vTile;
         uniform float uHxT;
         uniform vec3 uHxLamp[2];
+        uniform vec4 uHxPool[${POOL_N}];
         vec3 hxGlow = vec3(0.0);
         float hxH = 0.0; // carved height (metres) the bumped details write; the normal follows it
         float hxHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -843,13 +971,14 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             float det = dot(sx, r1);
             vec3 grad = sign(det) * (dFdx(hxH) * r1 + dFdy(hxH) * r2);
             normal = normalize(abs(det) * normal - grad);
-          }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "")
-          : "#include <normal_fragment_maps>",
+          }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (POOLED.includes(detail) ? POOL_GLSL : "")
+          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? POOL_GLSL : ""),
       )
       .replace(
         "#include <tonemapping_fragment>",
         /* glsl */ `
         gl_FragColor.rgb += hxGlow;
+        ${detail === "satellite" ? "gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * vec3(0.3, 0.78, 0.86) + vec3(0.0, 0.035, 0.045), smoothstep(12.0, 110.0, length(vHxW - cameraPosition)) * 0.75);" : ""}
         #ifdef USE_FOG
           float hxf = smoothstep(fogNear, fogFar, vFogDepth);
           gl_FragColor.rgb = mix(gl_FragColor.rgb, hxSky(normalize(vHxW - cameraPosition)), hxf * 0.97);
@@ -888,6 +1017,14 @@ interface Assets {
   postMat: MeshLambertMaterial;
   post: BufferGeometry;
   postM: Float32Array;
+  lampNear: BufferGeometry;
+  lampFar: BufferGeometry;
+  globeNear: BufferGeometry;
+  globeFar: BufferGeometry;
+  /** feet of the stair lamps' posts, xyz */
+  lamps: Float32Array;
+  satMat: MeshLambertMaterial;
+  lampMat: MeshBasicMaterial;
   wallMat: MeshLambertMaterial;
   stairMat: MeshLambertMaterial;
   koi: Koi;
@@ -930,8 +1067,10 @@ function getAssets(): Assets {
   const posts: number[] = [];
   const lanterns: number[] = [];
   const lanternPos: number[] = [];
+  const haloSize: number[] = [];
+  const lamps: number[] = [];
   const rp: number[] = [], rn: number[] = [], rc: number[] = [], ri: number[] = [];
-  const RING = 6;
+  const RING = 16;
   let HEND = 0;
 
   const addStair = (path: PathTable, yOff: number, main: boolean) => {
@@ -970,6 +1109,7 @@ function getAssets(): Assets {
     dummy.updateMatrix();
     lanterns.push(...dummy.matrix.elements);
     lanternPos.push(x, y, z);
+    haloSize.push(3.4);
   };
   for (let i = 0; i <= nSteps; i++) {
     const s0 = i === nSteps ? END : stepStart(i);
@@ -993,13 +1133,15 @@ function getAssets(): Assets {
     if (i === nSteps) continue;
     const sm = s0 + TREAD / 2;
     const post = i % 6 === (main ? 3 : 0) && sm < END - 6;
-    if (post) pushPost(edge(sm, 1, top, 0.22));
-    else pushBaluster(edge(sm, 1, top, 0.22), 1.45 + (heightAt(sm) - top));
+    pushBaluster(edge(sm, 1, top, 0.22), 1.4 + (heightAt(sm) - top));
     if (post) {
-      const e = edge(sm, 1, top + 2.5, 0.22);
-      pushLantern(e[0], e[1], e[2], 1);
+      // the lamp stands on a console beyond the slab's end, outside the rail
+      const e = edge(sm, 1, top, -LAMP_OUT);
+      lamps.push(e[0], e[1], e[2]);
+      lanternPos.push(e[0], e[1] + LAMP_Y, e[2]);
+      haloSize.push(1.5);
     }
-    if (pathFlare(path, sm) > 0.3) pushBaluster(edge(sm, -1, top, 0.22), 1.45 + (heightAt(sm) - top));
+    if (pathFlare(path, sm) > 0.3) pushBaluster(edge(sm, -1, top, 0.22), 1.4 + (heightAt(sm) - top));
   }
   // two lanterns flank the door
   if (main) {
@@ -1020,7 +1162,7 @@ function getAssets(): Assets {
   // ---- hand rails: swept tubes ----
   const sweep = (from: number, to: number, side: number) => {
     const base = rp.length / 3;
-    const steps = Math.ceil((to - from) / 0.6);
+    const steps = Math.ceil((to - from) / 0.3);
     for (let k = 0; k <= steps; k++) {
       const s = from + ((to - from) * k) / steps;
       const c = edge(s, side, heightAt(s) + 1.45, 0.22);
@@ -1028,14 +1170,14 @@ function getAssets(): Assets {
       for (let q = 0; q < RING; q++) {
         const a = (q / RING) * TAU;
         const cx = Math.cos(a), cy = Math.sin(a);
-        rp.push(c[0] + T.z * cx * 0.11, c[1] + cy * 0.11, c[2] - T.x * cx * 0.11);
+        rp.push(c[0] + T.z * cx * RAIL_R, c[1] + cy * RAIL_R, c[2] - T.x * cx * RAIL_R);
         rn.push(T.z * cx, cy, -T.x * cx);
-        rc.push(AMBER[0], AMBER[1], AMBER[2]);
+        rc.push(AMBER[0] * 0.82, AMBER[1] * 0.78, AMBER[2] * 0.7);
       }
       if (k < steps) {
         for (let q = 0; q < RING; q++) {
           const a0 = base + k * RING + q, a1 = base + k * RING + ((q + 1) % RING);
-          ri.push(a0, a0 + RING, a1, a1, a0 + RING, a1 + RING);
+          ri.push(a0, a1, a0 + RING, a1, a1 + RING, a0 + RING); // wound outward, so the near side is the one drawn
         }
       }
     }
@@ -1242,7 +1384,7 @@ function getAssets(): Assets {
   }
   for (let i = 0; i < lanternPos.length; i += 3) {
     pp.push(lanternPos[i]!, lanternPos[i + 1]!, lanternPos[i + 2]!);
-    ps.push(3.4);
+    ps.push(haloSize[i / 3]!);
     pa.push(0, 0, rand() * TAU, 0.55);
   }
   for (let i = 0; i < 520; i++) {
@@ -1262,6 +1404,8 @@ function getAssets(): Assets {
   const wallMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "wall");
   const stairMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "stair");
   const columnMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "column");
+  const satMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "satellite");
+  const lampMat = withVoidFog(new MeshBasicMaterial({ color: new Color(1, 1, 1) }), "lamp");
   const postMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "post");
   const keyholeMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "keyhole");
   // between the stair's flare and the arcade, from far below the camera's start to above the door
@@ -1328,6 +1472,12 @@ function getAssets(): Assets {
     path, track: buildCameraTrack(path), stairs, rails, column, wall, satellite,
     baluster: lathe(BALUSTER_PROFILE, 7),
     post: lathe(POST_PROFILE, 20),
+    lampNear: turned(LAMP_PIECES, 48),
+    lampFar: turned(LAMP_PIECES, 12, 0.3),
+    globeNear: new SphereGeometry(GLOBE_R, 48, 28),
+    globeFar: new SphereGeometry(GLOBE_R, 18, 10),
+    lamps: new Float32Array(lamps),
+    satMat, lampMat,
     lantern: new SphereGeometry(0.22, 28, 16),
     sky: new SphereGeometry(1200, 24, 16),
     points, doorFrame, doorBack, doorPortal,
@@ -1368,7 +1518,17 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     const postMesh = instanced(A.post, A.postMat, A.postM);
     const lanterns = instanced(A.lantern, A.glow, A.lanternM);
     const wall = instanced(A.wall, A.wallMat, A.wallM);
-    const sats = new InstancedMesh(A.satellite, A.stone, A.satellites.length);
+    const sats = new InstancedMesh(A.satellite, A.satMat, A.satellites.length);
+    const nLamps = A.lamps.length / 3;
+    const lampMesh = (geo: BufferGeometry, mat: Material, n: number) => {
+      const m = new InstancedMesh(geo, mat, n);
+      m.frustumCulled = false;
+      return m;
+    };
+    const postNear = lampMesh(A.lampNear, A.postMat, LAMP_NEAR);
+    const postFar = lampMesh(A.lampFar, A.postMat, nLamps);
+    const globeNear = lampMesh(A.globeNear, A.lampMat, LAMP_NEAR);
+    const globeFar = lampMesh(A.globeFar, A.lampMat, nLamps);
     sats.frustumCulled = false;
     const points = new Points(A.points, A.pointsMat);
     points.frustumCulled = false;
@@ -1380,7 +1540,13 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     doorBack.renderOrder = 1; // after the portal, so the depth test spares the carving behind it
     door.add(new Mesh(A.doorFrame, A.keyholeMat), doorBack, portal);
     root.add(sky, column, stairs, rails, balusters, postMesh, lanterns, wall, sats, A.koi.mesh, points, door);
-    return { A, root, sky, column, sats, instancedMeshes: [balusters, postMesh, lanterns, wall, sats] };
+    root.add(postNear, postFar, globeNear, globeFar);
+    const lampOrder = Array.from({ length: nLamps }, (_, i) => i);
+    const lampD2 = new Float32Array(nLamps);
+    return {
+      A, root, sky, column, sats, postNear, postFar, globeNear, globeFar, lampOrder, lampD2,
+      instancedMeshes: [balusters, postMesh, lanterns, wall, sats, postNear, postFar, globeNear, globeFar],
+    };
   }, [portalMaterial]);
 
   useEffect(() => () => rig.instancedMeshes.forEach((m) => m.dispose()), [rig]);
@@ -1391,7 +1557,7 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
   );
 
   useFrame((state) => {
-    const { A, sky, column, sats } = rig;
+    const { A, sky, column, sats, lampOrder, lampD2 } = rig;
     const { path } = A.track;
     const t = Math.min(TIMING.total, Math.max(0, clock.t));
     const { pos, tan, look, q, o, fwd } = tmp;
@@ -1431,6 +1597,42 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
       sats.setMatrixAt(i, o.matrix);
     }
     sats.instanceMatrix.needsUpdate = true;
+
+    // --- the stair lamps: the nearest light the stone and are drawn finely ---
+    const L = A.lamps;
+    for (let i = 0; i < lampD2.length; i++) {
+      const dx = L[i * 3]! - pos.x, dy = L[i * 3 + 1]! + LAMP_Y - pos.y, dz = L[i * 3 + 2]! - pos.z;
+      lampD2[i] = dx * dx + dy * dy + dz * dz;
+    }
+    lampOrder.sort((a, b) => lampD2[a]! - lampD2[b]!);
+    for (let k = 0; k < POOL_N; k++) {
+      const i = lampOrder[k];
+      const v = hxPool.value[k]!;
+      if (i === undefined) v.set(0, 0, 0, 0);
+      else v.set(L[i * 3]!, L[i * 3 + 1]! + LAMP_Y, L[i * 3 + 2]!, 1 - smooth(11, 16, Math.sqrt(lampD2[i]!)));
+    }
+    const put = (m: InstancedMesh, slot: number, i: number, lift: number, show: boolean) => {
+      const a = m.instanceMatrix.array as Float32Array;
+      const o = slot * 16;
+      const k = show ? 1 : 0;
+      a.fill(0, o, o + 16);
+      a[o] = a[o + 5] = a[o + 10] = k;
+      a[o + 12] = L[i * 3]! * k;
+      a[o + 13] = (L[i * 3 + 1]! + lift) * k;
+      a[o + 14] = L[i * 3 + 2]! * k;
+      a[o + 15] = 1;
+    };
+    for (let k = 0; k < lampOrder.length; k++) {
+      const i = lampOrder[k]!;
+      const near = k < LAMP_NEAR;
+      if (near) {
+        put(rig.postNear, k, i, 0, true);
+        put(rig.globeNear, k, i, LAMP_Y, true);
+      }
+      put(rig.postFar, i, i, 0, !near);
+      put(rig.globeFar, i, i, LAMP_Y, !near);
+    }
+    for (const m of [rig.postNear, rig.postFar, rig.globeNear, rig.globeFar]) m.instanceMatrix.needsUpdate = true;
     hxTime.value = t;
     A.koi.update(t, pos, fwd.subVectors(look, pos).normalize());
     A.pointsMat.uniforms.uT!.value = t;
