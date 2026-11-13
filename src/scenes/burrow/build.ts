@@ -570,7 +570,10 @@ function buildDoorFrame(ch: Chamber, door: Door): BufferGeometry {
     });
     phis = finer;
   }
-  const geo = sweepTube(doorLoop(ch, door, phis), true, 0.27 * Math.sqrt(door.k), BEAD_SIDES, door.t.clone().negate());
+  const loop = doorLoop(ch, door, phis);
+  const radius = 0.27 * Math.sqrt(door.k);
+  const ref = door.t.clone().negate();
+  const geo = sweepTube(loop, true, radius, BEAD_SIDES, ref);
   const pos = geo.getAttribute("position") as BufferAttribute;
   // the pattern runs round the loop by angle, as it does at an even step
   const pat = geo.getAttribute("pat") as BufferAttribute;
@@ -579,6 +582,47 @@ function buildDoorFrame(ch: Chamber, door: Door): BufferGeometry {
   const hgt = new Float32Array(pos.count);
   for (let i = 0; i < pos.count; i++) hgt[i] = pos.getY(i) - ch.c.y;
   geo.setAttribute("hgt", new BufferAttribute(hgt, 1));
+
+  // `rim`, for the trim's shader (TRIM in materials.ts). x: the tube's radius, signed by which way
+  // round the tube the opening lies (+ when the tube's second axis, as sweepTube builds it, points
+  // into the opening). y: how far along the loop the ring of the tube is, in world units. z: how far
+  // the point stands out through the chamber's wall (0 where the tube is seated in it, negative
+  // inside the chamber). w: its height above the floor's dish. And `rimIn`: the way into the chamber
+  // through this doorway, in plan, by which the shader knows which side of the wall the eye is on.
+  const n = loop.length;
+  const mid = loop.reduce((a, p) => a.add(p), new Vector3()).divideScalar(n);
+  const T = new Vector3();
+  const N = new Vector3();
+  const B = new Vector3();
+  const to = new Vector3();
+  let inward = 0;
+  for (let k = 0; k < n; k++) {
+    T.copy(loop[(k + 1) % n]!).sub(loop[(k + n - 1) % n]!).normalize();
+    N.copy(ref).addScaledVector(T, -T.dot(ref)).normalize();
+    B.crossVectors(T, N);
+    inward += B.dot(to.copy(mid).sub(loop[k]!));
+  }
+  const signed = inward >= 0 ? radius : -radius;
+  const rim = new Float32Array(pos.count * 4);
+  const rimIn = new Float32Array(pos.count * 2);
+  let s = 0;
+  for (let i = 0; i <= n; i++) {
+    if (i > 0) s += loop[i % n]!.distanceTo(loop[i - 1]!);
+    for (let j = 0; j < ring; j++) {
+      const v = i * ring + j;
+      const rx = pos.getX(v) - ch.c.x;
+      const ry = pos.getY(v) - ch.c.y - ch.yc;
+      const rz = pos.getZ(v) - ch.c.z;
+      rim[v * 4] = signed;
+      rim[v * 4 + 1] = s;
+      rim[v * 4 + 2] = (Math.sqrt((rx * rx + rz * rz) / (ch.R * ch.R) + (ry * ry) / (ch.H * ch.H)) - 1) * ch.R;
+      rim[v * 4 + 3] = pos.getY(v) - floorY(ch, Math.hypot(rx, rz));
+      rimIn[v * 2] = ref.x;
+      rimIn[v * 2 + 1] = ref.z;
+    }
+  }
+  geo.setAttribute("rim", new BufferAttribute(rim, 4));
+  geo.setAttribute("rimIn", new BufferAttribute(rimIn, 2));
   return geo;
 }
 
