@@ -257,3 +257,38 @@ Learned:
   flowers themselves (D13).
 - Bundle is 289 kB of 400; frame cost 3.19 ms of 4.0.
 
+## Pass 007 (2026-11-13)
+
+Slices:
+- D11 dollhouse · The exit's plinth and surround, second try (opus) kept, no regressions.
+- D13 dollhouse · Flowers that belong to the ground (opus) kept. Fable alone reported the beds
+  out-shouting the exit arch at t=0 to 5. Astra and sol found two faults in its diff (culling
+  that ignores aspect ratio, hard LOD switches): D14.
+- B7 burrow · Mushrooms that hold up close (opus) kept, no regressions.
+- H4 helix · A shaft with depth (opus, sent back once as H4c) reverted: all three reported
+  regressions (hanging stairs turned to ribbons; shafts read as pipes).
+- O8 orbit · The whale clear of the finial (opus, sent back once as O8b) reverted: astra and sol
+  say the pair is lost against the overhead towers at t=22.
+Gate: frame cost worst 3.07 ms (dollhouse), loop worst 11 ms, seams 0.00–0.31% RMSE, bundle 299 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.0, burrow 7.0, dollhouse 7.0, orbit 8.0. The helix and orbit
+scores were given to the reverted versions (`loop/out/pass-007/reviewed/`).
+Learned:
+- Both reverted slices were ones I had sent back, and both times my follow-up brief caused the
+  fault the panel then reported: I asked for far stairs to "fade into the void and lose their
+  tread contrast" (H4c) and for the whale to move "off to the side" (O8b). A send-back should
+  say what is wrong and what must be true, and leave the far end of the dial alone.
+- Two merges for a two-commit slice worked: D11 and D13 could have been kept or reverted
+  separately. For H4 the commits were not independent (the rail's commit does not apply without
+  the first), so "separate commits" has to mean commits that apply alone; ask for that.
+- The reviewers read the diff and found real faults no frame shows (aspect-ratio culling, LOD
+  pops). Frames are taken at 16:9 only and frozen; anything view-dependent or time-dependent
+  that a slice adds needs its own proof at other aspect ratios and in motion.
+- The whale's place at t=22 joins the list of dials the panel pushes both ways (rib sheen,
+  tower rims). Parked.
+- The dollhouse reached 7 from every reviewer for the first time: the flowers did what dunes,
+  haze and a richer exit did not. Fix the thing the panel ranks first, even when it sounds
+  small.
+- Triangles are up (helix 1410k, burrow 1046k) with frame cost flat at about 3.1 ms; bundle is
+  299 kB of 400 and has grown about 8 kB a pass.
+
