@@ -64,10 +64,21 @@ export interface GardenOptions {
   ground: (x: number, z: number) => number;
   /** true where nothing else stands within r of (x, z) and the camera does not pass */
   clear: (x: number, z: number, r: number) => boolean;
-  /** points along the camera's track (the drifts the garden first had were placed from these) */
-  path: { x: number; z: number }[];
+  /** the middle of the garden: the pinwheels are scattered round it and the birds circle it */
+  centre: { x: number; z: number };
+  /** pinwheels planted on purpose (the rest are scattered round the centre): where, and how big */
+  pinwheels: { x: number; z: number; s: number }[];
+  /** where on its circle each of the two flocks of birds is when the scene begins (radians; the circles are 82 and 50 across) */
+  flocks: [number, number];
   /** evenly spaced points along the camera's track: the flower beds border it */
   track: { x: number; z: number }[];
+  /**
+   * beds planted on purpose, where the camera will be looking: an ellipse `along` by `across`, its long axis along (tx, tz), with `density` flowers to the square unit.
+   * `hue` picks its colour (an index into the garden's seven; otherwise it is drawn by lot) and `size` scales its flowers.
+   * `from` is the time of the scene's clock before which nothing of the bed can be in the picture (it lies behind a dune,
+   * say): until then its flowers are left out of the draw, which the camera's frustum alone would not do.
+   */
+  beds: { x: number; z: number; tx: number; tz: number; along: number; across: number; density: number; hue?: number; size?: number; from?: number }[];
   /** true where no flower may grow: the stele's plinth, the doorways, the stepping stones */
   blocked: (x: number, z: number) => boolean;
   rnd: () => number;
@@ -77,16 +88,20 @@ export interface GardenOptions {
   sun: { x: number; y: number; z: number };
   /** GLSL defining `float groundAt(vec2 xz)`, the same dunes as `ground` */
   groundGlsl: string;
-  /** a cast-shadow material around the given vertex shader, which sets vW and vA (see dollhouse.tsx) */
-  shadowMaterial: (vertexShader: string) => ShaderMaterial;
+  /**
+   * a cast-shadow material around the given vertex shader, which sets vW and vA (see dollhouse.tsx).
+   * With `cover`, GLSL defining `float cover(vec2 q, float soft)`, the shadow is a sheet shaped by the
+   * fragment: the vertex shader also sets vQ (the point of the caster's own plane) and vSoft (how wide its edge is there).
+   */
+  shadowMaterial: (vertexShader: string, cover?: string) => ShaderMaterial;
   /** a contact-shadow material around the given vertex shader, which sets vW, vA and vQ (see dollhouse.tsx) */
   contactMaterial: (vertexShader: string) => ShaderMaterial;
 }
 
 export interface Garden {
   root: Group;
-  /** each flower drift: centre, radius and petal colour (linear light), for the shadow and the fallen petals under it */
-  drifts: { x: number; z: number; r: number; hue: RGB }[];
+  /** each flower drift: centre, half length and half width, the way its length lies, and petal colour (linear light), for the stain of shade and fallen petals under it */
+  drifts: { x: number; z: number; along: number; across: number; tx: number; tz: number; hue: RGB }[];
   /** foot of each pinwheel stalk, and the height of its hub (the stalk's shadow is baked with the scene's) */
   pinwheels: { x: number; z: number; size: number; top: number }[];
   /**
@@ -137,30 +152,6 @@ function seeded(seed: number) {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-/** draws from `rnd` exactly what the garden's first flower drifts drew, so later placements keep their places */
-function skipOldDrifts(rnd: () => number, path: { x: number; z: number }[]) {
-  const COUNT = 3200;
-  let n = 0;
-  while (n < COUNT) {
-    const at = path[Math.floor(rnd() * path.length)]!;
-    const a = rnd() * TAU;
-    const d = 3 + rnd() ** 1.5 * 34;
-    const cx = at.x + Math.cos(a) * d;
-    const cz = at.z + Math.sin(a) * d;
-    rnd();
-    const spread = 1.2 + rnd() * 3.5;
-    rnd();
-    const k = Math.min(COUNT - n, 10 + Math.floor(rnd() * 40));
-    for (let i = 0; i < k; i++) {
-      const b = rnd() * TAU;
-      const r = spread * Math.sqrt(rnd());
-      if (Math.hypot(cx + Math.cos(b) * r, cz + Math.sin(b) * r) > 8.6) rnd();
-      rnd();
-      n++;
-    }
-  }
 }
 
 type V3 = [number, number, number];
@@ -402,7 +393,7 @@ export function createGarden(o: GardenOptions): Garden {
   const pinwheels: Garden["pinwheels"] = [];
   const materials: ShaderMaterial[] = [];
   const geometries: InstancedBufferGeometry[] = [];
-  type Placed = { x: number; y: number; z: number; s: number };
+  type Placed = { x: number; y: number; z: number; s: number; from: number };
   const pools: {
     g: InstancedBufferGeometry;
     list: Placed[];
@@ -435,14 +426,14 @@ export function createGarden(o: GardenOptions): Garden {
   // border the camera's way, and each stands in a soft shadow of its own (a decal, see below).
   // -------------------------------------------------------------------------------------------
   {
-    // the drifts the scene had before are still drawn from `rnd`, so that everything placed after
-    // them (the pinwheels) stays where it was; the beds have a generator of their own
-    skipOldDrifts(rnd, o.path);
-    const rb = seeded(90731);
+    // the beds have a generator of their own
+    let rb = seeded(90731);
 
     const kinds = FLOWER_KINDS.map((k) => flowerGeometry(k));
     const tuftGeo = tuftGeometry();
-    type Plant = { x: number; y: number; z: number; s: number; hue: RGB; ph: number };
+    type Plant = { x: number; y: number; z: number; s: number; hue: RGB; ph: number; from: number };
+    /** the time from which what is being planted is drawn (see GardenOptions.beds) */
+    let since = 0;
     const byKind: Plant[][] = kinds.map(() => []);
     const tufts: Plant[] = [];
     const P = o.track;
@@ -463,14 +454,15 @@ export function createGarden(o: GardenOptions): Garden {
     const grass = ["#8cc49a", "#a3d2a2", "#93ccb2"].map(onScreen);
     const plant = (list: Plant[], x: number, z: number, s: number, hue: RGB, clearance: number) => {
       if (o.blocked(x, z) || lane(x, z) < clearance) return false;
-      list.push({ x, y: ground(x, z) - 0.02, z, s, hue, ph: rb() * TAU });
+      list.push({ x, y: ground(x, z) - 0.02, z, s, hue, ph: rb() * TAU, from: since });
       return true;
     };
     /** a bed: an ellipse `along` by `across`, centred at (cx, cz), its long axis along (tx, tz) */
-    const bed = (cx: number, cz: number, tx: number, tz: number, along: number, across: number, density: number, near: boolean) => {
-      const hue = hues[Math.floor(rb() * hues.length)]!;
+    const bed = (cx: number, cz: number, tx: number, tz: number, along: number, across: number, density: number, near: boolean, pick?: number, scale = 1) => {
+      const lot = Math.floor(rb() * hues.length);
+      const hue = hues[pick ?? lot]!;
       const main = Math.floor(rb() * kinds.length);
-      const size = near ? 0.3 + rb() * 0.16 : 0.26 + rb() * 0.18;
+      const size = (near ? 0.3 + rb() * 0.16 : 0.26 + rb() * 0.18) * scale;
       const count = Math.round(Math.PI * along * across * density);
       for (let i = 0; i < count; i++) {
         const rr = Math.sqrt(rb());
@@ -492,7 +484,7 @@ export function createGarden(o: GardenOptions): Garden {
         const z = cz + tz * Math.cos(b) * rr * along + tx * Math.sin(b) * rr * across;
         plant(tufts, x, z, 0.24 + rb() * 0.16, grass[Math.floor(rb() * grass.length)]!, 0.95);
       }
-      if (Math.hypot(cx, cz) > 9.5) drifts.push({ x: cx, z: cz, r: Math.sqrt(along * across), hue });
+      if (Math.hypot(cx, cz) > 9.5) drifts.push({ x: cx, z: cz, along, across, tx, tz, hue });
     };
     const along = (i: number) => {
       const a = P[i]!;
@@ -500,9 +492,18 @@ export function createGarden(o: GardenOptions): Garden {
       const l = Math.hypot(b.x - a.x, b.z - a.z) || 1;
       return { a, tx: (b.x - a.x) / l, tz: (b.z - a.z) / l };
     };
+    // the beds planted on purpose, each from a generator of its own, so that changing one leaves the others as they were
+    const scattered = rb;
+    o.beds.forEach((b, i) => {
+      rb = seeded(4099 + i * 7919);
+      since = b.from ?? 0;
+      bed(b.x, b.z, b.tx, b.tz, b.along, b.across, b.density, true, b.hue, b.size);
+    });
+    since = 0;
+    rb = scattered;
     // beds bordering the way, on both sides: clusters of two or three, each its own colour,
     // overlapping one another along the way
-    for (let n = 0; n < 30; n++) {
+    for (let n = 0; n < 22; n++) {
       const { a, tx, tz } = along(Math.floor(rb() * (P.length - 1)));
       const side = rb() < 0.5 ? -1 : 1;
       const off = 1.6 + rb() ** 1.4 * 5.5;
@@ -801,10 +802,13 @@ export function createGarden(o: GardenOptions): Garden {
     for (let n = 0, tries = 0; n < COUNT && tries < 4000; tries++) {
       const a = rnd() * TAU;
       const r = 14 + rnd() ** 0.8 * 70;
-      const x = Math.cos(a) * r;
-      const z = 18 + Math.sin(a) * r;
-      const size = 0.9 + rnd() ** 1.5 * 1.7;
-      if (!o.clear(x, z, 4 + size)) continue;
+      let x = o.centre.x + Math.cos(a) * r;
+      let z = o.centre.z + Math.sin(a) * r;
+      let size = 0.9 + rnd() ** 1.5 * 1.7;
+      const planted = o.pinwheels[tries];
+      // those planted on purpose come first, wherever they were put
+      if (planted) ({ x, z, s: size } = planted);
+      else if (!o.clear(x, z, 4 + size)) continue;
       place.set([x, ground(x, z) + STALK * size - 0.1, z, size], n * 4);
       pinwheels.push({ x, z, size, top: ground(x, z) + STALK * size - 0.1 });
       spin.set([rnd() * TAU, (rnd() < 0.5 ? -1 : 1) * (1.2 + rnd() * 2.6) / size, rnd() * TAU, 0], n * 4);
@@ -825,16 +829,52 @@ export function createGarden(o: GardenOptions): Garden {
       const [ax, ay, az] = [nx / l, (2 * e) / l, nz / l];
       plane.set([ax, ay, az, ax * p.x + ay * (ground(p.x, p.z) + 0.05) + az * p.z], i * 4);
     });
+    // The sails' shadow: a sheet in the sails' own plane, a little wider than they reach, slid along
+    // the sun onto the dune (cut into a grid, so that it lies on the sand however it curves). The
+    // fragment shapes it: the four sails' outline in that plane, turning as they turn, with an edge
+    // as soft as a baked shadow's at that distance from its caster.
+    const SHEET = 1.45;
+    const CELLS = 6;
+    const spos: number[] = [];
+    const sidx: number[] = [];
+    for (let j = 0; j <= CELLS; j++) for (let i = 0; i <= CELLS; i++) spos.push(((i / CELLS) * 2 - 1) * SHEET, ((j / CELLS) * 2 - 1) * SHEET, 0);
+    for (let j = 0; j < CELLS; j++)
+      for (let i = 0; i < CELLS; i++) {
+        const a = j * (CELLS + 1) + i;
+        sidx.push(a, a + 1, a + CELLS + 1, a + 1, a + CELLS + 2, a + CELLS + 1);
+      }
     const sg = new InstancedBufferGeometry();
-    for (const name of ["position", "aPart"]) sg.setAttribute(name, g.getAttribute(name));
+    sg.setAttribute("position", new BufferAttribute(new Float32Array(spos), 3));
+    sg.setIndex(sidx);
     for (const name of ["aPlace", "aSpin"]) sg.setAttribute(name, g.getAttribute(name));
     sg.setAttribute("aPlane", new InstancedBufferAttribute(plane, 4));
     sg.instanceCount = COUNT;
-    const shadowOf = (vs: string) => Object.assign(o.shadowMaterial(vs), { side: DoubleSide });
+    // a sail in its quarter of the plane: the corners of its two triangles, as the outward normals of its two outer edges
+    const A = [1, 0];
+    const B = [0.68 * Math.SQRT1_2, 0.68 * Math.SQRT1_2];
+    const C = [0, 0.36];
+    const edge = (p: number[], q: number[]) => {
+      const l = Math.hypot(q[0]! - p[0]!, q[1]! - p[1]!);
+      return `vec3(${((q[1]! - p[1]!) / l).toFixed(5)}, ${(-(q[0]! - p[0]!) / l).toFixed(5)}, ${((p[0]! * (q[1]! - p[1]!) - p[1]! * (q[0]! - p[0]!)) / l).toFixed(5)})`;
+    };
+    const SAILS = /* glsl */ `
+      /** signed distance (roughly) to the sail that lies in the quarter x, y >= 0 */
+      float sail(vec2 p) {
+        vec3 e0 = ${edge(A, B)};
+        vec3 e1 = ${edge(B, C)};
+        return max(max(-p.x, -p.y), max(dot(p, e0.xy) - e0.z, dot(p, e1.xy) - e1.z));
+      }
+      float cover(vec2 q, float soft) {
+        // the four sails are one, turned by quarter turns: into the first quarter, and the next sail round borders it
+        if (q.x < 0.0) q = -q;
+        if (q.y < 0.0) q = vec2(-q.y, q.x);
+        float sd = min(sail(q), sail(vec2(q.y, -q.x)));
+        return 1.0 - smoothstep(-soft, soft, sd);
+      }`;
+    const shadowOf = (vs: string) => Object.assign(o.shadowMaterial(vs, SAILS), { side: DoubleSide });
     add(
       sg,
       shadowOf(/* glsl */ `
-        attribute float aPart;
         attribute vec4 aPlace;
         attribute vec4 aSpin;
         attribute vec4 aPlane; // ground normal, offset
@@ -842,21 +882,21 @@ export function createGarden(o: GardenOptions): Garden {
         varying vec3 vW;
         varying float vA;
         varying vec2 vQ;
+        varying float vSoft;
         const vec3 SUN = vec3(${o.sun.x.toFixed(4)}, ${o.sun.y.toFixed(4)}, ${o.sun.z.toFixed(4)});
         ${o.groundGlsl}
         void main() {
-          // the stalk's shadow is baked into the sand with every other still thing's
-          if (aPart < 0.5) {
+          // (the stalk's shadow is baked into the sand with every other still thing's)
+          float c = cos(aSpin.x), s = sin(aSpin.x);
+          // how squarely the sails face the sun. Edge-on they would throw a hairline, which a sun
+          // with any width blurs away to nothing: the shadow fades out as they come edge-on
+          float facing = abs(c * SUN.z - s * SUN.x);
+          float show = smoothstep(0.12, 0.45, facing);
+          if (show <= 0.0) {
             gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             return;
           }
           vec3 p = position;
-          if (aPart > 0.5) {
-            float a = aSpin.z + uT * aSpin.y;
-            float c = cos(a), s = sin(a);
-            p.xy = mat2(c, s, -s, c) * p.xy;
-          }
-          float c = cos(aSpin.x), s = sin(aSpin.x);
           p.xz = mat2(c, s, -s, c) * p.xz;
           vec3 w0 = aPlace.xyz + p * aPlace.w;
           // slid along the sun onto the dune: first onto its tangent plane under the stalk, then
@@ -865,9 +905,15 @@ export function createGarden(o: GardenOptions): Garden {
           for (int i = 0; i < 3; i++) k = (w0.y - groundAt(w0.xz - SUN.xz * k) - 0.04) / SUN.y;
           vec3 w = w0 - SUN * k;
           vW = w;
+          // the point of the sails' plane, turned back by as much as they have turned
+          float a = aSpin.z + uT * aSpin.y;
+          float ca = cos(a), sa = sin(a);
+          vQ = mat2(ca, -sa, sa, ca) * position.xy;
+          // the baked shadows' penumbra at this distance from the caster (dollhouse.tsx), in the sails' own measure,
+          // and wider across the way they are foreshortened
+          vSoft = (0.075 + 0.035 * max(k, 0.0)) / (aPlace.w * mix(facing, 1.0, 0.5));
           // the sails' shadow is a little lighter, and paler still far off, where it would only flicker
-          vA = 0.85 * (1.0 - 0.6 * smoothstep(25.0, 110.0, length(cameraPosition - w)));
-          vQ = vec2(0.0);
+          vA = 0.85 * show * (1.0 - 0.6 * smoothstep(25.0, 110.0, length(cameraPosition - w)));
           gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
         }`),
     );
@@ -928,7 +974,7 @@ export function createGarden(o: GardenOptions): Garden {
     const hue = new Float32Array(COUNT * 3);
     for (let n = 0; n < COUNT; n++) {
       const flock = n % 2;
-      const lead = flock ? 2.6 : 3.1; // where each flock is when the scene begins
+      const lead = o.flocks[flock]!; // where each flock is when the scene begins
       const r = (flock ? 50 : 82) + (rnd() - 0.5) * 30;
       const speed = (flock ? -1 : 1) * (7.5 + rnd() * 1.5);
       orbit.set([r, lead + (rnd() - 0.5) * 0.75 * (60 / r), (flock ? 17 : 24) + rnd() * 14, speed / r], n * 4);
@@ -952,7 +998,7 @@ export function createGarden(o: GardenOptions): Garden {
         void main() {
           float ang = aOrbit.y + uT * aOrbit.w;
           float dir = sign(aOrbit.w);
-          vec3 centre = vec3(aOrbit.x * cos(ang), aOrbit.z + 2.5 * sin(uT * 0.5 + aBird.y), 18.0 + aOrbit.x * sin(ang));
+          vec3 centre = vec3(${o.centre.x.toFixed(2)} + aOrbit.x * cos(ang), aOrbit.z + 2.5 * sin(uT * 0.5 + aBird.y), ${o.centre.z.toFixed(2)} + aOrbit.x * sin(ang));
           vec3 fwd = vec3(-sin(ang), 0.0, cos(ang)) * dir;
           vec3 right = vec3(fwd.z, 0.0, -fwd.x);
           // a few strong beats, then a glide
@@ -1007,6 +1053,11 @@ export function createGarden(o: GardenOptions): Garden {
   const last = new Float64Array(16).fill(NaN);
   const eye = new Vector3();
   let hooked = false;
+  /** the scene's clock, and the times at which a bed joins the draw */
+  let now = 0;
+  const gates = [...new Set(pools.flatMap((p) => p.list.map((f) => f.from)))].filter((t) => t > 0);
+  const stageAt = (t: number) => gates.reduce((n, g) => n + (t >= g ? 1 : 0), 0);
+  let stage = -1;
 
   /** copies the instances in `camera`'s frustum, and within each pool's distances, to the front of the pools' buffers */
   const select = (camera: Camera) => {
@@ -1017,7 +1068,9 @@ export function createGarden(o: GardenOptions): Garden {
       if (view.elements[i] !== last[i]) same = false;
       last[i] = view.elements[i]!;
     }
-    if (same) return;
+    // (a bed joining the draw changes the choice as a move of the camera does)
+    if (same && stage === stageAt(now)) return;
+    stage = stageAt(now);
     frustum.setFromProjectionMatrix(view);
     eye.setFromMatrixPosition(camera.matrixWorld);
     for (const { list, cells, pools: group, counts } of groups) {
@@ -1028,6 +1081,7 @@ export function createGarden(o: GardenOptions): Garden {
         for (let j = 0; j < members.length; j++) {
           const i = members[j]!;
           const f = list[i]!;
+          if (f.from > now) continue;
           // the distance the shaders measure: from the eye to the foot
           const dx = f.x - eye.x;
           const dy = f.y - eye.y;
@@ -1066,6 +1120,7 @@ export function createGarden(o: GardenOptions): Garden {
     drifts,
     pinwheels,
     update(t, camera) {
+      now = t;
       for (const m of materials) m.uniforms.uT!.value = t;
       if (!hooked) {
         let top: Object3D = root;
