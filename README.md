@@ -23,13 +23,21 @@ bun run build    # static build in dist/
   which is rendered once and kept.
 - Every scene runs on the same 25 s local timeline, documented in `src/scenes/types.ts`. A new
   scene takes over the screen every 20 s.
-- The cut only hides if the *motion* matches too, so all cameras share one rail
-  (`src/scenes/rail.ts`): around both ends of its timeline every scene travels dead straight along
-  its view axis, without rotating, at one common speed, and eases in and out of that state like a
-  railway transition curve.
+- The cut only hides if the *motion* matches too, so the cameras share one rail
+  (`src/scenes/rail.ts`): a single closed, curvature-continuous track of climbs, dives and banked
+  sweeps, 80 s round, cut into four seasons (spring, summer, fall, winter). A scene's place in the
+  playing order picks its season (`index % 4`), and its 25 s are the last 5 s of the season before
+  followed by its own 20, so the scene that is leaving and the one arriving ride the same piece
+  of track with the same bank and speed, and the portal between them is a true window. The rail
+  owns position, heading, bank and speed; a scene builds its world around its stretch. The burrow
+  rides summer this way and the dollhouse fall. Helix and orbit still have their own tracks and
+  meet the rail in the legacy seam state the same file describes: dead straight along the view
+  axis, without rotating, at one common speed.
 - Scenes are listed in `src/scenes/index.ts` and loop in that order. To add one, write a component
-  that takes `SceneProps`, put `portalMaterial` on its exit opening, drive its camera with
-  `createRide` from a track that starts and ends straight, and register it.
+  that takes `SceneProps`, ask the rail for its stretch with `season(index)`, build the world
+  along `stretch.frame(distance)`, put `portalMaterial` on an exit standing at
+  `stretch.frame(stretch.exit)`, set the camera from `stretch.pose(clock.t)` every frame, and
+  register it. The header of `rail.ts` is the full contract; `burrow.tsx` is the worked example.
 - `src/main.tsx` registers only the three.js classes the scenes write as JSX (`<mesh>`,
   `<group>`, ...) instead of using r3f's `<Canvas>`, which would keep all of three.js in the
   bundle. A new kind of JSX element has to be added to that list.
@@ -43,6 +51,8 @@ bun run build    # static build in dist/
 - `dollhouse`: flowers, pinwheels and paper birds (`dollhouse/garden.ts`), patterned trees,
   domes and hoops (`PATTERNS` in `dollhouse.tsx`).
 - `orbit`: a star-freckled whale with her calf and rising paper lanterns (`orbit/sky.ts`).
+- `roost`: a porcelain hen who is the lid of a covered dish (`roost/hen.ts`), painted eggs that drift up
+  through the floor (`roost/eggs.ts`), and stacks of crockery standing on it and hanging under it (`roost/stacks.ts`).
 
 Everything that moves is animated in a vertex shader from the scene clock, one instanced draw per
 kind of creature.

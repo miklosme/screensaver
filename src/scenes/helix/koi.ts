@@ -135,6 +135,8 @@ export interface KoiOptions {
   fogFar: number;
   /** GLSL that defines `vec3 hxSky(vec3 dir)` */
   skyGlsl: string;
+  /** GLSL that defines `float hxBeam(vec3 world)`: how deep a point lies in a shaft of light, 0..1 */
+  beamGlsl?: string;
 }
 
 export interface Koi {
@@ -174,6 +176,8 @@ export function createKoi(o: KoiOptions): Koi {
       varying vec3 vN;
       varying float vFin;
       varying float vSeed;
+      varying float vLit;
+      ${o.beamGlsl ?? "float hxBeam(vec3 w) { return 0.0; }"}
       void main() {
         float ang = aOrbit.y + uT * aOrbit.w;
         float yy = mod(aOrbit.z + uT * aFish.w, ${o.yRange.toFixed(1)});
@@ -189,6 +193,7 @@ export function createKoi(o: KoiOptions): Koi {
         float d = max(length(perp), 1e-3);
         float need = (3.4 + 0.2 * max(along, 0.0)) * smoothstep(-5.0, 1.0, along) * (1.0 - smoothstep(40.0, 60.0, along));
         c += perp / d * max(0.0, need + aFish.x * 0.6 - d);
+        vLit = hxBeam(c); // a fish brightens while it crosses a shaft of light
 
         vec3 fwd = normalize(vec3(-sin(ang) * r * aOrbit.w, aFish.w, cos(ang) * r * aOrbit.w));
         vec3 side = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));
@@ -217,6 +222,7 @@ export function createKoi(o: KoiOptions): Koi {
       varying vec3 vN;
       varying float vFin;
       varying float vSeed;
+      varying float vLit;
       ${o.skyGlsl}
       float kHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
       float kNoise(vec2 p) {
@@ -256,6 +262,8 @@ export function createKoi(o: KoiOptions): Koi {
         float ndl = dot(n, normalize(vec3(-0.35, 1.0, -0.6))) * 0.5 + 0.5;
         float rim = pow(1.0 - max(dot(n, V), 0.0), 2.5);
         col = col * (0.42 + 0.8 * ndl) + vec3(1.0, 0.55, 0.2) * rim * 0.35;
+        // in a shaft of light the lantern flares up, its rim catching the beam
+        col += (col * 0.55 + vec3(1.0, 0.6, 0.26) * (0.18 + 0.6 * rim)) * vLit;
 
         float dist = length(cameraPosition - vW);
         float f = smoothstep(${o.fogNear.toFixed(1)}, ${o.fogFar.toFixed(1)}, dist);

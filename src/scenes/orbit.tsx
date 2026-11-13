@@ -3,7 +3,8 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { RAIL, createRide } from "./rail";
 import { TIMING, type SceneProps } from "./types";
-import { createSky } from "./orbit/sky";
+import { beamMaterial, createSky, moonMaterial } from "./orbit/sky";
+import { mergeGeometries, mergeVertices, toCreasedNormals } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 /**
  * ORBIT — the inside-out world.
@@ -27,6 +28,13 @@ const DOOR_R = 2.68;
 const DOOR_Z = HUT_Z - 4.6;
 const PORTAL_Z = DOOR_Z + 0.14;
 const PLAZA_R = 14;
+const LEAF_T = 0.22; // leaf thickness, bevel included
+const HUT_WINDOWS = [0, Math.PI * 0.5, Math.PI, Math.PI * 0.25, Math.PI * 0.75];
+const HUT_WIN_R = 4.36;
+const HUT_WIN_Y = 2.15;
+/** the stepped base: radius and top of each tier, bottom first */
+const STEP_R = [7.6, 6.7, 5.8];
+const STEP_Y = [0.42, 0.62, 0.82];
 
 /** camera way-points: [s, z, h] */
 const WAY: [number, number, number][] = [
@@ -67,6 +75,514 @@ const smooth = (x: number) => {
   const c = Math.min(1, Math.max(0, x));
   return c * c * (3 - 2 * c);
 };
+
+// ---------------------------------------------------------------- depth: air between the layers
+/** the indigo the far town sinks into (mixed after the colour-space step, like three's fog) */
+const AIR = new THREE.Color("#272c78");
+const AIR_GLSL = `vec3(${AIR.r.toFixed(4)}, ${AIR.g.toFixed(4)}, ${AIR.b.toFixed(4)})`;
+/** 0 near the camera, ~0.4 at the middle towers, ~0.8 for the town overhead */
+const EXT_GLSL = "(1.0 - exp(-max(vFogDepth - 16.0, 0.0) * 0.0135))";
+const LAMP_PARS = /* glsl */ `
+uniform sampler2D uLamp;
+/** lamp light at the foot of a world point, from the baked map in unrolled (s, z) */
+vec3 lampAt(vec3 p) {
+  return texture2D(uLamp, vec2(atan(p.x, -p.y) * ${(1 / (2 * Math.PI)).toFixed(6)}, p.z / ${(2 * ZH).toFixed(1)} + 0.5)).rgb;
+}`;
+
+/**
+ * The moon hangs at the +z end of the cylinder. Silhouettes catch a cool rim on the side that faces
+ * it, added after the air so towers part from the sky. It is strongest on the middle-distance towers
+ * and on moon-facing normals; overhead it is kept to a restrained edge, because there the layers
+ * already part by value (`LAYER_GLSL`). Lit materials only (they have `normal` and `vViewPosition`);
+ * kept under the bloom threshold so it reads as an edge.
+ */
+const RIM_GLSL = /* glsl */ `
+  {
+    vec3 nW = transpose(mat3(viewMatrix)) * normal;
+    float graze = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0);
+    float e = ${EXT_GLSL};
+    float rim = graze * graze * graze * (0.2 + 0.8 * smoothstep(-0.1, 0.7, nW.z))
+      * smoothstep(0.08, 0.35, e) * (1.0 - 0.25 * smoothstep(0.5, 0.8, e));
+    gl_FragColor.rgb += vec3(0.17, 0.25, 0.52) * 0.8 * rim;
+  }`;
+
+/**
+ * Value between the layers: across the town overhead a nearer tower is a step lighter and a touch
+ * warmer than the street it hangs from and the towers behind it, so successive layers separate
+ * without an outline on each.
+ */
+const LAYER_GLSL = /* glsl */ `
+  gl_FragColor.rgb *= mix(vec3(1.0), vec3(1.08, 1.05, 1.0), smoothstep(50.0, 90.0, vFogDepth))
+    * mix(vec3(1.0), vec3(0.8, 0.82, 0.92), smoothstep(100.0, 230.0, vFogDepth));
+`;
+
+/**
+ * Wet street: each light near the camera is mirrored in the ground as a streak stretched towards
+ * the eye. Everything is in unrolled (s, z) ground coordinates; the lights (s, z, height, weight)
+ * and the eye's foot and height are chosen per frame from the camera pose (`pickReflections`).
+ */
+const REFL_N = 12;
+const WET_GLSL = /* glsl */ `
+uniform vec4 uRL[${REFL_N}];   // mirror point (s, z), unit direction towards the eye
+uniform vec3 uRW[${REFL_N}];   // 1 / half-width, 1 / reach towards the eye, 1 / reach back to the lamp
+uniform vec3 uRC[${REFL_N}];   // colour times weight
+uniform int uRN;
+uniform vec3 uEyeG;
+float wrapC(float x) { return x - ${C.toFixed(3)} * floor(x / ${C.toFixed(3)} + 0.5); }
+/** reflected light at ground point g (unrolled), before the roughness mask; zero past its reach */
+vec3 wetSheen(vec2 g) {
+  vec3 acc = vec3(0.0);
+  vec2 ge = vec2(wrapC(g.x - uEyeG.x), g.y - uEyeG.y);
+  float dEye = dot(ge, ge);
+  if (dEye > ${(48 * 48).toFixed(1)}) return acc;
+  for (int i = 0; i < ${REFL_N}; i++) {
+    if (i >= uRN) break;
+    vec4 L = uRL[i];
+    vec3 W = uRW[i];
+    vec2 q = vec2(wrapC(g.x - L.x), g.y - L.y);
+    float a = dot(q, L.zw) * (dot(q, L.zw) > 0.0 ? W.y : W.z);
+    float b = (q.y * L.z - q.x * L.w) * W.x;
+    acc += uRC[i] * exp(-(a * a + b * b));
+  }
+  return acc * (1.0 - smoothstep(${(30 * 30).toFixed(1)}, ${(48 * 48).toFixed(1)}, dEye));
+}
+float hashW(vec2 p) { return fract(sin(dot(p, vec2(12.99, 78.23))) * 43758.5); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hashW(i), hashW(i + vec2(1.0, 0.0)), f.x), mix(hashW(i + vec2(0.0, 1.0)), hashW(i + vec2(1.0, 1.0)), f.x), f.y);
+}`;
+
+/** a height field h tilts a view-space normal; scale-true, from screen derivatives */
+const BUMP_GLSL = /* glsl */ `
+vec3 bumpV(vec3 surfPos, vec3 n, float h, float face) {
+  vec3 dpx = dFdx(surfPos);
+  vec3 dpy = dFdy(surfPos);
+  vec3 r1 = cross(dpy, n);
+  vec3 r2 = cross(n, dpx);
+  float det = dot(dpx, r1) * face;
+  vec3 g = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  return normalize(abs(det) * n - g);
+}`;
+
+/** overlapping round shingles in cell units (rows run up `sv.y`): x is the tone, y a height for a bump */
+const SHINGLE_GLSL = /* glsl */ `
+vec2 shingle(vec2 sv) {
+  sv.x += 0.5 * mod(floor(sv.y), 2.0);
+  vec2 f = fract(sv);
+  float d = length(vec2(f.x - 0.5, max(0.5 - f.y, 0.0)));
+  float tile = smoothstep(0.52, 0.44, d);
+  float hem = tile * smoothstep(0.34, 0.44, d);
+  float tone = fract(sin(dot(floor(sv), vec2(12.99, 78.23))) * 43758.5);
+  return vec2(mix(0.5, (0.8 + 0.5 * f.y) * (0.88 + 0.24 * tone), tile) + 0.5 * hem, tile * (1.0 - 0.7 * f.y));
+}`;
+
+// ---------------------------------------------------------------- the moon-gate hut's own shading
+const HUT_ORIGIN = `vec3(0.0, ${(-R).toFixed(1)}, ${HUT_Z.toFixed(1)})`;
+const GATE_C = `vec3(0.0, ${DOOR_H.toFixed(2)}, ${(DOOR_Z - HUT_Z).toFixed(2)})`;
+const HUT_PARS = /* glsl */ `
+varying vec3 vHp;
+${SHINGLE_GLSL}
+/** a height field h (world units) tilts the view-space normal; scale-true, from screen derivatives */
+vec3 bumpN(vec3 surfPos, vec3 n, float h, float face) {
+  vec3 dpx = dFdx(surfPos);
+  vec3 dpy = dFdy(surfPos);
+  vec3 r1 = cross(dpy, n);
+  vec3 r2 = cross(n, dpx);
+  float det = dot(dpx, r1) * face;
+  vec3 g = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  return normalize(abs(det) * n - g);
+}
+/** warm light thrown by the gold ring of the gate onto a hut-local point, falling off with distance */
+vec3 gateWash(vec3 p, vec3 nW) {
+  vec3 q = p - ${GATE_C};
+  float rho = max(length(q.xy), 1e-3);
+  vec3 L = vec3(q.xy * (2.86 / rho), 0.0) - q;
+  float d = max(length(L), 1e-3);
+  float lam = 0.3 + 0.7 * max(dot(nW, L / d), 0.0);
+  return vec3(1.0, 0.58, 0.2) * lam / (1.0 + d * d * 1.1);
+}
+float hash12(vec2 p) { return fract(sin(dot(p, vec2(12.99, 78.23))) * 43758.5); }
+`;
+
+/** a 4-point star: two thin rhombi */
+const STAR_GLSL = /* glsl */ `
+float sdStar(vec2 p, float s) {
+  p = abs(p);
+  return min(p.x / s + p.y / (s * 0.24), p.x / (s * 0.24) + p.y / s) * s * 0.23 - s * 0.23;
+}`;
+
+/**
+ * Patches a hut material: `pattern` runs once the normal is known (it may change `diffuseColor`,
+ * `normal` and `hutGlow`), then the gate's warm wash and, with `rim`, a cool moon rim are added.
+ */
+function hutShader(mat: THREE.Material, key: string, pattern: string, wash: number, rim = 0, leaf = false) {
+  mat.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>\nvarying vec3 vHp;${leaf ? "\nattribute vec2 aq;\nvarying vec2 vQ;\nvarying float vNz;" : ""}`,
+      )
+      .replace(
+        "#include <project_vertex>",
+        `#include <project_vertex>
+        vHp = (modelMatrix * vec4(transformed, 1.0)).xyz - ${HUT_ORIGIN};
+        ${leaf ? "vQ = aq; vNz = normal.z;" : ""}`,
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>\n${HUT_PARS}${leaf ? `\nvarying vec2 vQ;\nvarying float vNz;\n${STAR_GLSL}` : ""}`,
+      )
+      .replace("#include <normal_fragment_maps>", `#include <normal_fragment_maps>\nvec3 hutGlow = vec3(0.0);\n{\n${pattern}\n}`)
+      .replace(
+        "#include <lights_fragment_end>",
+        `#include <lights_fragment_end>
+        {
+          vec3 nW = inverseTransformDirection(normal, viewMatrix);
+          totalEmissiveRadiance += hutGlow + (diffuseColor.rgb * 1.7 + 0.05) * gateWash(vHp, nW) * ${wash.toFixed(2)};
+          ${
+            rim > 0
+              ? `float g = 1.0 - clamp(abs(dot(normal, normalize(vViewPosition))), 0.0, 1.0);
+          totalEmissiveRadiance += vec3(0.32, 0.55, 1.0) * g * g * g * smoothstep(-0.25, 0.75, nW.z) * ${rim.toFixed(2)};`
+              : ""
+          }
+        }`,
+      );
+  };
+  mat.customProgramCacheKey = () => `orbit-hut-${key}`;
+}
+
+/**
+ * Chains a material's own shader patch with distance extinction: the colour sinks into AIR by
+ * `k` times the extinction factor. Every patched material gets its own program key.
+ */
+function withAir(
+  mat: THREE.Material,
+  key: string,
+  k: number,
+  patch?: (sh: THREE.WebGLProgramParametersWithUniforms) => void,
+  rim = false,
+) {
+  mat.onBeforeCompile = (sh) => {
+    patch?.(sh);
+    sh.fragmentShader = sh.fragmentShader.replace(
+      "#include <fog_fragment>",
+      `#include <fog_fragment>
+      #ifdef USE_FOG
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, ${AIR_GLSL}, clamp(${EXT_GLSL} * ${k.toFixed(3)}, 0.0, 1.0));
+        ${LAYER_GLSL}
+        ${rim ? RIM_GLSL : ""}
+      #endif`,
+    );
+  };
+  mat.customProgramCacheKey = () => `orbit-${key}`;
+}
+
+/** the scene's clock, for who walks past the windows */
+const WINDOW_TIME = { value: 0 };
+/** drawing-buffer height over 1080, so a window gets its room at the same on-screen size at any resolution */
+const WINDOW_RES = { value: 1 };
+
+/**
+ * A lit room behind a window, by interior mapping: the eye ray enters at the pane (wall units:
+ * x across, y up from the sill, z out of the wall) and meets a box behind it. Walls, floor and
+ * ceiling are lit by one lamp; a picture, a shelf or a mirror on the back wall, a curtain at one
+ * side, and now and then someone crossing or a cat on the sill, all picked by the window's seed.
+ */
+const ROOM_GLSL = /* glsl */ `
+uniform float uWinT;
+uniform float uWinRes;
+varying vec3 vRay;
+varying vec3 vRc;
+varying float vSeed;
+const float RW = 0.62, Y0 = -0.5, Y1 = 1.42, D = 1.0;
+float wHash(float s, float k) { return fract(sin(s * 91.37 + k * 17.173) * 43758.5453); }
+float wBox(vec2 p, vec2 c, vec2 h) { vec2 q = abs(p - c) - h; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0); }
+// warm plaster, some rooms creamier, some rosier
+vec3 wWall(vec3 lit, float sd) {
+  vec3 cream = vec3(dot(lit, vec3(0.45, 0.4, 0.15))) * vec3(1.0, 0.82, 0.62);
+  return mix(lit, cream, 0.15 + 0.35 * wHash(sd, 1.0)) * mix(vec3(1.0), vec3(1.0, 0.85, 0.9), wHash(sd, 2.0) * 0.6);
+}
+// the lamp: a pendant under the ceiling, or a table lamp in a back corner
+vec3 wLamp(float sd) {
+  float side = wHash(sd, 3.0) < 0.5 ? -1.0 : 1.0;
+  return wHash(sd, 4.0) < 0.5 ? vec3((wHash(sd, 5.0) - 0.5) * 0.5, Y1 - 0.3, -D * 0.5) : vec3(side * (RW - 0.22), 0.05, -D + 0.2);
+}
+/**
+ * A room at a glance, for windows of about 12 to 30 px: only the back wall is traced, and what
+ * lies off it reads as one darker plane (side wall, floor or ceiling), with the floor's line, the
+ * lamp's pool shifting with the view and the corners in dusk. The full room shades the same.
+ */
+vec3 wHint(vec2 Q, vec3 d, vec3 lit, float sd, float aa) {
+  d.z = min(d.z, -1e-3 * length(d));
+  vec2 B = Q + d.xy * (D / -d.z);
+  vec3 wall = wWall(lit, sd);
+  float ex = RW - abs(B.x);
+  float e = min(ex, min(B.y - Y0, Y1 - B.y));
+  vec3 c = mix(wall * 0.9, lit * 0.12, 1.0 - smoothstep(-aa, aa, B.y - Y0 - 0.07));
+  vec3 off = B.y < Y0 && ex > 0.0 ? lit * vec3(0.5, 0.34, 0.24) : wall * 0.42;
+  c = mix(off, c, smoothstep(-aa, aa, e));
+  vec3 lv = vec3(B, -D) - wLamp(sd);
+  float pool = 1.0 / (1.0 + 9.0 * dot(lv, lv));
+  // a little brighter than the room it stands for: at this size it is still mostly a light
+  return c * (0.7 + 1.2 * pool) * (0.5 + 0.5 * smoothstep(0.0, 0.3, abs(e)));
+}
+/**
+ * Someone comes to the window now and then, stands a while in one light and goes again: placed
+ * from the camera's side so the head and shoulders sit in that light, clear of mullion and
+ * transom, and drawn over room, hint and pane alike so it reads at any size a room shows at.
+ * Returns how much of the pixel the figure covers.
+ */
+float wWalker(vec2 Q, vec3 d, vec2 sc, float sd, float t, float aa) {
+  float r2 = wHash(sd, 2.0), r3 = wHash(sd, 3.0), r5 = wHash(sd, 5.0), r6 = wHash(sd, 6.0), r7 = wHash(sd, 7.0), r8 = wHash(sd, 8.0);
+  if (r8 >= 0.42) return 0.0;
+  float per = 10.0 + 8.0 * r7;
+  float u = fract(t / per + r5) / 0.55;
+  if (u >= 1.0) return 0.0;
+  d.z = min(d.z, -1e-3 * length(d));
+  d = normalize(d);
+  // hidden where the ray meets a wall, the floor or the ceiling before the figure's plane
+  float th = min(min(((d.x > 0.0 ? RW : -RW) - Q.x) / d.x, ((d.y > 0.0 ? Y1 : Y0) - Q.y) / d.y), -D / d.z);
+  float zp = -D * (0.22 + 0.2 * r6);
+  float tp = zp / d.z;
+  if (tp >= th) return 0.0;
+  vec2 S = Q + d.xy * tp;
+  float side = r3 < 0.5 ? -1.0 : 1.0;
+  // to the light the curtain leaves open, if there is one
+  float dir = r3 > 0.3 && r3 < 0.7 ? -side : r2 < 0.5 ? -1.0 : 1.0;
+  float w = smoothstep(0.16, 0.0, u) + smoothstep(0.84, 1.0, u);
+  float x = dir * mix(0.116, 0.52, w) + 0.006 * sin(u * 9.0 + wHash(sd, 1.0) * 6.0) * (1.0 - w);
+  vec2 at = clamp(vec2(x, 0.0) + sc * -zp, vec2(-RW + 0.08, -0.6), vec2(RW - 0.08, 0.6));
+  vec2 sp = S - at;
+  float bob = 0.01 * sin(u * 60.0) * smoothstep(0.0, 0.3, w);
+  // a head, a neck, and shoulders falling away from it into arms hanging close
+  float sh = length((sp - vec2(0.0, 0.5 + bob)) / vec2(0.05, 0.06)) - 1.0;
+  sh = min(sh, wBox(sp, vec2(0.0, 0.43 + bob), vec2(0.017, 0.03)) / 0.05);
+  float sy = clamp((0.415 + bob - sp.y) / 0.07, 0.0, 1.0);
+  sh = min(sh, (wBox(sp, vec2(0.0, 0.1 + bob), vec2(0.022 + 0.048 * sqrt(sy), 0.3)) - 0.012) / 0.05);
+  return 1.0 - smoothstep(-aa, aa, sh * 0.05);
+}
+vec3 wRoom(vec2 Q, vec3 d, vec2 sc, vec3 lit, float sd, float t, float aa) {
+  // the ray arrives as camera-to-pane in wall units; measured along a unit ray, every t below is a
+  // true distance from the pane, so the lamp's closest approach dot(L - P, d) means what it says
+  d.z = min(d.z, -1e-3 * length(d));
+  d = normalize(d);
+  vec3 P = vec3(Q, 0.0);
+  float tx = ((d.x > 0.0 ? RW : -RW) - P.x) / d.x;
+  float ty = ((d.y > 0.0 ? Y1 : Y0) - P.y) / d.y;
+  float tz = -D / d.z;
+  float th = min(min(tx, ty), tz);
+  vec3 H = P + d * th;
+  float r1 = wHash(sd, 1.0), r2 = wHash(sd, 2.0), r3 = wHash(sd, 3.0), r4 = wHash(sd, 4.0);
+  float r5 = wHash(sd, 5.0), r6 = wHash(sd, 6.0), r7 = wHash(sd, 7.0), r8 = wHash(sd, 8.0);
+  vec3 wall = wWall(lit, sd);
+  float side = r3 < 0.5 ? -1.0 : 1.0;
+  vec3 L = wLamp(sd);
+  // where the pane's centre looks onto the back wall: the hung thing moves most of the way
+  // towards it, so it is in view from wherever the window is seen
+  vec2 fo = clamp(sc * D, vec2(-0.4, -0.45), vec2(0.4, 0.4)) * 0.7;
+  vec2 F = H.xy - fo;
+  vec3 c;
+  float edge;
+  if (th == tz) {
+    // back wall: faint wallpaper stripes, and one thing hung or standing on it
+    c = wall * 0.9;
+    edge = min(RW - abs(H.x), min(H.y - Y0, Y1 - H.y));
+    float k = fract(r6 * 3.0);
+    if (r6 < 0.34) {
+      // a framed picture: a cyan night with a moon
+      float px = (k - 0.5) * 0.5;
+      float f = wBox(F, vec2(px, 0.78), vec2(0.17, 0.13));
+      vec3 pic = mix(vec3(0.05, 0.16, 0.3), vec3(0.2, 0.5, 0.6), smoothstep(0.9, 0.66, F.y)) * (0.4 + 0.6 * dot(lit, vec3(0.33)));
+      pic = mix(pic, lit * 1.1, 1.0 - smoothstep(0.03, 0.03 + aa, length(F - vec2(px + 0.06, 0.83))));
+      c = mix(c, pic, 1.0 - smoothstep(-aa, aa, f + 0.025));
+      c = mix(c, lit * 0.18, (1.0 - smoothstep(-aa, aa, f)) * smoothstep(-aa, aa, f + 0.025));
+    } else if (r6 < 0.67) {
+      // a shelf of books
+      float y0 = 0.45 + k * 0.3;
+      float inShelf = step(abs(F.x - (k - 0.5) * 0.3), 0.36);
+      float plank = 1.0 - smoothstep(0.012, 0.012 + aa, abs(F.y - y0));
+      float bi = floor(F.x * 26.0 + sd * 7.0);
+      float bh = 0.1 + 0.08 * wHash(bi, sd);
+      float book = step(y0, F.y) * step(F.y, y0 + bh) * step(0.12, fract(F.x * 26.0 + sd * 7.0)) * step(0.2, wHash(bi, 9.0 + sd));
+      vec3 bc = mix(vec3(0.5, 0.12, 0.1), vec3(0.08, 0.3, 0.35), wHash(bi, 3.0)) * (0.5 + dot(lit, vec3(0.3)));
+      c = mix(c, bc, book * inShelf);
+      c = mix(c, lit * 0.22, plank * inShelf);
+    } else {
+      // a round mirror, catching the lamp
+      vec2 mc = vec2((k - 0.5) * 0.45, 0.78);
+      float m = length(F - mc) - 0.12;
+      c = mix(c, lit * 0.25 + vec3(0.04, 0.06, 0.1), 1.0 - smoothstep(-aa, aa, m));
+      c = mix(c, lit * 0.15, (1.0 - smoothstep(-aa, aa, abs(m) - 0.012)));
+      c += lit * 0.5 * (1.0 - smoothstep(0.0, 0.08, length(F - mc - vec2(-0.04, 0.04)))) * step(m, 0.0);
+    }
+    // a tall dark cupboard against the wall, on the side away from the lamp
+    if (r7 > 0.45) {
+      float cx = -side * (RW - 0.16);
+      float cb = wBox(H.xy, vec2(cx, (Y0 + 1.0) * 0.5), vec2(0.15, (1.0 - Y0) * 0.5));
+      vec3 cc = lit * 0.16 * (1.0 + 0.6 * smoothstep(0.6, 1.0, H.y));
+      cc = mix(cc, lit * 0.06, 1.0 - smoothstep(0.0, aa, abs(H.x - cx) - 0.004));
+      cc = mix(cc, lit * 0.35, (1.0 - smoothstep(0.0, aa, abs(H.y - 0.98) - 0.01)));
+      c = mix(c, cc, 1.0 - smoothstep(-aa, aa, cb));
+    }
+    // a skirting board
+    c = mix(c, lit * 0.12, step(H.y, Y0 + 0.07));
+  } else if (th == ty) {
+    if (d.y < 0.0) {
+      // floorboards and a rug
+      c = lit * vec3(0.42, 0.28, 0.2) * (0.8 + 0.15 * step(0.08, fract(H.x * 7.0 + 0.5 * floor(H.z * 2.0))));
+      float rug = length((H.xz - vec2(0.0, -D * 0.5)) / vec2(0.4, 0.3)) - 1.0;
+      vec3 rc = mix(vec3(0.55, 0.12, 0.16), vec3(0.1, 0.32, 0.38), r7) * (0.4 + dot(lit, vec3(0.3)));
+      c = mix(c, rc, 1.0 - smoothstep(-0.02, 0.02, rug));
+      edge = min(RW - abs(H.x), D + H.z);
+    } else {
+      // ceiling, with a beam
+      c = wall * 0.3 * (1.0 - 0.35 * (1.0 - smoothstep(0.03, 0.035, abs(H.z + D * 0.5))) * step(0.5, r8));
+      edge = min(RW - abs(H.x), D + H.z);
+    }
+  } else {
+    // side walls, a shade deeper, and darker towards the window
+    c = wall * 0.38 * mix(0.4, 1.0, smoothstep(0.0, -D, H.z));
+    edge = min(D + H.z, min(H.y - Y0, Y1 - H.y));
+  }
+  // the lamp's pool, and dusk in the corners
+  vec3 lv = H - L;
+  float pool = 1.0 / (1.0 + 9.0 * dot(lv, lv));
+  c *= (0.4 + 1.5 * pool) * (0.35 + 0.65 * smoothstep(0.0, 0.3, edge));
+  // the lamp itself, seen where the ray passes it
+  float tl = max(dot(L - P, d), 0.0);
+  float lr = length(P + d * min(tl, th) - L);
+  c += lit * 1.6 * (1.0 - smoothstep(0.035, 0.08, lr));
+  if (r8 > 0.88) {
+    // a cat on the sill, its tail swinging
+    float tp = -0.05 / d.z;
+    vec2 S = P.xy + d.xy * tp;
+    vec2 cp = S - vec2((r1 - 0.5) * 0.24, 0.0);
+    float cat = min(length((cp - vec2(0.0, 0.085)) / vec2(0.07, 0.085)) - 1.0, length(cp - vec2(0.0, 0.2)) / 0.05 - 1.0);
+    float ear = max(cp.y - 0.285 + 0.06 * abs(abs(cp.x) - 0.03) / 0.022, 0.2 - cp.y);
+    cat = min(cat, ear * 25.0);
+    float sw = sin(t * 1.7 + sd * 13.0);
+    vec2 tq = cp - vec2(0.07, 0.02);
+    float tail = abs(tq.y - 0.5 * tq.x - 1.6 * sw * tq.x * tq.x) - 0.012;
+    tail = max(tail, max(-tq.x, tq.x - 0.12 - 0.02 * sw));
+    cat = min(cat, tail * 25.0);
+    c = mix(c, lit * 0.08 + vec3(0.02, 0.015, 0.04), 1.0 - smoothstep(-aa * 25.0, aa * 25.0, cat));
+  }
+  // a curtain drawn to one side, lit through
+  if (r3 > 0.3 && r3 < 0.7) {
+    float tcz = -0.07 / d.z;
+    if (tcz < th) {
+      vec2 S = P.xy + d.xy * tcz;
+      float cw = 0.06 + 0.08 * r5 - 0.05 * S.y;
+      float cov = smoothstep(-aa, aa, side * S.x - (0.25 - cw));
+      vec3 fab = mix(vec3(0.9, 0.25, 0.25), vec3(0.3, 0.6, 0.65), r1) * lit.r;
+      vec3 cc = mix(lit, fab, 0.55) * (0.45 + 0.2 * sin(S.x * 70.0 + sd * 5.0)) * (0.8 + 0.2 * smoothstep(0.0, 1.0, S.y));
+      c = mix(c, cc, cov);
+    }
+  }
+  return c;
+}
+`;
+
+/**
+ * Lit windows are lights, not wall: distance takes only a little of their saturation and none of
+ * their brightness beyond three's own fog, so the town overhead stays inhabited.
+ */
+function windowAir(mat: THREE.Material) {
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uWinT = WINDOW_TIME;
+    sh.uniforms.uWinRes = WINDOW_RES;
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;\nvarying vec3 vRay;\nvarying vec3 vRc;\nvarying float vSeed;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        {
+          float ww = length(instanceMatrix[0].xyz);
+          float wh = length(instanceMatrix[1].xyz);
+          // beyond the reach of its halo a window shrinks to the opening and its sill
+          vec3 wc = (modelMatrix * instanceMatrix * vec4(0.0, 0.5, 0.0, 1.0)).xyz;
+          if (distance(wc, cameraPosition) > 52.0) transformed.xy = clamp(transformed.xy, vec2(-0.5 - 0.08 / ww, -0.1 / wh), vec2(0.5 + 0.08 / ww, 1.0));
+          vWq = vec4(transformed.x * ww, transformed.y * wh, ww, wh);
+          // the eye ray in the wall's own frame (wall units), for the room behind the pane
+          mat4 wm = modelMatrix * instanceMatrix;
+          vec3 wv = (wm * vec4(transformed, 1.0)).xyz - cameraPosition;
+          vRay = vec3(dot(wv, normalize(wm[0].xyz)), dot(wv, normalize(wm[1].xyz)), dot(wv, normalize(wm[2].xyz)));
+          // and the ray to the pane's centre, the same for the whole window
+          vec3 wcv = wc - cameraPosition;
+          vRc = vec3(dot(wcv, normalize(wm[0].xyz)), dot(wcv, normalize(wm[1].xyz)), dot(wcv, normalize(wm[2].xyz)));
+          vec3 ip = instanceMatrix[3].xyz;
+          vSeed = floor(fract(dot(floor(ip * 7.0), vec3(0.1031, 0.1173, 0.0973))) * 4096.0);
+        }`,
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;\n" + ROOM_GLSL)
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        // the opening, in wall units: a round-headed arch, set into the wall
+        vec2 Q = vWq.xy;
+        float hw = vWq.z * 0.5;
+        float yc = vWq.w - hw;
+        float dw = Q.y > yc ? length(Q - vec2(0.0, yc)) - hw : max(abs(Q.x) - hw, -Q.y);
+        float pxw = fwidth(dw) + 1e-4;
+        float detail = 1.0 - smoothstep(0.012, 0.05, pxw);
+        float wIn = 1.0 - smoothstep(-pxw, pxw, dw);
+        vec3 lit = diffuseColor.rgb;
+        // glass: brightest low in the middle, a dark reveal round the edge, a mullion and a transom
+        float glow = 0.82 + 0.4 * (1.0 - smoothstep(0.0, vWq.w, length((Q - vec2(0.0, yc * 0.45)) * vec2(1.6, 1.0))));
+        float reveal = smoothstep(-0.075, -0.03, dw);
+        float bars = max(1.0 - smoothstep(0.016, 0.016 + pxw, abs(Q.x)), 1.0 - smoothstep(0.016, 0.016 + pxw, abs(Q.y - yc)));
+        vec3 frameCol = lit * 0.06 + vec3(0.025, 0.02, 0.05);
+        vec3 c = lit * mix(1.0, glow, detail);
+        // near windows look into a lit room; from ~30 px down to ~12 px only its back wall, its
+        // floor line and its lamp's pool show; under that a window is a flat gold pane, as are doors
+        float wpx = pxw * uWinRes;
+        float hint = (1.0 - smoothstep(0.033, 0.047, wpx)) * step(vWq.w, 1.5);
+        if (hint > 0.0 && dw < 0.01) {
+          float full = 1.0 - smoothstep(0.013, 0.021, wpx);
+          float sd = floor(vSeed + 0.5) / 4096.0;
+          vec3 room = full < 1.0 ? wHint(Q, vRay, lit, sd, pxw * 1.5) : vec3(0.0);
+          if (full > 0.0) room = mix(room, wRoom(Q, vRay, vRc.xy / max(-vRc.z, 0.05), lit, sd, uWinT, pxw * 2.5), full);
+          // the gold pane keeps the share of the light it had over the room before, at most 40%
+          c = mix(c, room * 1.45 + lit * 0.06 * glow, hint * (1.0 - min(smoothstep(0.012, 0.026, wpx), 0.4)));
+          // whoever is at the window, dark against the lit room, from ~20 px up
+          float who = wWalker(Q, vRay, vRc.xy / max(-vRc.z, 0.05), sd, uWinT, pxw * 1.5) * (1.0 - smoothstep(0.022, 0.034, wpx));
+          c = mix(c, lit * 0.035 + vec3(0.025, 0.018, 0.045), who);
+        }
+        c = mix(c, frameCol, detail * max(reveal * 0.85, bars * step(dw, 0.0)));
+        diffuseColor.rgb = c;
+        // a lit sill under the opening, and the glow the window throws on the brick round it
+        float sill = (1.0 - smoothstep(-pxw, pxw, max(abs(Q.x) - hw - 0.07, abs(Q.y + 0.045) - 0.045))) * (1.0 - wIn);
+        float edgeQ = max(abs(vWq.x / vWq.z) / 1.3, max((vWq.y / vWq.w - 0.525) / 0.925, 0.0));
+        vec3 wHalo = lit * (0.42 * exp(-max(dw, 0.0) / 0.13) + 0.08 * exp(-max(dw, 0.0) / 0.3)) * (1.0 - wIn) * (1.0 - smoothstep(0.35, 0.9, edgeQ));
+        wHalo *= 1.0 + 0.6 * smoothstep(0.2, -0.3, Q.y);
+        vec3 sillCol = lit * 0.28 + vec3(0.04, 0.035, 0.07);
+        if (wIn + sill < 0.002 && dot(wHalo, vec3(1.0)) < 0.004) discard;
+        diffuseColor.rgb = mix(diffuseColor.rgb, sillCol, sill * detail);
+        wIn = max(wIn, sill * detail);`,
+      )
+      .replace(
+        "#include <fog_fragment>",
+        `vec3 unfogged = gl_FragColor.rgb;
+      #include <fog_fragment>
+      #ifdef USE_FOG
+      {
+        // half of what the fog took comes back: a window is a light seen through the air
+        float e = ${EXT_GLSL};
+        vec3 c = mix(gl_FragColor.rgb, unfogged, 0.5);
+        gl_FragColor.rgb = mix(c, vec3(dot(c, vec3(0.3, 0.5, 0.2))), 0.25 * e) * (1.0 + 0.15 * e);
+        // the halo is light on near brick: it goes with distance, so the far town keeps its points
+        wHalo *= (1.0 - smoothstep(0.05, 0.35, e)) * (1.0 - fogFactor);
+      }
+      #endif
+      gl_FragColor = vec4(gl_FragColor.rgb * wIn + wHalo, wIn);`,
+      );
+  };
+  mat.customProgramCacheKey = () => "orbit-window";
+}
 
 function toWorld(s: number, z: number, h: number, out: THREE.Vector3) {
   const th = s / R;
@@ -247,6 +763,12 @@ function buildWorld() {
   const by = new THREE.Vector3();
   const bz = new THREE.Vector3();
   const MAX_WINDOWS = 15000;
+  // Occupancy has its own stream so the town's layout (drawn from `rnd`) stays as it was.
+  const occRnd = mulberry32(7741);
+  const doorPools: { s: number; z: number }[] = [];
+  /** lights that can be mirrored in the wet street: unrolled foot (s, z), height, colour */
+  const reflLights: { s: number; z: number; h: number; c: THREE.Color; far: number }[] = [];
+  let nearRoad = false;
 
   const addWindow = (b: { s: number; z: number; rad: number; H: number }, phi: number, y: number, w: number, hh: number, c: THREE.Color, mul: number) => {
     const rr = b.rad * (1 - 0.12 * (y / b.H)) + 0.05;
@@ -258,6 +780,9 @@ function buildWorld() {
     lm.makeBasis(bx, by, bz).setPosition(cp * rr, y, sp * rr);
     frame(b.s, b.z, 0, fm).multiply(lm);
     windows.pushMatrix(fm, c, mul);
+    if (nearRoad && y < 4.5) {
+      reflLights.push({ s: b.s + cp * (rr + 0.3), z: b.z + sp * (rr + 0.3), h: y + hh * 0.5, c: c.clone().multiplyScalar(mul * (y < 0.5 ? 0.7 : 0.5)), far: 1.7 });
+    }
   };
 
   for (let attempt = 0; attempt < 9000 && buildings.length < 760; attempt++) {
@@ -288,6 +813,7 @@ function buildWorld() {
     if (!ok) continue;
     const b = { s, z, rad, H };
     buildings.push(b);
+    nearRoad = nearMain(s, z, rad + 12);
 
     if (hueRoll < 0.16) col.setHSL(0.68, 0.3, 0.5 + rnd() * 0.12);
     else col.setHSL(0.62 + hueRoll * 0.12, 0.32 + rnd() * 0.2, 0.2 + rnd() * 0.14);
@@ -304,22 +830,40 @@ function buildWorld() {
     if (windows.count < MAX_WINDOWS) {
       const cyanHouse = rnd() < 0.06;
       const lit = 0.3 + litRoll * 0.45;
+      // who is home tonight: a few houses quieter, most well lit, the odd one blazing. The floor is
+      // high, and windows the layout left dark are lit back from the occupancy stream, so the town
+      // carries at least as many windows as before. (Only `occRnd` decides this: the layout's
+      // `rnd` stream must be consumed exactly as before or every house moves.)
+      const oRoll = occRnd();
+      const occ = oRoll < 0.1 ? 0.55 : oRoll < 0.8 ? 0.8 + occRnd() * 0.2 : 1;
+      const extra = oRoll < 0.1 ? 0.08 : oRoll < 0.8 ? 0.22 : 0.36;
       const cols = Math.max(4, Math.floor((6.283 * rad) / 2.1));
       const phi0 = rnd() * 6.283;
       let row = 0;
       for (let y = 2.0; y < H - 1.3; y += 2.35, row++) {
         for (let k = 0; k < cols; k++) {
-          if (rnd() > lit) continue;
+          if (rnd() > lit) {
+            if (occRnd() < extra) {
+              if (cyanHouse) col.copy(CYAN);
+              else col.setHSL(0.06 + occRnd() * 0.045, 1, 0.5 + occRnd() * 0.06);
+              addWindow(b, phi0 + ((k + (row % 2) * 0.5) / cols) * 6.283, y, 0.5, 1.0, col, 0.45 + occRnd() * 0.75);
+            }
+            continue;
+          }
           if (cyanHouse) col.copy(CYAN);
           else col.setHSL(0.06 + rnd() * 0.045, 1, 0.5 + rnd() * 0.06);
-          addWindow(b, phi0 + ((k + (row % 2) * 0.5) / cols) * 6.283, y, 0.5, 1.0, col, 0.45 + rnd() * 0.75);
+          const mul = 0.45 + rnd() * 0.75;
+          if (occRnd() > occ) continue;
+          addWindow(b, phi0 + ((k + (row % 2) * 0.5) / cols) * 6.283, y, 0.5, 1.0, col, mul);
         }
       }
       // a lit doorway at street level
       const doors = tall ? 3 : 1;
       for (let k = 0; k < doors; k++) {
         col.setHSL(0.075, 1, 0.52);
-        addWindow(b, phi0 + 1 + (k / doors) * 6.283, 0, 0.85, 1.7, col, 1.1);
+        const phi = phi0 + 1 + (k / doors) * 6.283;
+        addWindow(b, phi, 0, 0.85, 1.7, col, 1.1);
+        doorPools.push({ s: s + Math.cos(phi) * (rad + 1.2), z: z + Math.sin(phi) * (rad + 1.2) });
       }
     }
   }
@@ -360,12 +904,17 @@ function buildWorld() {
   const posts = new Inst();
   const bulbs = new Inst();
   const lanterns: { s: number; z: number; cyan: boolean }[] = [];
+  const cones = new Inst();
   const addLantern = (s: number, z: number, cyan: boolean) => {
     if (nearMain(s, z, 3.8)) return;
     lanterns.push({ s, z, cyan });
     posts.add(s, z, 0, 0, 0, 0, 1, 1, 1);
     bulbs.add(s, z, 0, 0, 2.9, 0, 1, 1.25, 1, cyan ? CYAN : GOLD, 1.6);
     addPoint(s, z, 2.9, 3.4, cyan ? CYAN : GOLD, 0.75);
+    if (!cyan) {
+      reflLights.push({ s, z, h: 2.9, c: GOLD.clone(), far: 1 });
+      cones.add(s, z, 0, 0, 0, 0, 1, 1, 1);
+    }
   };
   // along the camera road, alternating sides
   {
@@ -424,6 +973,7 @@ function buildWorld() {
   const arches = new Inst();
   const pillars = new Inst();
   const stone = new THREE.Color().setHSL(0.66, 0.3, 0.42);
+  const arcadeLamps: { s: number; z: number }[] = [];
   for (let d = 108; d <= 172; d += 9.2) {
     const u = d / pathLen;
     path.getPointAt(u, v);
@@ -433,7 +983,13 @@ function buildWorld() {
     pillars.add(v.x, v.z, alpha, 5.4, 0, 0, 1, 1, 1, stone);
     pillars.add(v.x, v.z, alpha, -5.4, 0, 0, 1, 1, 1, stone);
     addPoint(v.x, v.z, 7.35, 3.0, GOLD, 0.9);
+    arcadeLamps.push({ s: v.x, z: v.z });
+    reflLights.push({ s: v.x, z: v.z, h: 7.35, c: GOLD.clone(), far: 1 });
     bulbs.add(v.x, v.z, 0, 0, 7.35, 0, 1, 1.3, 1, GOLD, 1.6);
+    // a string of small festoon bulbs hung under the rib
+    for (const a of [0.55, 1.0, 2.14, 2.59]) {
+      bulbs.add(v.x, v.z, alpha, Math.cos(a) * 4.72, 2.6 + Math.sin(a) * 4.72, 0, 0.42, 0.5, 0.42, GOLD, 1.9);
+    }
   }
 
   // ---------------------------------------------------------------- ground texture
@@ -506,13 +1062,64 @@ function buildWorld() {
   ctx.arc(0, HUT_Z, PLAZA_R, 0, 6.3);
   ctx.arc(C, HUT_Z, PLAZA_R, 0, 6.3);
   ctx.fill();
-  // light pools
+  // contact shadows: every tower sits in a soft dark ring where it meets the cobbles
+  for (const b of buildings) blob(b.s, b.z, b.rad + 2.4, "3,4,16", 0.75);
+  // light pools: lamps and doorways pour soft light onto the street (a falloff, not a disc)
+  const pool = (s: number, z: number, r: number, rgb: string, a: number) => {
+    const s0 = ((s % C) + C) % C;
+    for (let k = -1; k <= 1; k++) {
+      const cx = s0 + k * C;
+      if (cx + r < 0 || cx - r > C) continue;
+      const g = ctx.createRadialGradient(cx, z, 0, cx, z, r);
+      for (let i = 0; i <= 6; i++) {
+        const x = i / 6;
+        g.addColorStop(x, `rgba(${rgb},${(a * Math.exp(-4.2 * x * x) * (1 - x)).toFixed(3)})`);
+      }
+      ctx.fillStyle = g;
+      ctx.fillRect(cx - r, z - r, 2 * r, 2 * r);
+    }
+  };
   ctx.globalCompositeOperation = "lighter";
-  for (const b of buildings) blob(b.s, b.z, b.rad + 4.5, "255,140,50", 0.3);
-  for (const l of lanterns) blob(l.s, l.z, 5.2, l.cyan ? "60,220,255" : "255,170,70", l.cyan ? 0.3 : 0.5);
-  blob(0, HUT_Z, 24, "90,170,255", 0.22);
+  for (const d of doorPools) pool(d.s, d.z, 3.6, "255,150,60", 0.4);
+  for (const l of lanterns) pool(l.s, l.z, l.cyan ? 6 : 6.5, l.cyan ? "60,220,255" : "255,168,72", l.cyan ? 0.8 : 0.75);
+  blob(0, HUT_Z, 24, "90,170,255", 0.14);
   blob(0, HUT_Z - 9, 9, "255,190,110", 0.4);
   ctx.globalCompositeOperation = "source-over";
+
+  // ---------------------------------------------------------------- lamp light map
+  // What the lamps throw on the walls and the plaza, in the same unrolled (s, z) layout as the
+  // ground texture. Shaders look it up at a surface's foot and fade it with height.
+  const LW = 1024;
+  const lightCanvas = document.createElement("canvas");
+  lightCanvas.width = lightCanvas.height = LW;
+  const lctx = lightCanvas.getContext("2d")!;
+  lctx.fillStyle = "#000";
+  lctx.fillRect(0, 0, LW, LW);
+  lctx.setTransform(LW / C, 0, 0, LW / (2 * ZH), 0, LW / 2);
+  lctx.globalCompositeOperation = "lighter";
+  const glow = (s: number, z: number, r: number, rgb: string, a: number) => {
+    const s0 = ((s % C) + C) % C;
+    for (let k = -1; k <= 1; k++) {
+      const cx = s0 + k * C;
+      if (cx + r < 0 || cx - r > C) continue;
+      const g = lctx.createRadialGradient(cx, z, 0, cx, z, r);
+      for (let i = 0; i <= 6; i++) {
+        const x = i / 6;
+        g.addColorStop(x, `rgba(${rgb},${(a * Math.exp(-3.5 * x * x) * (1 - x)).toFixed(3)})`);
+      }
+      lctx.fillStyle = g;
+      lctx.fillRect(cx - r, z - r, 2 * r, 2 * r);
+    }
+  };
+  for (const l of lanterns) glow(l.s, l.z, 6.5, l.cyan ? "70,225,255" : "255,165,70", 1);
+  for (const d of doorPools) glow(d.s, d.z, 3.5, "255,140,50", 0.5);
+  for (const a of arcadeLamps) glow(a.s, a.z, 9, "255,175,85", 0.7);
+  const lightTex = new THREE.CanvasTexture(lightCanvas);
+  lightTex.colorSpace = THREE.SRGBColorSpace;
+  lightTex.flipY = false;
+  lightTex.generateMipmaps = false;
+  lightTex.minFilter = THREE.LinearFilter;
+  lightTex.wrapS = THREE.RepeatWrapping;
 
   // a light blur hides the canvas' gradient dithering when the texture is magnified
   const soft = document.createElement("canvas");
@@ -531,8 +1138,9 @@ function buildWorld() {
   {
     const pos: number[] = [];
     const colr: number[] = [];
+    const rd: number[] = [];
     const idx: number[] = [];
-    const kerb = new THREE.Color("#8a8ce6");
+    const kerb = new THREE.Color("#5b5a82");
     const edge = new THREE.Color("#252a68");
     const mid = new THREE.Color("#3a3f8c");
     const cols = [kerb, kerb, edge, mid, edge, kerb, kerb];
@@ -550,6 +1158,7 @@ function buildWorld() {
         const z = v.z - (t.x / len) * offs[k]!;
         toWorld(s, z, 0.07, wp);
         pos.push(wp.x, wp.y, wp.z);
+        rd.push(u * pathLen, offs[k]!, s, z);
         let warm = 0;
         let cool = 0;
         for (const l of lanterns) {
@@ -561,7 +1170,12 @@ function buildWorld() {
           else warm += g;
         }
         const c = cols[k]!;
-        colr.push(c.r + warm * 0.5 + cool * 0.05, c.g + warm * 0.2 + cool * 0.3, c.b + warm * 0.04 + cool * 0.4);
+        if (c === kerb) {
+          // kerb stone: the lamp pools light it, rather than adding to it
+          colr.push(c.r * (0.8 + warm * 3.2 + cool * 0.6) + warm * 0.05, c.g * (0.8 + warm * 2.1 + cool * 1.6) + warm * 0.02, c.b * (0.8 + warm * 1.1 + cool * 2.2));
+        } else {
+          colr.push(c.r + warm * 0.5 + cool * 0.05, c.g + warm * 0.2 + cool * 0.3, c.b + warm * 0.04 + cool * 0.4);
+        }
       }
       rows++;
     }
@@ -574,6 +1188,7 @@ function buildWorld() {
     }
     roadGeo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
     roadGeo.setAttribute("color", new THREE.Float32BufferAttribute(colr, 3));
+    roadGeo.setAttribute("aRd", new THREE.Float32BufferAttribute(rd, 4));
     roadGeo.setIndex(idx);
   }
 
@@ -698,15 +1313,16 @@ function buildWorld() {
     groundGeo.setIndex(idx);
   }
 
-  const bodyGeo = new THREE.CylinderGeometry(0.88, 1, 1, 12, 1, true).translate(0, 0.5, 0);
+  const bodyGeo = new THREE.CylinderGeometry(0.88, 1, 1, 24, 1, true).translate(0, 0.5, 0);
   {
     const p = bodyGeo.getAttribute("position");
     const c = new Float32Array(p.count * 3);
     for (let i = 0; i < p.count; i++) {
       const top = p.getY(i) > 0.5;
-      c[i * 3] = top ? 0.72 : 1.7;
-      c[i * 3 + 1] = top ? 0.8 : 1.15;
-      c[i * 3 + 2] = top ? 1.05 : 0.8;
+      // a faint warm wash from the street; the lamps' own pools do the rest
+      c[i * 3] = top ? 0.72 : 1.3;
+      c[i * 3 + 1] = top ? 0.8 : 1.0;
+      c[i * 3 + 2] = top ? 1.05 : 0.85;
     }
     bodyGeo.setAttribute("color", new THREE.BufferAttribute(c, 3));
   }
@@ -720,20 +1336,44 @@ function buildWorld() {
     lathe([[1.02, 0], [1.24, 0.38], [1.1, 0.82], [0.58, 1.25], [0.14, 1.62], [0, 2.2]], 12),
     lathe([[1.28, 0], [0.9, 0.26], [0.5, 0.9], [0.22, 1.8], [0.06, 2.8], [0, 3.4]], 12),
   ];
+  // a quad with room round the opening for its halo on the brick; the arched opening, its
+  // reveal, mullion, transom and sill are cut in the shader
   const windowGeo = new THREE.BufferGeometry();
   windowGeo.setAttribute(
     "position",
-    new THREE.Float32BufferAttribute(
-      [-0.5, 0, 0, 0.5, 0, 0, 0.5, 0.62, 0, 0.2, 1, 0, -0.2, 1, 0, -0.5, 0.62, 0],
-      3,
-    ),
+    new THREE.Float32BufferAttribute([-1.3, -0.4, 0, 1.3, -0.4, 0, 1.3, 1.45, 0, -1.3, 1.45, 0], 3),
   );
-  windowGeo.setIndex([0, 1, 2, 0, 2, 5, 5, 2, 3, 5, 3, 4]);
-  const treeGeo = new THREE.IcosahedronGeometry(1, 1);
-  const postGeo = new THREE.CylinderGeometry(0.06, 0.1, 2.75, 5, 1, true).translate(0, 1.375, 0);
-  const bulbGeo = new THREE.IcosahedronGeometry(0.28, 1);
-  const archGeo = new THREE.TorusGeometry(5.4, 0.36, 6, 22, Math.PI);
-  const pillarGeo = new THREE.CylinderGeometry(0.42, 0.52, 2.6, 8, 1, true).translate(0, 1.3, 0);
+  windowGeo.setIndex([0, 1, 2, 0, 2, 3]);
+  // topiary: a smooth, gently lumpy ball (welded so its normals are smooth)
+  const treeGeo = (() => {
+    const g0 = new THREE.IcosahedronGeometry(1, 4);
+    g0.deleteAttribute("normal");
+    g0.deleteAttribute("uv");
+    const g = mergeVertices(g0);
+    const p = g.getAttribute("position");
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i);
+      const y = p.getY(i);
+      const z = p.getZ(i);
+      const k = 1 + 0.045 * Math.sin(3.1 * x + 1.3) * Math.sin(2.7 * y + 0.4) * Math.sin(3.3 * z + 2.1) + 0.025 * Math.sin(6.3 * x + 5.1 * z + 3.7 * y);
+      p.setXYZ(i, x * k, y * k, z * k);
+    }
+    g.computeVertexNormals();
+    return g;
+  })();
+  const postGeo = new THREE.CylinderGeometry(0.06, 0.1, 2.75, 8, 1, true).translate(0, 1.375, 0);
+  const bulbGeo = new THREE.SphereGeometry(0.28, 16, 10);
+  // a soft cone of light under each street lamp, from the head to the cobbles
+  const coneGeo = new THREE.CylinderGeometry(0.2, 1.75, 2.8, 20, 3, true).translate(0, 1.42, 0);
+  const archGeo = new THREE.TorusGeometry(5.4, 0.36, 16, 72, Math.PI);
+  // pillar: plinth, shaft and a moulded capital whose collar swallows the foot of the rib
+  const pillarGeo = lathe(
+    [
+      [0.001, 0], [0.66, 0], [0.66, 0.16], [0.58, 0.22], [0.56, 0.3], [0.5, 0.36], [0.46, 0.5], [0.42, 2.1],
+      [0.46, 2.18], [0.5, 2.24], [0.48, 2.3], [0.55, 2.38], [0.6, 2.5], [0.6, 2.62], [0.52, 2.68], [0.44, 2.86], [0.4, 3.0], [0.001, 3.02],
+    ],
+    32,
+  );
 
   const pointsGeo = new THREE.BufferGeometry();
   pointsGeo.setAttribute("position", new THREE.Float32BufferAttribute(pPos, 3));
@@ -741,29 +1381,107 @@ function buildWorld() {
   pointsGeo.setAttribute("aData", new THREE.Float32BufferAttribute(pData, 4));
 
   // hut
+  // a round wall under a flared eave, then a bell of shingles up to a gold finial
   const hutGeo = lathe(
-    [[4.3, 0], [4.36, 1.5], [4.1, 3.5], [3.4, 5.6], [2.2, 7.4], [0.9, 8.6], [0.25, 9.2], [0.16, 10], [0, 10.3]],
-    28,
+    [
+      [4.3, 0], [4.36, 1.5], [4.32, 3.15], [4.42, 3.26], [4.68, 3.36], [4.7, 3.5], [4.5, 3.6], [4.12, 4.0],
+      [3.55, 5.1], [2.75, 6.4], [1.85, 7.6], [1.05, 8.5], [0.5, 9.0], [0.3, 9.1], [0, 9.12],
+    ],
+    96,
   );
+  const finialGeo2 = lathe(
+    [[0.001, 8.95], [0.5, 8.95], [0.56, 9.08], [0.42, 9.2], [0.2, 9.3], [0.15, 9.42], [0.3, 9.6], [0.32, 9.72],
+      [0.2, 9.86], [0.08, 9.98], [0.06, 10.1], [0.001, 10.12]],
+    32,
+  );
+  // a gold crescent moon cradles the cyan orb
+  const crescentGeo = (() => {
+    const sh = new THREE.Shape();
+    const n = 40;
+    const ro = 0.62;
+    const ri = 0.5;
+    const off = 0.24; // the inner circle is shifted right, so the horns open that way
+    const a0 = Math.acos((ro * ro - ri * ri + off * off) / (2 * ro * off));
+    for (let i = 0; i <= n; i++) {
+      const a = a0 + ((2 * Math.PI - 2 * a0) * i) / n;
+      if (i === 0) sh.moveTo(ro * Math.cos(a), ro * Math.sin(a));
+      else sh.lineTo(ro * Math.cos(a), ro * Math.sin(a));
+    }
+    const b0 = Math.atan2(ro * Math.sin(a0), ro * Math.cos(a0) - off);
+    for (let i = 0; i <= n; i++) {
+      const b = 2 * Math.PI - b0 - ((2 * Math.PI - 2 * b0) * i) / n;
+      sh.lineTo(off + ri * Math.cos(b), ri * Math.sin(b));
+    }
+    return toCreasedNormals(
+      new THREE.ExtrudeGeometry(sh, { depth: 0.04, bevelEnabled: true, bevelThickness: 0.03, bevelSize: 0.03, bevelSegments: 2, curveSegments: 1 }).translate(-0.12, 0, -0.02),
+      0.9,
+    );
+  })();
   const porchGeo = new THREE.CylinderGeometry(3.02, 3.02, 4.6, 32, 1, true).rotateX(Math.PI / 2);
   const frameGeo = new THREE.TorusGeometry(2.86, 0.23, 10, 56);
   const portalGeo = new THREE.CircleGeometry(2.9, 48);
-  const leafGeoL = new THREE.CylinderGeometry(DOOR_R, DOOR_R, 0.12, 24, 1, false, Math.PI, Math.PI)
-    .rotateX(Math.PI / 2)
-    .translate(DOOR_R, 0, 0);
-  const leafGeoR = new THREE.CylinderGeometry(DOOR_R, DOOR_R, 0.12, 24, 1, false, 0, Math.PI)
-    .rotateX(Math.PI / 2)
-    .translate(-DOOR_R, 0, 0);
-  const trimGeoL = new THREE.TorusGeometry(1.7, 0.07, 6, 24, Math.PI).rotateZ(Math.PI / 2).translate(DOOR_R, 0, -0.07);
-  const trimGeoR = new THREE.TorusGeometry(1.7, 0.07, 6, 24, Math.PI).rotateZ(-Math.PI / 2).translate(-DOOR_R, 0, -0.07);
-  const stepGeo = new THREE.CylinderGeometry(1, 1.02, 1.2, 40).translate(0, -0.6, 0);
-  const roundWinGeo = new THREE.CircleGeometry(0.55, 16);
+  // The leaves: thick half-discs with a rounded bevel all round. `aq` keeps door-centred
+  // coordinates for the lattice, which is cut in the shader.
+  const leafGeo = (side: 1 | -1) => {
+    const bev = 0.045;
+    const rr = DOOR_R - bev;
+    const a0 = Math.acos(bev / rr);
+    const shape = new THREE.Shape();
+    const n = 72;
+    for (let i = 0; i <= n; i++) {
+      const a = -a0 + (2 * a0 * i) / n;
+      const x = side * Math.cos(a) * rr;
+      const y = Math.sin(a) * rr;
+      if (i === 0) shape.moveTo(x, y);
+      else shape.lineTo(x, y);
+    }
+    shape.lineTo(side * bev, -Math.sin(a0) * rr);
+    let g: THREE.BufferGeometry = new THREE.ExtrudeGeometry(shape, {
+      depth: LEAF_T - 2 * bev,
+      bevelEnabled: true,
+      bevelThickness: bev,
+      bevelSize: bev,
+      bevelSegments: 4,
+      curveSegments: 1,
+    }).translate(0, 0, -(LEAF_T / 2 - bev));
+    g.deleteAttribute("uv");
+    g = toCreasedNormals(g, 0.9);
+    const pos = g.getAttribute("position");
+    const aq = new Float32Array(pos.count * 2);
+    for (let i = 0; i < pos.count; i++) {
+      aq[i * 2] = pos.getX(i);
+      aq[i * 2 + 1] = pos.getY(i);
+    }
+    g.setAttribute("aq", new THREE.BufferAttribute(aq, 2));
+    return g.translate(-side * DOOR_R, 0, 0);
+  };
+  const leafGeoL = leafGeo(-1);
+  const leafGeoR = leafGeo(1);
+  const trimGeoL = new THREE.TorusGeometry(1.7, 0.06, 8, 48, Math.PI).rotateZ(Math.PI / 2).translate(DOOR_R, 0, -LEAF_T / 2);
+  const trimGeoR = new THREE.TorusGeometry(1.7, 0.06, 8, 48, Math.PI).rotateZ(-Math.PI / 2).translate(-DOOR_R, 0, -LEAF_T / 2);
+  const stepGeo = new THREE.CylinderGeometry(1, 1.02, 1.2, 128).translate(0, -0.6, 0);
+  const roundWinGeo = new THREE.CircleGeometry(0.55, 24);
+  // gold rims round the hut's porthole windows, merged into one draw
+  const winFrameGeo = mergeGeometries(
+    HUT_WINDOWS.map((a) =>
+      new THREE.TorusGeometry(0.6, 0.07, 6, 28)
+        .rotateY(Math.PI / 2 - a)
+        .translate(Math.cos(a) * HUT_WIN_R, HUT_WIN_Y, Math.sin(a) * HUT_WIN_R),
+    ),
+  );
   const beamGeo = new THREE.CylinderGeometry(0.05, 0.2, 56, 8, 1, true).translate(0, 28, 0);
   const beamGeo2 = new THREE.CylinderGeometry(0.4, 1.3, 56, 12, 1, true).translate(0, 28, 0);
   const finialGeo = new THREE.SphereGeometry(0.34, 12, 8);
   const moonGeo = new THREE.CircleGeometry(R + 2, 64);
 
   // ---------------------------------------------------------------- materials
+  const reflU = {
+    uRL: { value: Array.from({ length: REFL_N }, () => new THREE.Vector4()) },
+    uRW: { value: Array.from({ length: REFL_N }, () => new THREE.Vector3()) },
+    uRC: { value: Array.from({ length: REFL_N }, () => new THREE.Vector3()) },
+    uRN: { value: 0 },
+    uEyeG: { value: new THREE.Vector3(0, 0, 4) },
+  };
   const groundMat = new THREE.MeshLambertMaterial({
     map: groundTex,
     emissiveMap: groundTex,
@@ -771,12 +1489,13 @@ function buildWorld() {
     emissiveIntensity: 0.85,
   });
   // Cobbles: fans of setts in the unrolled ground coordinates, fading out where they would shimmer.
-  groundMat.onBeforeCompile = (sh) => {
+  withAir(groundMat, "ground", 0.8, (sh) => {
+    Object.assign(sh.uniforms, reflU);
     sh.vertexShader = sh.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec2 vGs;")
       .replace("#include <begin_vertex>", `#include <begin_vertex>\nvGs = uv * vec2(${C.toFixed(3)}, ${(2 * ZH).toFixed(1)});`);
     sh.fragmentShader = sh.fragmentShader
-      .replace("#include <common>", "#include <common>\nvarying vec2 vGs;")
+      .replace("#include <common>", `#include <common>\nvarying vec2 vGs;\n${WET_GLSL}`)
       .replace(
         "#include <emissivemap_fragment>",
         /* glsl */ `#include <emissivemap_fragment>
@@ -792,23 +1511,153 @@ function buildWorld() {
           float cob = mix(1.0, (0.7 + 0.4 * smoothstep(0.02, 0.2, mortar)) * (0.92 + 0.24 * sett), fade);
           diffuseColor.rgb *= cob;
           totalEmissiveRadiance *= cob;
+          // wet setts: polished tops mirror the lamps, the mortar and the dry patches do not
+          // (not under the plaza, which is drawn over the cobbles)
+          vec2 gz = vec2(vGs.x, vGs.y - ${ZH.toFixed(1)});
+          vec2 gp = vec2(wrapC(gz.x), gz.y - ${HUT_Z.toFixed(1)});
+          vec3 ws = dot(gp, gp) < ${((PLAZA_R - 0.5) ** 2).toFixed(1)} ? vec3(0.0) : wetSheen(gz);
+          if (ws.r + ws.g > 1e-3) {
+            float puddle = smoothstep(0.3, 0.8, vnoise(vGs * vec2(0.22, 0.3) + 7.0));
+            float wet = mix(0.25, 1.0, puddle) * mix(0.7, smoothstep(0.03, 0.14, mortar) * (0.5 + 0.5 * sett), fade);
+            totalEmissiveRadiance += ws * wet * 2.2;
+          }
         }`,
       );
-  };
+  });
   const overlay = { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -6, side: THREE.DoubleSide };
   const roadMat = new THREE.MeshBasicMaterial({ vertexColors: true, ...overlay });
-  const plazaMat = new THREE.MeshBasicMaterial({ map: plazaTex, ...overlay });
-  const bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-  // Towers: brick courses, a string course under every row of windows, a plinth and a cornice.
-  bodyMat.onBeforeCompile = (sh) => {
+  // The carriageway: worn setts in courses across the road, a raised crown, grain, and the wet
+  // shine of every lamp and window near the camera. Along each side a kerb of dressed stone blocks,
+  // bevelled on both arrises, lit by the lamp pools and wet like the setts, with a thin luminous line
+  // on its inner lip so the road still reads as a ribbon from afar.
+  withAir(roadMat, "road", 0.8, (sh) => {
+    Object.assign(sh.uniforms, reflU);
     sh.vertexShader = sh.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vTw;")
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvTw = vec3(atan(position.z, position.x), position.y * length(instanceMatrix[1].xyz), length(instanceMatrix[1].xyz));");
+      .replace("#include <common>", "#include <common>\nattribute vec4 aRd;\nvarying vec4 vRd;\nvarying vec3 vKc;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRd = aRd;")
+      .replace("#include <project_vertex>", "#include <project_vertex>\nvKc = gl_Position.xyw;");
     sh.fragmentShader = sh.fragmentShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vTw;")
+      .replace("#include <common>", `#include <common>\nvarying vec4 vRd;\nvarying vec3 vKc;\n${WET_GLSL}`)
       .replace(
         "#include <color_fragment>",
         /* glsl */ `#include <color_fragment>
+        {
+          float off = vRd.y;
+          float d = vRd.x;
+          float inner = 1.0 - smoothstep(2.32, 2.42, abs(off));
+          vec2 cell = vec2(0.36, 0.25);
+          vec2 p = vec2(off, d) / cell;
+          p.x += 0.5 * mod(floor(p.y), 2.0) + 0.17 * mod(floor(p.y), 3.0);
+          vec2 id = floor(p);
+          vec2 f = fract(p);
+          vec2 e = min(f, 1.0 - f) * cell;
+          float ed = min(e.x, e.y);
+          vec2 fw = fwidth(p) * cell;
+          float px = max(fw.x, fw.y);
+          float fade = 1.0 - smoothstep(0.025, 0.1, px);
+          float mortar = 1.0 - smoothstep(0.012, 0.03 + px, ed);
+          float tone = hashW(id);
+          float dome = smoothstep(0.0, 0.08, ed);
+          float grain = vnoise(vec2(off, d) * vec2(23.0, 17.0));
+          float crown = 1.0 - (off / 2.4) * (off / 2.4);
+          float m = (0.74 + 0.36 * tone) * mix(0.8, 1.04, dome) * (1.0 - 0.6 * mortar);
+          m = mix(1.0, m, fade) * (0.9 + 0.2 * mix(0.5, grain, 1.0 - smoothstep(0.02, 0.06, px)));
+          diffuseColor.rgb *= mix(1.0, m * (0.78 + 0.32 * crown), inner);
+          float puddle = smoothstep(0.3, 0.8, vnoise(vec2(off * 0.7, d * 0.16) + 3.0));
+          float wet = mix(0.35, 1.0, puddle) * mix(0.75, (1.0 - mortar) * (0.45 + 0.55 * tone) * mix(0.8, 1.1, dome), fade);
+          // the kerb: kx runs across it from the road's edge (0) to the verge (1)
+          float kx = clamp((abs(off) - 2.4) / 0.45, 0.0, 1.0);
+          float kpx = fwidth(abs(off)) / 0.45;
+          float kb = d / 0.85 + (off > 0.0 ? 0.37 : 0.0);
+          float kf = fract(kb);
+          float kpd = fwidth(kb);
+          float kFade = 1.0 - smoothstep(0.08, 0.3, max(kpx, kpd * 0.53));
+          float kJoint = (1.0 - smoothstep(0.018, 0.018 + kpd, min(kf, 1.0 - kf))) * kFade;
+          float kTone = hashW(vec2(floor(kb), sign(off)));
+          float bevIn = 1.0 - smoothstep(0.02, 0.17 + kpx, kx);
+          float bevOut = smoothstep(0.86 - kpx, 0.99, kx);
+          float kTop = (1.0 - bevIn) * (1.0 - bevOut);
+          float kGrain = vnoise(vec2(off, d) * vec2(31.0, 13.0));
+          float ks = mix(1.0, (0.82 + 0.3 * kTone) * (0.9 + 0.2 * kGrain) * (kTop + 1.25 * bevIn + 0.55 * bevOut) * (1.0 - 0.65 * kJoint), kFade);
+          // from far off the stones merge into a soft lavender band
+          vec3 kFar = vec3(0.24, 0.24, 0.55) + diffuseColor.rgb * 0.5;
+          vec3 kc = mix(diffuseColor.rgb * ks, kFar, smoothstep(0.12, 0.5, kpx));
+          // Beyond a few metres the luminous lip holds a width on screen (6 px of a 1080-line frame,
+          // whatever the resolution) and brightens, and once the kerb is only a few pixels wide it
+          // floods it: the two edges draw the road through the town from afar and in the portal
+          // thumbnail, while a kerb near the lens and wide on screen stays stone. Both ramp smoothly,
+          // so there is no band.
+          float kRes = 540.0 * fwidth(vKc.y / vKc.z);
+          float kpx1 = kpx / max(kRes, 1e-4);
+          float kNear = smoothstep(4.5, 11.0, 1.0 / gl_FragCoord.w) * smoothstep(0.025, 0.06, kpx1);
+          vec3 kLit = vec3(0.26, 0.27, 0.8) + max(diffuseColor.rgb - vec3(0.084, 0.082, 0.178), 0.0) * 1.5;
+          kc = mix(kc, kLit, smoothstep(0.035, 0.15, kpx1) * kNear);
+          // a gutter of shade along the foot of the kerb, on the road side
+          float gutter = smoothstep(2.12, 2.4, abs(off)) * inner;
+          diffuseColor.rgb *= 1.0 - 0.45 * gutter;
+          diffuseColor.rgb = mix(diffuseColor.rgb, kc, 1.0 - inner);
+          // the luminous lip: at the lens thin and never thinner than a pixel, a little dimmer when
+          // it has to widen; beyond, a held line on the inner arris
+          float lwN = max(0.05, kpx * 1.5);
+          float lw = mix(lwN, clamp(kpx1 * 6.0, 0.05, 1.0), kNear);
+          float lc = max(0.07, lw * 0.5);
+          float lip = (1.0 - smoothstep(lw * 0.5 - kpx * 0.5, lw * 0.5 + kpx * 0.5, abs(kx - lc))) * mix(sqrt(0.05 / lwN), 1.0, kNear) * (1.0 - inner);
+          diffuseColor.rgb += mix(vec3(0.55, 0.55, 1.1), vec3(0.6, 0.62, 1.3), kNear) * lip;
+          float kWet = mix(0.6, kTop * (1.0 - kJoint) * (0.6 + 0.5 * kTone), kFade);
+          diffuseColor.rgb += wetSheen(vRd.zw) * mix(kWet * 1.5, wet * 2.4, inner);
+        }`,
+      );
+  });
+  const lampUniform = { value: lightTex };
+  const plazaMat = new THREE.MeshBasicMaterial({ map: plazaTex, ...overlay });
+  // the cyan ring of plaza lamps lights the paving under it
+  withAir(plazaMat, "plaza", 0.8, (sh) => {
+    sh.uniforms.uLamp = lampUniform;
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vWp;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>\nvarying vec3 vWp;\n${LAMP_PARS}`)
+      .replace(
+        "#include <map_fragment>",
+        `#include <map_fragment>
+        { vec3 L = lampAt(vWp); diffuseColor.rgb += diffuseColor.rgb * L * 2.0 + L * 0.32; }
+        // the hut's stepped base sits on the paving: a soft contact shadow round its foot
+        diffuseColor.rgb *= mix(0.45, 1.0, smoothstep(${STEP_R[0]!.toFixed(2)}, ${(STEP_R[0]! + 1.5).toFixed(2)}, length(vec2(vWp.x, vWp.z - ${HUT_Z.toFixed(1)}))) + step(0.0, vWp.y));`,
+      );
+  });
+  const bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  // Towers: brick courses, a string course under every row of windows, a plinth and a cornice.
+  // Far towers lose their masonry into the air; lamps light the foot of the nearest walls.
+  withAir(bodyMat, "body", 0.75, (sh) => {
+    sh.uniforms.uLamp = lampUniform;
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vTw;\nvarying vec3 vLp;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        vTw = vec3(atan(position.z, position.x), position.y * length(instanceMatrix[1].xyz), length(instanceMatrix[1].xyz));
+        {
+          mat4 iw = modelMatrix * instanceMatrix;
+          // the light map is read a step out from the wall, so a lamp lights the face that sees it
+          vLp = (iw * vec4(transformed, 1.0)).xyz + normalize(mat3(iw) * vec3(position.x, 0.0, position.z)) * 1.3;
+        }`,
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>\nvarying vec3 vTw;\nvarying vec3 vLp;\n${LAMP_PARS}\n${BUMP_GLSL}`)
+      .replace(
+        "#include <emissivemap_fragment>",
+        `#include <emissivemap_fragment>
+        {
+          vec3 L = lampAt(vLp) * (1.0 - smoothstep(0.3, 7.0, vTw.y));
+          totalEmissiveRadiance += (diffuseColor.rgb * 1.8 + 0.05) * L;
+        }`,
+      )
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = bumpV(-vViewPosition, normal, brickH, faceDirection);")
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        float brickH = 0.0;
         {
           float h = vTw.y;
           float px = fwidth(h) + 1e-4;
@@ -819,56 +1668,359 @@ function buildWorld() {
           float fx = fract(bx);
           float joint = 1.0 - smoothstep(0.03, 0.03 + px, min(min(fy, 1.0 - fy) * 0.42, min(fx, 1.0 - fx) * 0.5));
           float tone = fract(sin(dot(vec2(floor(bx), row), vec2(12.99, 78.23))) * 43758.5);
-          float m = (0.9 + 0.22 * tone) * (1.0 - 0.25 * joint);
+          float m = (0.9 + 0.22 * tone) * (1.0 - 0.25 * joint) * (1.0 + 0.14 * smoothstep(0.62, 0.92, fy) * (1.0 - joint));
           // mouldings: the windows sit on rows 2.35 apart, starting at 2.0
           float course = 1.0 - smoothstep(0.09, 0.09 + px, abs(fract((h - 1.62) / 2.35 + 0.5) - 0.5) * 2.35);
           float crown = smoothstep(vTw.z - 0.75, vTw.z - 0.7, h);
           float dentil = step(0.5, fract(vTw.x * 7.0)) * step(vTw.z - 0.38, h);
           m = mix(m, 1.5, max(course * step(1.0, h), crown * (1.0 - 0.3 * dentil)));
           m *= mix(0.7, 1.0, smoothstep(0.62, 0.68, h));
+          #ifdef USE_FOG
+            fade *= 1.0 - 0.9 * smoothstep(0.0, 0.55, ${EXT_GLSL});
+          #endif
           diffuseColor.rgb *= mix(1.0, m, fade);
+          brickH = (-0.014 * joint + 0.03 * course * step(1.0, h)) * fade;
+          diffuseColor.rgb *= mix(0.3, 1.0, smoothstep(0.0, 2.2, h)); // contact shade at the foot
+          #ifdef USE_FOG
+            // overhead, a tower brightens towards its tip: it stands out of the darker street it hangs from
+            diffuseColor.rgb *= 1.0 + 0.8 * smoothstep(0.35, 0.75, ${EXT_GLSL}) * smoothstep(0.15, 1.0, h / vTw.z);
+          #endif
         }`,
       );
-  };
+  }, true);
   const domeMat = new THREE.MeshLambertMaterial({ emissive: "#0a0d30" });
   // Roofs: overlapping round shingles, a pale ridge at every hem.
   domeMat.defines = { USE_UV: "" };
-  domeMat.onBeforeCompile = (sh) => {
-    sh.fragmentShader = sh.fragmentShader.replace(
+  withAir(domeMat, "dome", 0.75, (sh) => {
+    sh.fragmentShader = sh.fragmentShader.replace("#include <common>", `#include <common>\n${SHINGLE_GLSL}`).replace(
       "#include <color_fragment>",
       /* glsl */ `#include <color_fragment>
       {
         vec2 sv = vec2(vUv.x * 20.0, vUv.y * 11.0);
         float fade = 1.0 - smoothstep(0.1, 0.6, length(fwidth(sv)));
-        sv.x += 0.5 * mod(floor(sv.y), 2.0);
-        vec2 f = fract(sv);
-        float d = length(vec2(f.x - 0.5, max(0.5 - f.y, 0.0)));
-        float tile = smoothstep(0.52, 0.44, d);
-        float hem = tile * smoothstep(0.34, 0.44, d);
-        float tone = fract(sin(dot(floor(sv), vec2(12.99, 78.23))) * 43758.5);
-        diffuseColor.rgb *= mix(1.0, mix(0.5, (0.8 + 0.5 * f.y) * (0.88 + 0.24 * tone), tile) + 0.5 * hem, fade);
+        #ifdef USE_FOG
+          fade *= 1.0 - 0.85 * smoothstep(0.0, 0.55, ${EXT_GLSL});
+        #endif
+        diffuseColor.rgb *= mix(1.0, shingle(sv).x, fade);
       }`,
     );
-  };
-  const windowMat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
-  const treeMat = new THREE.MeshLambertMaterial({ emissive: "#03141a" });
-  const postMat = new THREE.MeshLambertMaterial({ color: "#3a3f78" });
-  const bulbMat = new THREE.MeshBasicMaterial();
-  const stoneMat = new THREE.MeshLambertMaterial({ emissive: "#0c0f33" });
-  const hutMat = new THREE.MeshLambertMaterial({ color: "#c9cdf2", emissive: "#1c2256" });
-  const goldMat = new THREE.MeshLambertMaterial({ color: "#ffc66a", emissive: "#d98a25", emissiveIntensity: 0.9 });
-  const leafMat = new THREE.MeshLambertMaterial({ color: "#3b2f7d", emissive: "#120c3a" });
-  const roundWinMat = new THREE.MeshBasicMaterial({ color: new THREE.Color("#ffb347").multiplyScalar(1.6), side: THREE.DoubleSide });
-  const beamMat = new THREE.MeshBasicMaterial({
-    color: "#7fefff",
+  }, true);
+  // premultiplied: the opening covers the wall, the halo adds light to it
+  const windowMat = new THREE.MeshBasicMaterial({
+    side: THREE.DoubleSide,
     transparent: true,
-    opacity: 0.55,
+    depthWrite: false,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.OneMinusSrcAlphaFactor,
+    blendSrcAlpha: THREE.ZeroFactor,
+    blendDstAlpha: THREE.OneFactor,
+  });
+  windowAir(windowMat);
+  const treeMat = new THREE.MeshLambertMaterial({ emissive: "#03141a" });
+  // Topiary: clipped leaf scales over a smooth ball, lit from above, with a warm rim where a lamp is near.
+  withAir(treeMat, "tree", 0.85, (sh) => {
+    sh.uniforms.uLamp = lampUniform;
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vLo;\nvarying vec3 vLp;\nvarying vec2 vSc;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        vLo = position;
+        vSc = vec2(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz));
+        {
+          mat4 iw = modelMatrix * instanceMatrix;
+          vLp = (iw * vec4(transformed, 1.0)).xyz + normalize(mat3(iw) * vec3(position.x, 0.0, position.z)) * 1.6;
+        }`,
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>\nvarying vec3 vLo;\nvarying vec3 vLp;\nvarying vec2 vSc;\n${LAMP_PARS}\n${BUMP_GLSL}\n${SHINGLE_GLSL}`)
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        float leafH = 0.0;
+        {
+          vec3 n = normalize(vLo);
+          float th = acos(clamp(n.y, -1.0, 1.0));
+          float sn = sin(th);
+          // leaves about 0.17 across whatever the bush's size; fewer round the crown so they keep their shape
+          float N = floor(vSc.x * 36.0) * exp2(clamp(floor(log2(sn * 1.3 + 1e-3)), -3.0, 0.0));
+          vec2 sv = vec2((atan(n.z, n.x) * 0.159155 + 0.5) * N, (3.14159 - th) * vSc.y * 6.0);
+          vec2 sh = shingle(sv);
+          float fade = 1.0 - smoothstep(0.15, 0.7, length(fwidth(sv)));
+          #ifdef USE_FOG
+            fade *= 1.0 - smoothstep(0.0, 0.4, ${EXT_GLSL});
+          #endif
+          diffuseColor.rgb *= mix(1.0, 0.4 + 0.75 * sh.x, fade);
+          leafH = 0.03 * sh.y * fade;
+          diffuseColor.rgb *= mix(0.32, 1.5, smoothstep(-0.8, 0.95, n.y));
+        }`,
+      )
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = bumpV(-vViewPosition, normal, leafH, faceDirection);")
+      .replace(
+        "#include <lights_fragment_end>",
+        `#include <lights_fragment_end>
+        {
+          vec3 Lw = lampAt(vLp);
+          float g = 1.0 - clamp(abs(dot(normal, normalize(vViewPosition))), 0.0, 1.0);
+          totalEmissiveRadiance += Lw * (diffuseColor.rgb * 1.2 + 0.7 * g * g) + vec3(1.0, 0.62, 0.3) * 0.1 * g * g * g;
+        }`,
+      );
+  });
+  const postMat = new THREE.MeshLambertMaterial({ color: "#3a3f78" });
+  withAir(postMat, "post", 0.85);
+  const bulbMat = new THREE.MeshBasicMaterial();
+  // a round glass head: white-hot where it faces the eye, its own colour falling off to the limb
+  withAir(bulbMat, "bulb", 0.6, (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vNv;\nvarying vec3 vVv;")
+      .replace(
+        "#include <project_vertex>",
+        "#include <project_vertex>\nvNv = normalMatrix * (mat3(instanceMatrix) * normal);\nvVv = -mvPosition.xyz;",
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vNv;\nvarying vec3 vVv;")
+      .replace(
+        "#include <color_fragment>",
+        `#include <color_fragment>
+        {
+          float ndv = clamp(abs(dot(normalize(vNv), normalize(vVv))), 0.0, 1.0);
+          diffuseColor.rgb *= 0.3 + 1.6 * ndv * ndv;
+          diffuseColor.rgb += vec3(1.0, 0.9, 0.75) * 1.6 * smoothstep(0.55, 0.95, ndv) * dot(diffuseColor.rgb, vec3(0.3));
+        }`,
+      );
+  });
+  const stoneMat = new THREE.MeshLambertMaterial({ emissive: "#0c0f33" });
+  stoneMat.defines = { USE_UV: "" };
+  // Arch ribs: dressed voussoirs with a raised keystone, warm on the underside where the lamps hang.
+  withAir(stoneMat, "arch", 0.85, (sh) => {
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>\n${BUMP_GLSL}`)
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        float stoneH = 0.0;
+        float under = 0.0;
+        {
+          float a = vUv.x * 19.0;
+          float k = floor(a);
+          float f = fract(a);
+          float pxa = fwidth(a) + 1e-4;
+          float joint = 1.0 - smoothstep(0.0, 0.04 + pxa, min(f, 1.0 - f));
+          float key = 1.0 - step(0.5, abs(k - 9.0));
+          float tone = fract(sin(k * 12.99) * 43758.5);
+          float rnd = cos(vUv.y * 6.2832);
+          // a moulded band along each face of the rib
+          float band = 1.0 - smoothstep(0.02, 0.05, abs(abs(fract(vUv.y + 0.25) - 0.5) - 0.25));
+          diffuseColor.rgb *= (0.86 + 0.22 * tone) * (1.0 - 0.45 * joint) * (1.0 + 0.18 * key) * (1.0 + 0.12 * band);
+          stoneH = -0.02 * joint + 0.03 * key * (1.0 - joint) + 0.012 * band;
+          under = smoothstep(0.1, -0.9, rnd);
+          diffuseColor.rgb *= mix(1.0, 0.75, under);
+        }`,
+      )
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = bumpV(-vViewPosition, normal, stoneH, faceDirection);")
+      .replace(
+        "#include <lights_fragment_end>",
+        `#include <lights_fragment_end>
+        {
+          // the lamp under the crown and the festoon bulbs warm the soffit
+          float x = vUv.x;
+          float w = exp(-pow((x - 0.5) / 0.07, 2.0)) * 1.2
+            + exp(-pow((x - 0.175) / 0.04, 2.0)) + exp(-pow((x - 0.318) / 0.04, 2.0))
+            + exp(-pow((x - 0.682) / 0.04, 2.0)) + exp(-pow((x - 0.825) / 0.04, 2.0));
+          totalEmissiveRadiance += vec3(1.0, 0.6, 0.26) * (diffuseColor.rgb * 1.4 + 0.04) * w * (0.25 + 0.75 * under);
+        }`,
+      );
+  }, true);
+  const pillarMat = new THREE.MeshLambertMaterial({ emissive: "#0c0f33" });
+  // Piers: ashlar courses, a dark contact at the foot and a shaded collar under the capital.
+  withAir(pillarMat, "pillar", 0.85, (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec2 vPy;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvPy = vec2(position.y, atan(position.z, position.x));");
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>\nvarying vec2 vPy;\n${BUMP_GLSL}`)
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        float pierH = 0.0;
+        {
+          float y = vPy.x;
+          float row = floor(y / 0.38);
+          float fy = fract(y / 0.38);
+          float bx = vPy.y * 1.2732 + 0.5 * mod(row, 2.0);
+          float px = fwidth(y / 0.38) + 1e-4;
+          float shaft = step(0.5, y) * step(y, 2.1);
+          float joint = shaft * (1.0 - smoothstep(0.0, 0.05 + px, min(min(fy, 1.0 - fy), min(fract(bx), 1.0 - fract(bx)) * 0.6)));
+          float tone = fract(sin(dot(vec2(floor(bx), row), vec2(12.99, 78.23))) * 43758.5);
+          diffuseColor.rgb *= (0.88 + 0.2 * tone * shaft) * (1.0 - 0.4 * joint);
+          diffuseColor.rgb *= mix(0.4, 1.0, smoothstep(0.0, 0.5, y));             // on the cobbles
+          diffuseColor.rgb *= 1.0 - 0.45 * smoothstep(1.8, 2.2, y) * (1.0 - smoothstep(2.2, 2.32, y)); // under the collar
+          diffuseColor.rgb *= 1.0 - 0.35 * smoothstep(2.62, 2.75, y);             // the rib's seat, in shade
+          pierH = -0.015 * joint;
+        }`,
+      )
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = bumpV(-vViewPosition, normal, pierH, faceDirection);");
+  }, true);
+  // the soft cone a street lamp throws down onto the cobbles
+  const coneMat = new THREE.ShaderMaterial({
+    uniforms: { uCol: { value: new THREE.Color("#ffb860") } },
+    vertexShader: /* glsl */ `
+      varying vec3 vN;
+      varying vec3 vV;
+      varying float vY;
+      void main() {
+        vec4 mv = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+        vN = normalize(normalMatrix * (mat3(instanceMatrix) * normal));
+        vV = -mv.xyz;
+        vY = position.y / 2.84;
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uCol;
+      varying vec3 vN;
+      varying vec3 vV;
+      varying float vY;
+      void main() {
+        float d = length(vV);
+        float ndv = abs(dot(normalize(vN), vV / d));
+        float a = ndv * ndv * (0.35 + 0.65 * vY * vY) * smoothstep(0.0, 0.25, vY) * smoothstep(1.0, 0.9, vY);
+        a *= smoothstep(1.5, 5.0, d) * (1.0 - smoothstep(25.0, 140.0, d));
+        gl_FragColor = vec4(uCol * a * 0.26, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
     blending: THREE.AdditiveBlending,
+    transparent: true,
     depthWrite: false,
     side: THREE.DoubleSide,
   });
-  const beamMat2 = beamMat.clone();
-  beamMat2.opacity = 0.07;
+  const hutMat = new THREE.MeshLambertMaterial({ color: "#c9cdf2", emissive: "#1c2256" });
+  // Hut: an ashlar wall darkening into its footing, a gold bead under the eave, a shingled bell.
+  hutShader(
+    hutMat,
+    "body",
+    /* glsl */ `
+    // the porch tube runs out through the eave to the gate: nothing of the hut inside it
+    if (vHp.z < 0.0 && length(vHp.xy - vec2(0.0, ${DOOR_H.toFixed(2)})) < 3.0) discard;
+    float y = vHp.y;
+    float rr = length(vHp.xz);
+    float aa = atan(vHp.z, vHp.x);
+    float h = 0.0;
+    if (y < 3.2) {
+      float row = floor(y / 0.46);
+      float bx = aa * (4.34 / 0.92) + 0.5 * mod(row, 2.0);
+      float fy = fract(y / 0.46);
+      float jd = min(min(fy, 1.0 - fy) * 0.46, min(fract(bx), 1.0 - fract(bx)) * 0.92);
+      float joint = 1.0 - smoothstep(0.012, 0.03, jd);
+      float tone = hash12(vec2(floor(bx), row));
+      diffuseColor.rgb *= (0.9 + 0.14 * tone) * (1.0 - 0.3 * joint);
+      h = -0.012 * joint;
+      diffuseColor.rgb *= mix(0.35, 1.0, smoothstep(${STEP_Y[2]!.toFixed(2)}, 1.9, y)); // its footing in the step
+    } else if (y < 3.62) {
+      diffuseColor.rgb = vec3(0.3, 0.27, 0.62);
+      float bead = 1.0 - smoothstep(0.02, 0.02 + fwidth(y) * 1.5, abs(y - 3.43));
+      hutGlow += vec3(1.0, 0.66, 0.3) * 1.3 * bead;
+    } else {
+      float N = 9.0 * exp2(clamp(floor(log2(rr / 0.62)), 0.0, 2.0));
+      vec2 sh = shingle(vec2(aa * 0.15915 * N, (y - 3.62) / 0.4));
+      diffuseColor.rgb = vec3(0.4, 0.36, 0.86) * sh.x;
+      h = 0.035 * sh.y;
+      diffuseColor.rgb *= mix(0.55, 1.0, smoothstep(3.62, 4.3, y)); // under the eave
+    }
+    normal = bumpN(-vViewPosition, normal, h, faceDirection);`,
+    0.9,
+    0.55,
+  );
+  const porchMat = new THREE.MeshLambertMaterial({ color: "#b4b8ea", emissive: "#1c2256" });
+  hutShader(porchMat, "porch", "", 1.2, 0.4);
+  // Base: masonry tiers, each tread shaded where the tier above stands on it, each riser where it
+  // meets the tread below, and the hut's own contact shadow on the top tread.
+  const stepMat = new THREE.MeshLambertMaterial({ color: "#bfc3ee", emissive: "#161b4a" });
+  hutShader(
+    stepMat,
+    "step",
+    /* glsl */ `
+    vec3 n0 = inverseTransformDirection(normal, viewMatrix);
+    float rr = length(vHp.xz);
+    float aa = atan(vHp.z, vHp.x);
+    float y = vHp.y;
+    float h = 0.0;
+    float ao = 1.0;
+    float joint = 0.0;
+    float tone = 0.5;
+    if (n0.y > 0.6) {
+      float i = clamp(floor((y - ${STEP_Y[0]!.toFixed(2)}) / 0.2 + 0.5), 0.0, 2.0);
+      float rOut = ${STEP_R[0]!.toFixed(2)} - 0.9 * i;
+      float rIn = i < 1.5 ? rOut - 0.9 : 4.36;
+      float bx = aa * (rOut - 0.45) / 1.1 + 0.37 * i;
+      float ring = i < 1.5 ? 0.0 : 1.0;
+      float fr = (rr - rIn) / (rOut - rIn);
+      float jd = min(min(fract(bx), 1.0 - fract(bx)) * 1.1, ring > 0.5 ? abs(fr - 0.5) * (rOut - rIn) : 9.0);
+      joint = 1.0 - smoothstep(0.012, 0.035, jd);
+      tone = hash12(vec2(floor(bx), i + step(0.5, fr) * ring * 7.0));
+      ao = mix(i < 1.5 ? 0.45 : 0.25, 1.0, smoothstep(0.0, i < 1.5 ? 0.55 : 1.4, rr - rIn));
+      ao *= 1.0 + 0.22 * smoothstep(rOut - 0.1, rOut - 0.015, rr); // worn bright arris
+    } else {
+      float i = clamp(floor((${STEP_R[0]!.toFixed(2)} - rr) / 0.9 + 0.5), 0.0, 2.0);
+      float yTop = ${STEP_Y[0]!.toFixed(2)} + 0.2 * i;
+      float yb = i < 0.5 ? 0.0 : yTop - 0.2;
+      float bx = aa * (${STEP_R[0]!.toFixed(2)} - 0.9 * i) / 0.75 + 0.5 * mod(i, 2.0);
+      joint = 1.0 - smoothstep(0.01, 0.03, min(fract(bx), 1.0 - fract(bx)) * 0.75);
+      tone = hash12(vec2(floor(bx), i + 13.0));
+      ao = mix(0.4, 1.0, smoothstep(yb, yb + 0.16, y));
+      ao *= 1.0 + 0.25 * smoothstep(yTop - 0.05, yTop - 0.005, y);
+    }
+    diffuseColor.rgb *= (0.88 + 0.18 * tone) * (1.0 - 0.35 * joint) * ao;
+    h = -0.01 * joint;
+    normal = bumpN(-vViewPosition, normal, h, faceDirection);`,
+    1.0,
+  );
+  const goldMat = new THREE.MeshLambertMaterial({ color: "#ffc66a", emissive: "#d98a25", emissiveIntensity: 0.9 });
+  // Leaves: indigo enamel in a gilded frame, a sunburst engraved behind a pierced crescent moon,
+  // stars and a ring of round piercings. The cut-outs glow gold, hot enough to bloom.
+  const leafMat = new THREE.MeshLambertMaterial({ color: "#33296e", emissive: "#0e0a30" });
+  hutShader(
+    leafMat,
+    "leaf",
+    /* glsl */ `
+    vec2 q = vec2(abs(vQ.x), vQ.y);
+    float rho = length(q);
+    float ang = atan(q.y, q.x);
+    float cap = smoothstep(0.8, 0.97, abs(vNz));
+    vec2 c1 = vec2(0.98, 0.4);
+    float moon = max(length(q - c1) - 0.56, -(length(q - c1 - vec2(-0.22, 0.16)) - 0.47));
+    float stars = min(
+      min(sdStar(q - vec2(0.8, -0.62), 0.36), sdStar(q - vec2(1.34, -0.28), 0.17)),
+      min(sdStar(q - vec2(0.44, -1.2), 0.2), sdStar(q - vec2(0.36, 0.06), 0.14)));
+    float k = clamp(floor(ang / 0.17 + 0.5), -8.0, 8.0);
+    float dots = length(q - 2.07 * vec2(cos(k * 0.17), sin(k * 0.17))) - 0.075;
+    float hole = min(min(moon, stars), dots);
+    float fw = fwidth(hole) + 1e-4;
+    float cut = (1.0 - smoothstep(-fw, fw, hole)) * cap;
+    // relief: a raised gilded frame and stile, sunburst rays engraved inside the gold arc
+    float fr = fwidth(rho) + 1e-4;
+    float frame = max(smoothstep(2.4 - fr, 2.45 + fr, rho), smoothstep(0.22 + fr, 0.16 - fr, q.x));
+    float perp = rho * abs(fract(ang / 0.1309 + 0.5) - 0.5) * 0.1309;
+    float groove = (1.0 - smoothstep(0.008, 0.02 + fwidth(perp), perp)) * smoothstep(0.3, 0.45, rho) * smoothstep(1.6, 1.5, rho);
+    float lip = smoothstep(0.0, 0.045, hole);
+    float h = (0.028 * frame - 0.008 * groove) * lip - 0.014 * (1.0 - lip);
+    h *= cap;
+    normal = bumpN(-vViewPosition, normal, h, faceDirection);
+    vec3 gilt = vec3(0.46, 0.27, 0.07);
+    float gild = max(frame * cap, 1.0 - cap);
+    diffuseColor.rgb = mix(diffuseColor.rgb * (0.92 + 0.16 * hash12(floor(q * 7.0))), gilt, gild);
+    diffuseColor.rgb *= 1.0 - 0.4 * groove * cap;
+    hutGlow += vec3(1.0, 0.62, 0.26) * (0.18 * groove + 0.45 * (1.0 - lip)) * cap;
+    hutGlow += vec3(1.0, 0.66, 0.3) * 2.8 * cut;
+    diffuseColor.rgb *= 1.0 - cut;`,
+    0.75,
+    0,
+    true,
+  );
+  const roundWinMat = new THREE.MeshBasicMaterial({ color: new THREE.Color("#ffb347").multiplyScalar(1.6), side: THREE.DoubleSide });
+  const beamMat = beamMaterial(0.55, R);
+  const beamMat2 = beamMaterial(0.07, R);
   const finialMat = new THREE.MeshBasicMaterial({ color: new THREE.Color("#8ff2ff").multiplyScalar(1.5) });
 
   const pointsMat = new THREE.ShaderMaterial({
@@ -909,35 +2061,7 @@ function buildWorld() {
   });
 
   const fogC = new THREE.Color(FOG_COLOR);
-  const moonMat = new THREE.ShaderMaterial({
-    uniforms: { uFog: { value: fogC } },
-    vertexShader: /* glsl */ `
-      varying vec2 vP;
-      void main() {
-        vP = position.xy / ${R.toFixed(1)};
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      uniform vec3 uFog;
-      varying vec2 vP;
-      void main() {
-        float r = length(vP);
-        float disc = smoothstep(0.335, 0.32, r);
-        float shade = mix(0.72, 1.0, smoothstep(-0.35, 0.3, vP.x * 0.6 + vP.y));
-        float halo = exp(-max(r - 0.32, 0.0) * 5.5);
-        float rings = 0.5 + 0.5 * cos(r * 60.0);
-        vec3 col = uFog * (1.0 + 0.25 * rings * smoothstep(0.34, 0.5, r));
-        col += vec3(0.16, 0.42, 0.62) * halo * (1.0 - disc);
-        col = mix(col, vec3(0.80, 0.95, 1.0) * shade * 1.15, disc);
-        gl_FragColor = vec4(col, 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `,
-    fog: false,
-    side: THREE.DoubleSide,
-  });
+  const moonMat = moonMaterial({ R, fogColor: fogC });
 
   const sky = createSky({ R, fogColor: fogC, fogNear: FOG_NEAR, fogFar: FOG_FAR }, pointsMat);
 
@@ -945,20 +2069,80 @@ function buildWorld() {
     path,
     pathLen,
     sky,
-    inst: { bodies, domes, windows, trees, posts, bulbs, arches, pillars },
+    inst: { bodies, domes, windows, trees, posts, bulbs, arches, pillars, cones },
+    reflLights,
+    reflU,
     geo: {
-      groundGeo, bodyGeo, domeGeos, windowGeo, treeGeo, postGeo, bulbGeo, archGeo, pillarGeo, pointsGeo,
+      groundGeo, bodyGeo, domeGeos, windowGeo, treeGeo, postGeo, bulbGeo, archGeo, pillarGeo, pointsGeo, coneGeo,
       roadGeo, plazaGeo, hutGeo, porchGeo, frameGeo, portalGeo, leafGeoL, leafGeoR, trimGeoL, trimGeoR, stepGeo, roundWinGeo,
-      beamGeo, beamGeo2, finialGeo, moonGeo,
+      winFrameGeo, beamGeo, beamGeo2, finialGeo, finialGeo2, crescentGeo, moonGeo,
     },
     mat: {
-      groundMat, bodyMat, domeMat, windowMat, treeMat, postMat, bulbMat, stoneMat, hutMat, goldMat, leafMat,
+      groundMat, bodyMat, domeMat, windowMat, treeMat, postMat, bulbMat, stoneMat, pillarMat, coneMat, hutMat, porchMat, stepMat, goldMat, leafMat,
       roadMat, plazaMat, roundWinMat, beamMat, beamMat2, finialMat, pointsMat, moonMat,
     },
   };
 }
 
 type World = ReturnType<typeof buildWorld>;
+
+/**
+ * Chooses the lights the wet street mirrors for a camera pose: the REFL_N nearest (those behind
+ * the camera count as further away). Each fades out as it nears the distance of the first light
+ * left out, so the choice changes without a pop as the camera moves.
+ */
+function createReflectionPicker({ reflLights, reflU }: World) {
+  const n = reflLights.length;
+  const score = new Float32Array(n);
+  const best = new Int32Array(REFL_N + 1);
+  return (eye: THREE.Vector3, look: THREE.Vector3) => {
+    const es = Math.atan2(eye.x, -eye.y) * R;
+    const ez = eye.z;
+    let fs = wrapS(Math.atan2(look.x, -look.y) * R - es);
+    let fz = look.z - ez;
+    const fl = Math.hypot(fs, fz) || 1;
+    fs /= fl;
+    fz /= fl;
+    const eh = Math.max(0.5, R - Math.hypot(eye.x, eye.y));
+    reflU.uEyeG.value.set(es, ez, eh);
+    let m = 0;
+    for (let i = 0; i < n; i++) {
+      const l = reflLights[i]!;
+      const ds = wrapS(l.s - es);
+      const dz = l.z - ez;
+      const d = (Math.hypot(ds, dz) + 2.5 * Math.max(0, -(ds * fs + dz * fz))) * l.far;
+      score[i] = d;
+      if (d > 52) continue;
+      // insert into the sorted short list
+      if (m > REFL_N && d >= score[best[REFL_N]!]!) continue;
+      let j = Math.min(m, REFL_N);
+      while (j > 0 && score[best[j - 1]!]! > d) {
+        best[j] = best[j - 1]!;
+        j--;
+      }
+      best[j] = i;
+      if (m <= REFL_N) m++;
+    }
+    const far = m > REFL_N ? Math.min(52, score[best[REFL_N]!]!) : 52;
+    const band = Math.max(2, Math.min(10, far * 0.4));
+    const count = Math.min(m, REFL_N);
+    reflU.uRN.value = count;
+    for (let k = 0; k < count; k++) {
+      const l = reflLights[best[k]!]!;
+      const w = smooth((far - score[best[k]!]!) / band);
+      // The mirror image sits where the line from the eye to the lamp's reflection meets the
+      // street; the streak runs back from there to the lamp's foot and a little on towards the eye.
+      const fs = wrapS(es - l.s);
+      const fz2 = ez - l.z;
+      const D = Math.hypot(fs, fz2) + 1e-3;
+      const kk = l.h / (l.h + eh);
+      const dX = D * (1 - kk);
+      reflU.uRL.value[k]!.set(l.s + fs * kk, l.z + fz2 * kk, fs / D, fz2 / D);
+      reflU.uRW.value[k]!.set(1 / ((0.14 + 0.01 * dX + 0.025 * l.h) * 1.15), 1 / (0.6 + 0.12 * dX), 1 / (0.4 + D * kk));
+      reflU.uRC.value[k]!.set(l.c.r * w, l.c.g * w, l.c.b * w);
+    }
+  };
+}
 let cachedWorld: World | null = null;
 /** geometry / textures / layout are built once and shared by every (re)mount of the scene */
 const getWorld = () => (cachedWorld ??= buildWorld());
@@ -990,7 +2174,8 @@ function buildObjects(w: World, portalMaterial: THREE.Material) {
   addInst(inst.posts, geo.postGeo, mat.postMat);
   addInst(inst.bulbs, geo.bulbGeo, mat.bulbMat);
   addInst(inst.arches, geo.archGeo, mat.stoneMat);
-  addInst(inst.pillars, geo.pillarGeo, mat.stoneMat);
+  addInst(inst.pillars, geo.pillarGeo, mat.pillarMat);
+  addInst(inst.cones, geo.coneGeo, mat.coneMat);
   const points = new THREE.Points(geo.pointsGeo, mat.pointsMat);
   points.frustumCulled = false;
   root.add(points, w.sky.root);
@@ -999,36 +2184,39 @@ function buildObjects(w: World, portalMaterial: THREE.Material) {
   const hut = new THREE.Group();
   hut.position.set(0, -R, HUT_Z);
   root.add(hut);
-  [7.6, 6.7, 5.8].forEach((r, i) => {
-    const s = mesh(geo.stepGeo, mat.hutMat, hut);
+  STEP_R.forEach((r, i) => {
+    const s = mesh(geo.stepGeo, mat.stepMat, hut);
     s.scale.set(r, 1, r);
-    s.position.y = 0.42 + i * 0.2;
+    s.position.y = STEP_Y[i]!;
   });
   mesh(geo.hutGeo, mat.hutMat, hut);
-  mesh(geo.porchGeo, mat.hutMat, hut).position.set(0, DOOR_H, -2.3);
+  mesh(geo.porchGeo, mat.porchMat, hut).position.set(0, DOOR_H, -2.3);
   mesh(geo.frameGeo, mat.goldMat, hut).position.set(0, DOOR_H, DOOR_Z - HUT_Z - 0.04);
   mesh(geo.portalGeo, portalMaterial, hut).position.set(0, DOOR_H, PORTAL_Z - HUT_Z);
   const leafL = new THREE.Group();
   leafL.position.set(-DOOR_R, DOOR_H, DOOR_Z - HUT_Z);
   mesh(geo.leafGeoL, mat.leafMat, leafL);
   mesh(geo.trimGeoL, mat.goldMat, leafL);
-  mesh(geo.trimGeoL, mat.goldMat, leafL).position.z = 0.14;
+  mesh(geo.trimGeoL, mat.goldMat, leafL).position.z = LEAF_T;
   const leafR = new THREE.Group();
   leafR.position.set(DOOR_R, DOOR_H, DOOR_Z - HUT_Z);
   mesh(geo.leafGeoR, mat.leafMat, leafR);
   mesh(geo.trimGeoR, mat.goldMat, leafR);
-  mesh(geo.trimGeoR, mat.goldMat, leafR).position.z = 0.14;
+  mesh(geo.trimGeoR, mat.goldMat, leafR).position.z = LEAF_T;
   hut.add(leafL, leafR);
-  for (const a of [0, Math.PI * 0.5, Math.PI, Math.PI * 0.25, Math.PI * 0.75]) {
+  for (const a of HUT_WINDOWS) {
     const wdw = mesh(geo.roundWinGeo, mat.roundWinMat, hut);
-    wdw.position.set(Math.cos(a) * 4.25, 3.4, Math.sin(a) * 4.25);
+    wdw.position.set(Math.cos(a) * (HUT_WIN_R - 0.02), HUT_WIN_Y, Math.sin(a) * (HUT_WIN_R - 0.02));
     wdw.rotation.y = Math.PI / 2 - a;
   }
+  mesh(geo.winFrameGeo, mat.goldMat, hut);
+  mesh(geo.finialGeo2, mat.goldMat, hut);
+  mesh(geo.crescentGeo, mat.goldMat, hut).position.y = 10.4;
   mesh(geo.finialGeo, mat.finialMat, hut).position.y = 10.4;
   mesh(geo.beamGeo, mat.beamMat, hut).position.y = 10.4;
   mesh(geo.beamGeo2, mat.beamMat2, hut).position.y = 10.4;
 
-  const lamp = new THREE.PointLight("#ffb46a", 110, 80, 2);
+  const lamp = new THREE.PointLight("#ffb46a", 95, 80, 2);
   root.add(lamp);
 
   return { root, instanced, leafL, leafR, lamp };
@@ -1131,6 +2319,7 @@ export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
     [objs],
   );
   const track = useMemo(() => createTrack(world), [world]);
+  const pickReflections = useMemo(() => createReflectionPicker(world), [world]);
   const tmp = useMemo(newPose, []);
   const forward = useMemo(() => new THREE.Vector3(), []);
 
@@ -1144,6 +2333,7 @@ export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
     camera.near = 0.05;
     camera.far = 800;
 
+    pickReflections(tmp.pos, tmp.look);
     objs.lamp.position.copy(tmp.pos).lerp(tmp.look, 0.3).addScaledVector(camera.up, 2.5);
 
     world.sky.update(t, tmp.pos, forward.subVectors(tmp.look, tmp.pos).normalize());
@@ -1154,6 +2344,8 @@ export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
 
     const pm = world.mat.pointsMat.uniforms;
     pm.uTime!.value = t;
+    WINDOW_TIME.value = t;
+    WINDOW_RES.value = state.gl.domElement.height / 1080;
     pm.uScale!.value = state.gl.domElement.height / (2 * Math.tan((camera.fov * Math.PI) / 360));
   });
 

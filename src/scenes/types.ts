@@ -11,8 +11,11 @@ import type { Material, PerspectiveCamera } from "three";
  *                      live after). Before t = 12 the material is plain black.
  *  20 .. 25  EXIT      the camera must travel into the portal so that it fills the screen at t = 25.
  *
- * How the camera has to be moving at both ends of that timeline, so that a takeover does not
- * jolt, is laid down in rail.ts.
+ * On the rail (rail.ts) those 25 seconds are the last 5 s of the season before the scene's own
+ * (ARRIVAL) followed by the 20 s of its own season, so a scene that is leaving and the scene that
+ * is arriving ride one and the same piece of track. rail.ts also lays down how a camera that is
+ * not on the rail yet has to be moving at both ends of the timeline, so that a takeover does not
+ * jolt.
  */
 export const TIMING = {
   /** seconds between two takeovers */
@@ -31,6 +34,11 @@ export interface SceneClock {
 }
 
 export interface SceneProps {
+  /**
+   * This scene's zero-based place in the playing order. `season(index)` in rail.ts is the stretch
+   * of rail its camera rides: index % 4 picks spring, summer, fall or winter.
+   */
+  index: number;
   /** Read `clock.t` inside useFrame. Drive ALL animation from it (never from wall clock / delta). */
   clock: SceneClock;
   /** This scene's own camera. Position / rotate / change fov freely inside useFrame. */

@@ -14,6 +14,9 @@ The owner's own words, collected from the sessions that built this. They outrank
 - scenes linked "with some sort of transformation, ideally integrated [into] the exit and enter
   visuals", changing about every 20 seconds
 - "make the camera feel like it's on a single railway"
+- "there should be one rail, that have interesting loops, with good variety to have the animation
+  interesting", cut into four segments: "spring, summer, fall, and winter". A scene's index picks
+  its season, so more than four scenes can ride the same rail.
 - "the graphics could be more detailed"
 - the result should be "mesmerizing, strange, and whimsical"
 
@@ -23,13 +26,13 @@ friendly and a little funny, never grim, never a tech demo.
 
 ## Fixed
 
-The loop improves how the four worlds look. It keeps these as they are:
+The loop improves how the worlds look and adds new ones. It keeps these as they are:
 
-- **Four scenes, in this order:** helix, burrow, dollhouse, orbit. Each keeps its premise and its
-  palette (below), so the four stay unmistakably different from one another.
-- **The ride:** the 25 s timeline (`src/scenes/types.ts`), the rail (`src/scenes/rail.ts`), and
-  the exit portal that is a live window into the next scene. Camera tracks and beat timing change
-  only when a backlog item says so by name.
+- **The first four scenes:** helix, burrow, dollhouse, orbit. Each keeps its premise and its
+  palette (below). A new scene has to be as unmistakably different from every other as these
+  four are from one another.
+- **The handoff:** a scene ends by flying through an exit that is a live window into the next
+  scene, about every 20 seconds, and the camera never jolts.
 - **No UI**, no text, no logos.
 - **Procedural only:** `three` and `@react-three/fiber`, nothing loaded at runtime. Every texture,
   mesh and sky is built in code at mount.
@@ -37,15 +40,22 @@ The loop improves how the four worlds look. It keeps these as they are:
   anti-aliasing, accumulation, feedback trails) is out, because `?t=` must reproduce any frame
   exactly. Motion blur and trails are still possible when computed analytically from `clock.t`.
 
-## The four worlds
+**Open:** how the rail is built. The timeline (`src/scenes/types.ts`), the rail
+(`src/scenes/rail.ts`) and every scene's camera track may be rebuilt by keystone items towards the
+one seasonal rail the brief asks for, and scenes may be added to the playing order.
 
-| | helix | burrow | dollhouse | orbit |
-|---|---|---|---|---|
-| Premise | An endless double-helix stair climbing a round arcade shaft. | The Win95 maze with no straight wall: a ribbed living tunnel that forks and curls. | A daylight dune garden of paper-thin doorways whose insides are vast. | A night town wrapped round the inside of a cylinder, so streets hang overhead. |
-| Palette | Sandstone, ivory and amber light against a deep teal void. | Coral, magenta and plum with mint bioluminescence. | Soft pastels: peach, mint, cream, powder blue. The one daylight scene. | Indigo and midnight blue, warm gold lamps, a few cyan accents. |
-| Who lives there | Lantern koi swimming up the shaft. | Eyes in the walls that wake as you pass; glowing mushrooms. | Flowers, pinwheels, paper birds. | A star-freckled whale and her calf; rising paper lanterns. |
-| Exit | A free-standing keyhole arch on a landing. | A spinning hoop in a dead-end dome. | A door on a bare plinth, seen to be empty from behind. | A moon gate on a tiny hut. |
-| The gimmick | The stair never ends. | You are being led, and the walls are watching. | Bigger on the inside. | Up keeps rotating. |
+## The worlds
+
+A new scene gets its column here before it is built. `scripts/look.ts` and `scripts/review.ts`
+pick a scene up from `src/scenes/index.ts` as soon as it is registered.
+
+| | helix | burrow | dollhouse | orbit | roost |
+|---|---|---|---|---|---|
+| Premise | An endless double-helix stair climbing a round arcade shaft. | The Win95 maze with no straight wall: a ribbed living tunnel that forks and curls. | A daylight dune garden of paper-thin doorways whose insides are vast. | A night town wrapped round the inside of a cylinder, so streets hang overhead. | A giant porcelain hen dozes on a floor as thin as a plate; a second place hangs upside down beneath the same floor. |
+| Palette | Sandstone, ivory and amber light against a deep teal void. | Coral, magenta and plum with mint bioluminescence. | Soft pastels: peach, mint, cream, powder blue. The one daylight scene. | Indigo and midnight blue, warm gold lamps, a few cyan accents. | Bone white, celadon haze, cobalt brushwork, moss-dark, a seam of gold, a touch of persimmon. The one near-monochrome scene. |
+| Who lives there | Lantern koi swimming up the shaft. | Eyes in the walls that wake as you pass; glowing mushrooms. | Flowers, pinwheels, paper birds. | A star-freckled whale and her calf; rising paper lanterns. | The hen, nodding off; painted eggs that drift up like bubbles and squeeze through the floor; teetering stacks of crockery. |
+| Exit | A free-standing keyhole arch on a landing. | A spinning hoop in a dead-end dome. | A door on a bare plinth, seen to be empty from behind. | A moon gate on a tiny hut. | The gap under the hen: she is the lid of a covered dish, and she floats up off it. |
+| The gimmick | The stair never ends. | You are being led, and the walls are watching. | Bigger on the inside. | Up keeps rotating. | The floor has two sides: a lamp below is a nest above. |
 
 ## What a good frame has
 

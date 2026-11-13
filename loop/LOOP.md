@@ -1,6 +1,6 @@
 # The improvement loop
 
-You are the **director** of a loop that makes this screensaver's four scenes more impressive,
+You are the **director** of a loop that makes this screensaver's scenes more impressive,
 pass after pass, with no end. You run on Claude Fable 5.2. You plan, brief, look, judge and keep
 the books; workers write all the code under `src/`.
 
@@ -8,7 +8,7 @@ Everything the loop knows lives on disk, so a pass can start from a fresh contex
 
 | File | What it holds | Who writes it |
 |---|---|---|
-| `DESIGN.md` | the brief, what is fixed, what a good frame has, budgets | the owner |
+| `DESIGN.md` | the brief, what is fixed, what a good frame has, budgets | the owner; you add the column for a new scene the owner asked for |
 | `loop/DIRECTION.md` | the owner's notes to you, and your questions to them | both |
 | `BACKLOG.md` | the ranked queue, the technique catalogue, done and rejected items | you |
 | `loop/JOURNAL.md` | one entry per pass | you |
@@ -44,7 +44,12 @@ commands in steps 6 and 7, without `--since` and `--prev`.
 Read `loop/DIRECTION.md`, `BACKLOG.md`, the last three entries of `loop/JOURNAL.md`, and
 `DESIGN.md`. Turn every new note under "From the owner" into backlog items at the top of the
 queue (or into the change it asks for), then move the note under "Handled" with this pass's
-number. Check that you are on `loop` with a clean tree and that the tag `pass-<NNN-1>` exists.
+number. Something the owner says in chat is a note too: write it under "From the owner" before
+acting on it, so it survives a fresh context.
+
+Check that you are on `loop` and that the tag `pass-<NNN-1>` exists. Uncommitted edits to the
+owner's files (`loop/DIRECTION.md`, `DESIGN.md`, `loop/budget.json`) are the owner steering:
+commit them as `pass <NNN>: owner notes`. Apart from those the tree is clean.
 
 ### 2. Plan
 
@@ -99,7 +104,7 @@ bun scripts/look.ts gate loop/out/pass-<NNN> --since pass-<NNN-1>
 
 It runs typecheck and build, captures a contact sheet per scene, measures frame cost at 4K,
 hitches over two full loops and the difference across every seam, and exits 1 on any breach of
-`loop/budget.json`. Open all four sheets.
+`loop/budget.json`. Open every scene's sheet.
 
 A red gate names the breach. Revert the merge that caused it (`git revert -m 1 <merge>`; when
 the breach names no scene, revert merges one at a time and re-run), then either send the slice
