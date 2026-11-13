@@ -15,7 +15,9 @@ import {
  * the school is a pure function of `uT`. Fish also keep out of a cone in front of the camera
  * (`uEye` / `uFwd`): they may drift alongside, but never onto the line of flight. And they swim
  * round whatever stands in their water (`keepOut`: the bridges and the arch), by swelling their
- * orbit outwards as they pass it.
+ * orbit outwards as they pass it. What fills the water from the stair to the wall (`wedge`: the
+ * sister tower) no fish swims into at all, and for the last seconds the school parts round the
+ * exit (`door`) so that nothing touches its silhouette.
  */
 
 const TAU = Math.PI * 2;
@@ -143,6 +145,16 @@ export interface KoiOptions {
    * moved out to radius `r`, and ease out and back over as much again on either side.
    */
   keepOut?: KeepOut[];
+  /**
+   * A sector of the shaft no fish enters while `uT` is between 0 and `until`: every fish starts
+   * just past it or far enough before it. `angle` = atan2(z, x) of its middle.
+   */
+  wedge?: { angle: number; halfAngle: number; until: number };
+  /**
+   * The exit. From `from` to `to` (scene time) a cone opens from the camera round the line to
+   * `centre`, `radius` wide where it passes the door, and the fish move out of it.
+   */
+  door?: { centre: Vector3; radius: number; from: number; to: number };
 }
 
 export interface KeepOut {
@@ -169,7 +181,10 @@ export function createKoi(o: KoiOptions): Koi {
     const r = o.rMin + (o.rMax - o.rMin) * rand() ** 0.8;
     const size = 2.3 + 3.4 * rand() ** 1.7;
     // anticlockwise seen from below: against the stair, which climbs anticlockwise seen from above
-    orbit.set([r, rand() * TAU, rand() * o.yRange, (1.1 + rand() * 1.5) / r], i * 4);
+    const turn = rand(), speed = (1.1 + rand() * 1.5) / r;
+    // fish swim towards growing angles: start between the wedge's far edge and as far short of its near one as this fish gets
+    const angle = o.wedge ? o.wedge.angle + o.wedge.halfAngle + turn * (TAU - 2 * o.wedge.halfAngle - o.wedge.until * speed) : turn * TAU;
+    orbit.set([r, angle, rand() * o.yRange, speed], i * 4);
     fish.set([size, rand() * TAU, rand(), 0.35 + rand() * 0.75], i * 4);
   }
   geometry.setAttribute("aOrbit", new InstancedBufferAttribute(orbit, 4));
@@ -186,6 +201,21 @@ export function createKoi(o: KoiOptions): Koi {
         }`,
     )
     .join("\n");
+
+  const door = o.door
+    ? /* glsl */ `{
+          vec3 axis = vec3(${gl(o.door.centre.x)}, ${gl(o.door.centre.y)}, ${gl(o.door.centre.z)}) - uEye;
+          float reach = max(length(axis), 0.01);
+          axis /= reach;
+          vec3 rel = c - uEye;
+          float along = dot(rel, axis);
+          vec3 perp = rel - axis * along;
+          float d = max(length(perp), 1e-3);
+          // as wide as the door where it passes it, and no wider than a right angle close up
+          float need = max(along, 0.0) * min(${gl(o.door.radius)} / reach, 1.0) + aFish.x * 0.8;
+          c += perp / d * max(0.0, need - d) * smoothstep(${gl(o.door.from)}, ${gl(o.door.to)}, uT);
+        }`
+    : "";
 
   const material = new ShaderMaterial({
     side: DoubleSide,
@@ -220,6 +250,8 @@ export function createKoi(o: KoiOptions): Koi {
         float d = max(length(perp), 1e-3);
         float need = (3.4 + 0.2 * max(along, 0.0)) * smoothstep(-5.0, 1.0, along) * (1.0 - smoothstep(40.0, 60.0, along));
         c += perp / d * max(0.0, need + aFish.x * 0.6 - d);
+        // ... and, at the end, clear of the exit
+        ${door}
 
         vec3 fwd = normalize(vec3(-sin(ang) * r * aOrbit.w, aFish.w, cos(ang) * r * aOrbit.w));
         vec3 side = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));

@@ -21,7 +21,9 @@ import {
   Shape,
   ShapeGeometry,
   SphereGeometry,
+  Vector2,
   Vector3,
+  Vector4,
   type Material,
 } from "three";
 import { TIMING, type SceneProps } from "./types";
@@ -40,6 +42,11 @@ import { createKoi, type Koi } from "./helix/koi";
  * The stair goes on above and below the turn the camera rides. The rail is level where it joins
  * and leaves the turn, so every turn of the stair has a landing on that side of the newel, and a
  * twin stair half a pitch higher makes it a double helix whose soffit is the camera's ceiling.
+ *
+ * The shaft holds a second great stair, the SISTER: the same double helix round its own newel, a
+ * little way off to the right of the line the camera flies in on, so that the first frames (the
+ * thumbnail the orbit's moon gate shows) hold a whole tower against the void. Level bridges, the
+ * RUNGS, join the two towers every turn, and the lens is wide until the camera is on the stair.
  *
  * Everything is laid out in TOWER coordinates: the rail's local frame shifted so that the newel's
  * axis is x = z = 0 (y = 0 stays the eye's height at the joint). The stone shaders, the koi and
@@ -81,10 +88,26 @@ const EYE = 2.6;
 const EYE_RISE = 2.55; // the last flight steps down, so the eye meets the keyhole's centre
 const EYE_IN = 3.0; // and the bridge in starts this much lower, and climbs a first flight to the landing
 const IN_FLIGHT = [4.5, 15.5]; // local distances between which it climbs
+/**
+ * Lamp standards that carry the bridge's left edge on across the open landing, as distances past
+ * the joint: at the takeover they stand between the camera and the newel's wall.
+ */
+const LANDING_LAMPS = [1.3, 4.4, 7.4];
 const LOOK_AHEAD = 5.5; // the camera looks at the rail this far on, into the turn
 const LOOK_DROP = 0.85; // and this much below it, down onto the treads
 const FOV = 72;
+const FOV_IN = 80; // through the arrival: wide enough to hold the sister tower whole beside the stair the camera is on
 const FOV_DOOR = 64;
+/**
+ * The sister tower's axis, in tower coordinates. Dead ahead at t = 0 (the camera looks 26 degrees
+ * to the right of the joint's heading there) and as far off as the shaft allows; it is in the
+ * right half of the frame at the takeover and behind the camera's shoulder on the way out.
+ */
+const SISTER_AT: [number, number] = [27, -19];
+const SISTER_TURNS: [number, number] = [-3.2, 3.6]; // its stairs, in turns below and above the joint's level
+const RUNG_W = 1.9; // half width of the bridges between the towers
+/** which turns have one, counted from the one off the camera's ceiling; turn 1 would cross over the bridge out */
+const RUNG_TURNS = [-3, -2, -1, 0, 2, 3];
 const FOG_NEAR = 22;
 const FOG_FAR = 150;
 
@@ -150,6 +173,10 @@ interface Deck {
   door: boolean;
   /** plan lengths at which a lamp post ends the left balustrade */
   ends: number[];
+  /** treads that carry a lamp post, if they are not simply every fourth */
+  lamps?: number[];
+  /** true for a flight the camera never comes within a few units of: its posts, globes and balusters are coarse */
+  coarse?: boolean;
 }
 
 interface DeckPoint { x: number; z: number; h: number; tx: number; tz: number }
@@ -184,6 +211,10 @@ interface Layout {
   lower: Deck;
   upper: Deck;
   twin: Deck;
+  /** the sister tower's two stairs, the bridges to it, and how much higher its helix is than this one */
+  sister: Deck[];
+  rungs: Deck[];
+  sisterY: number;
   /**
    * For the newel's shading: the angle of the first tread's riser, the top of each tread of a
    * turn above its landing, and how far the treads of the turn below the ride and of the turn
@@ -195,6 +226,8 @@ interface Layout {
   highOff: number[];
   /** plan length along the ride at local distance d */
   rideS(d: number): number;
+  /** where the lamp standards on the first landing stand */
+  landingLamps: V3[];
   doorPos: Vector3;
   doorYaw: number;
 }
@@ -324,7 +357,7 @@ function buildLayout(stretch: Stretch): Layout {
   /** radius of the ride's left edge at angle phi, between two of its samples */
   const edgeR = (phi: number, i0: number, i1: number) => lerpQ(qlr, Math.min(i1, Math.max(i0, find(qlphi, phi, i0, i1))));
   const phiCrossIn = qlphi[iCrossIn]!, phiIn = qlphi[iIn]!, phiOut = qlphi[iOut]!, phiCrossOut = qlphi[iCrossOut]!;
-  const circle = (jA: number, jB: number, height: (phi: number) => number): Deck => {
+  const circle = (jA: number, jB: number, height: (phi: number) => number, cx = 0, cz = 0): Deck => {
     const phiA = phi0 + jA * dPhi;
     const end = (jB - jA) * tread;
     const cn = Math.ceil(end / DS) + 2;
@@ -336,7 +369,7 @@ function buildLayout(stretch: Stretch): Layout {
     };
     for (let k = 0; k < cn; k++) {
       const phi = phiA + (k * DS) / R;
-      deck.x[k] = R * Math.cos(phi); deck.z[k] = -R * Math.sin(phi);
+      deck.x[k] = cx + R * Math.cos(phi); deck.z[k] = cz - R * Math.sin(phi);
       deck.tx[k] = -Math.sin(phi); deck.tz[k] = -Math.cos(phi);
       deck.h[k] = height(phi);
     }
@@ -376,6 +409,56 @@ function buildLayout(stretch: Stretch): Layout {
   const jTwinA = Math.round(jOf(-(TURNS_DOWN + 0.5) * TAU)), jTwinB = Math.round(jOf((1.5 + TURNS_UP) * TAU));
   const twin = circle(jTwinA, jTwinB, (phi) => turnH(phi) + rise / 2);
 
+  // ---- the sister tower, and the rungs between the two ----
+  // A rung leaves this tower's twin stair where it faces the sister (so the first one is a branch
+  // of the camera's own ceiling) and lands on whichever of the sister's stairs is level with it:
+  // the sister is the same helix, raised by `sisterY` so that one always is.
+  const [sx, sz] = SISTER_AT;
+  const sDist = Math.hypot(sx, sz);
+  const phiS = -Math.atan2(sz, sx); // where this tower faces the sister
+  const phiBack = phiS + Math.PI; // and the sister this one
+  const rungH = (k: number) => turnH(phiS) + rise / 2 + k * rise;
+  let sisterY = turnH(phiS) - turnH(phiBack);
+  sisterY -= Math.round(sisterY / (rise / 2)) * (rise / 2);
+  const gapHalf = Math.asin((RUNG_W + 0.25) / R_OUT);
+  /** is the balustrade open for a rung at angle phi (from the facing direction `face`) and floor height h? */
+  const rungGap = (phi: number, face: number, h: number) => {
+    const turns = Math.round((phi - face) / TAU);
+    if (Math.abs(phi - face - turns * TAU) > gapHalf) return false;
+    const k = Math.round((h - rungH(0)) / rise);
+    return RUNG_TURNS.includes(k) && Math.abs(h - rungH(k)) < 1.2;
+  };
+  const twinPhi = (s: number) => phi0 + jTwinA * dPhi + s / R;
+  twin.railR = (s) => !rungGap(twinPhi(s), phiS, turnH(twinPhi(s)) + rise / 2);
+  const jSisA = Math.round(jOf(SISTER_TURNS[0] * TAU)), jSisB = Math.round(jOf(SISTER_TURNS[1] * TAU));
+  const sister = [0, rise / 2].map((lift) => {
+    const height = (phi: number) => turnH(phi) + sisterY + lift;
+    const deck = circle(jSisA, jSisB, height, sx, sz);
+    const phiAt = (s: number) => phi0 + jSisA * dPhi + s / R;
+    deck.railR = (s) => !rungGap(phiAt(s), phiBack, height(phiAt(s)));
+    deck.coarse = true;
+    return deck;
+  });
+  // a whole number of treads, their ends a little way into the two stairs
+  const rungN = Math.ceil((sDist - 2 * R_OUT) / tread);
+  const rungFrom = (sDist - rungN * tread) / 2;
+  const rungs = RUNG_TURNS.map((k): Deck => {
+    const cn = Math.ceil((rungN * tread) / DS) + 2;
+    const deck: Deck = {
+      n: cn, end: rungN * tread,
+      x: new Float32Array(cn), z: new Float32Array(cn), h: new Float32Array(cn).fill(rungH(k)),
+      tx: new Float32Array(cn).fill(sx / sDist), tz: new Float32Array(cn).fill(sz / sDist),
+      first: 0, index0: 0, door: false, ends: [], lamps: [1, rungN - 2],
+      wl: () => RUNG_W, wr: () => RUNG_W, railL: () => true, railR: () => true, runner: () => true, newel: () => 0,
+      coarse: true,
+    };
+    for (let i = 0; i < cn; i++) {
+      deck.x[i] = (sx / sDist) * (rungFrom + i * DS);
+      deck.z[i] = (sz / sDist) * (rungFrom + i * DS);
+    }
+    return deck;
+  });
+
   const treadTops: number[] = [], lowOff: number[] = [], highOff: number[] = [];
   for (let j = 0; j < NT; j++) {
     const a = phi0 + j * dPhi, b = a + dPhi;
@@ -384,9 +467,16 @@ function buildLayout(stretch: Stretch): Layout {
     highOff.push(Math.max(highH(a + TAU), highH(b + TAU)) - turnH(b + TAU));
   }
 
+  const landingLamps = LANDING_LAMPS.map((past): V3 => {
+    const p = deckAt(ride, rideS(stretch.joint + past));
+    const off = HALF_W - 0.22;
+    return [p.x + p.tz * off, p.h, p.z - p.tx * off];
+  });
+
   const end = deckAt(ride, sEnd);
   return {
-    stretch, centre, R, rise, tread, ride, lower, upper, twin, phi0, treadTops, lowOff, highOff, rideS,
+    stretch, centre, R, rise, tread, ride, lower, upper, twin, sister, rungs, sisterY, phi0, treadTops, lowOff, highOff, rideS,
+    landingLamps,
     doorPos: new Vector3(end.x, end.h, end.z),
     doorYaw: Math.atan2(-end.tx, -end.tz),
   };
@@ -517,6 +607,13 @@ const POST_PROFILE: ProfilePt[] = [
   [0.12, POST_H, 0.9, 1], [0, POST_H - 0.04, 0.8, 1],
 ];
 
+/** the same two turnings in a few rings, for the sister tower: the camera never comes within six units of it */
+const BALUSTER_COARSE: ProfilePt[] = [[0.08, 0, 0.6, 1], [0.05, 0.1, 0.85, 1], [0.075, 0.2, 1, 1], [0.038, 0.4, 0.95, 1], [0.045, 1, 1, 1]];
+const POST_COARSE: ProfilePt[] = [
+  [0.2, 0, 0.42, 0], [0.19, 0.13, 0.65, 0], [0.105, 0.3, 0.8, 0], [0.086, 1.0, 1, 0], [0.116, 1.04, 1.1, 1],
+  [0.08, 1.1, 0.9, 0], [0.075, 1.9, 1, 0], [0.107, 1.96, 1.1, 1], [0.064, 2.08, 0.9, 1], [0.155, POST_H, 1.15, 1], [0, POST_H - 0.04, 0.8, 1],
+];
+
 // ---------------------------------------------------------------------------------------------
 // shaders
 // ---------------------------------------------------------------------------------------------
@@ -551,7 +648,13 @@ const hxTime = { value: 0 };
  * landing's height and the rise of a turn. Filled in by getAssets, read when the column's program
  * is compiled on the first frame.
  */
-const hxStairs = { phi0: 0, tops: [0] as number[], low: [0] as number[], high: [0] as number[], floor: 0, rise: 1, y0: 0, y1: 0 };
+const hxStairs = { phi0: 0, tops: [0] as number[], low: [0] as number[], high: [0] as number[], floor: 0, rise: 1 };
+/**
+ * Which tower a newel belongs to: where its axis is and how much higher its stairs are (xyz), with
+ * w = 1 for a tower with no landings, and the heights its stairs run between.
+ */
+interface NewelFrame { axis: { value: Vector4 }; span: { value: Vector2 } }
+const hxNewel: NewelFrame = { axis: { value: new Vector4() }, span: { value: new Vector2(-1, 1) } };
 /** the two lamps that flank the door, in world space; filled in by getAssets, they light the arch */
 const hxLamps = { value: [new Vector3(), new Vector3()] };
 
@@ -562,7 +665,7 @@ const KH_VOUSS = (2 * KH_SPRING) / 19; // nineteen voussoirs, the keystone in th
 const KH_COURSE = KH_YJ / 4; // four courses up each jamb
 
 function stairAoGlsl(): string {
-  const { phi0, tops, low, high, floor, rise, y0, y1 } = hxStairs;
+  const { phi0, tops, low, high, floor, rise } = hxStairs;
   const n = tops.length;
   const list = (v: number[]) => `float[${n}](${v.map(glf).join(", ")})`;
   return /* glsl */ `
@@ -576,15 +679,18 @@ function stairAoGlsl(): string {
     }
     /** the two stairs wind round the newel half a pitch apart: shade over the one below and under the one above */
     float hxStairAO(vec3 w) {
-      if (w.y < ${glf(y0)} || w.y > ${glf(y1)}) return 1.0;
+      w -= uHxAxis.xyz;
+      if (w.y < uHxSpan.x || w.y > uHxSpan.y) return 1.0;
       int j = int(min(mod(-atan(w.z, w.x) - ${glf(phi0)}, ${glf(TAU)}) * ${glf(n / TAU)}, ${glf(n - 1)}));
       float rel = w.y - HX_TOPS[j] - ${glf(floor)};
       float k = floor(rel / ${glf(rise / 2)});   // which stair is below: 0 is the turn the camera rides
       float a = rel - k * ${glf(rise / 2)};
       float b = a - ${glf(rise / 2)};
       // the turns below and above that one have their landings flat for longer
-      a -= k == -2.0 ? HX_LOW[j] : k == 2.0 ? HX_HIGH[j] : 0.0;
-      b -= k == -3.0 ? HX_LOW[j] : k == 1.0 ? HX_HIGH[j] : 0.0;
+      if (uHxAxis.w < 0.5) {
+        a -= k == -2.0 ? HX_LOW[j] : k == 2.0 ? HX_HIGH[j] : 0.0;
+        b -= k == -3.0 ? HX_LOW[j] : k == 1.0 ? HX_HIGH[j] : 0.0;
+      }
       return hxSlabAO(a) * hxSlabAO(b);
     }`;
 }
@@ -722,7 +828,7 @@ const DETAIL_GLSL: Record<Detail, string> = {
         hxH -= 0.015 * bead;
         ao *= 1.0 - 0.35 * bead;
       }
-      ao *= mix(0.45, 1.0, smoothstep(${glf(COLUMN_R)}, ${glf(COLUMN_R + 1.9)}, length(vHxW.xz)));   // where it meets the newel
+      ao *= mix(0.45, 1.0, smoothstep(${glf(COLUMN_R)}, ${glf(COLUMN_R + 1.9)}, min(length(vHxW.xz), length(vHxW.xz - vec2(${glf(SISTER_AT[0])}, ${glf(SISTER_AT[1])})))));   // where it meets its newel
       if (kind < 2.5) {
         vec3 teal = vec3(0.03, 0.2, 0.34);
         vec3 gold = vec3(0.98, 0.66, 0.2);
@@ -898,10 +1004,12 @@ const KEYHOLE_LAMPS_GLSL = /* glsl */ `
             }
           }`;
 
-function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
+function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain", newel: NewelFrame = hxNewel): T {
   mat.onBeforeCompile = (s) => {
     s.uniforms.uHxT = hxTime;
     s.uniforms.uHxLamp = hxLamps;
+    s.uniforms.uHxAxis = newel.axis;
+    s.uniforms.uHxSpan = newel.span;
     s.vertexShader = s.vertexShader
       .replace(
         "#include <common>",
@@ -933,6 +1041,8 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
         varying vec3 vTile;
         uniform float uHxT;
         uniform vec3 uHxLamp[2];
+        uniform vec4 uHxAxis;
+        uniform vec2 uHxSpan;
         vec3 hxGlow = vec3(0.0);
         float hxH = 0.0; // carved height (metres) the bumped details write; the normal follows it
         float hxHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -1018,6 +1128,8 @@ interface Assets {
   stairs: BufferGeometry;
   rails: BufferGeometry;
   column: BufferGeometry;
+  sisterColumn: BufferGeometry;
+  sisterColumnMat: MeshLambertMaterial;
   wall: BufferGeometry;
   satellite: BufferGeometry;
   baluster: BufferGeometry;
@@ -1030,6 +1142,8 @@ interface Assets {
   stone: MeshLambertMaterial;
   keyholeMat: MeshLambertMaterial;
   columnMat: MeshLambertMaterial;
+  /** writes depth and no colour, a hair behind the surface, so the pass that shades it still passes */
+  depthOnly: MeshBasicMaterial;
   postMat: MeshLambertMaterial;
   post: BufferGeometry;
   postM: Float32Array;
@@ -1042,6 +1156,13 @@ interface Assets {
   pointsMat: ShaderMaterial;
   balusterM: Float32Array;
   lanternM: Float32Array;
+  /** the coarse copies of the three, on flights seen only from afar */
+  coarseBaluster: BufferGeometry;
+  coarsePost: BufferGeometry;
+  coarseLantern: BufferGeometry;
+  coarseBalusterM: Float32Array;
+  coarsePostM: Float32Array;
+  coarseLanternM: Float32Array;
   wallM: Float32Array;
   satellites: Satellite[];
 }
@@ -1069,34 +1190,35 @@ function getAssets(index: number): Assets {
   const P: DeckPoint = { x: 0, z: 0, h: 0, tx: 0, tz: -1 };
 
   const sq = new Quads();
-  const balusters: number[] = [];
-  const posts: number[] = [];
-  const lanterns: number[] = [];
+  // [fine, coarse] matrices of each turned piece
+  const balusters: number[][] = [[], []];
+  const posts: number[][] = [[], []];
+  const lanterns: number[][] = [[], []];
   const lanternPos: number[] = [];
   const rp: number[] = [], rn: number[] = [], rc: number[] = [], ri: number[] = [];
   const RING = 6;
   const LAMP_EVERY = 4;
 
-  const pushBaluster = (v: V3, height: number) => {
+  const pushBaluster = (v: V3, height: number, coarse = false) => {
     dummy.position.set(v[0], v[1], v[2]);
     dummy.rotation.set(0, 0, 0);
     dummy.scale.set(1, height, 1);
     dummy.updateMatrix();
-    balusters.push(...dummy.matrix.elements);
+    balusters[+coarse]!.push(...dummy.matrix.elements);
   };
   /** a turned lamp post, POST_H tall, standing at v */
-  const pushPost = (v: V3, size = 1) => {
+  const pushPost = (v: V3, size = 1, coarse = false) => {
     dummy.position.set(v[0], v[1], v[2]);
     dummy.rotation.set(0, 0, 0);
     dummy.scale.set(size, 1, size);
     dummy.updateMatrix();
-    posts.push(...dummy.matrix.elements);
+    posts[+coarse]!.push(...dummy.matrix.elements);
   };
-  const pushLantern = (x: number, y: number, z: number, size: number) => {
+  const pushLantern = (x: number, y: number, z: number, size: number, coarse = false) => {
     dummy.position.set(x, y, z);
     dummy.scale.setScalar(size);
     dummy.updateMatrix();
-    lanterns.push(...dummy.matrix.elements);
+    lanterns[+coarse]!.push(...dummy.matrix.elements);
     lanternPos.push(x, y, z);
   };
 
@@ -1148,16 +1270,19 @@ function getAssets(index: number): Assets {
       sq.quad(i0, i1, lo(i1), lo(i0), ctr, SAND, dim(0.6, 1), dim(0.6, 1), dim(0.5, 0.8), dim(0.5, 0.8), [[0, 0, 5], [1, 0, 5], [1, 1, 5], [0, 1, 5]]); // inner end
       sq.quad(lo(i0), lo(o0), lo(o1), lo(i1), ctr, tone, dim(0.7, 1.15), 1.15, 1.05, dim(0.6, 1.05), [[wi0, 0, 3], [wo0, 0, 3], [wo1, 1, 3], [wi1, 1, 3]]); // soffit
       if (landing) continue;
-      const lamp = (((deck.index0 + i - lampPhase) % LAMP_EVERY) + LAMP_EVERY) % LAMP_EVERY === 0 && (!deck.door || sm < END - 6);
+      const lamp = deck.lamps
+        ? deck.lamps.includes(i)
+        : (((deck.index0 + i - lampPhase) % LAMP_EVERY) + LAMP_EVERY) % LAMP_EVERY === 0 && (!deck.door || sm < END - 6);
+      const coarse = deck.coarse ?? false;
       for (const side of [1, -1]) {
         const has = side > 0 ? deck.railR : deck.railL;
         if (!has(sm)) continue;
         // no lamp right beside the post a balustrade ends at
         if (lamp && has(sm - 2 * TREAD) && has(sm + 2 * TREAD)) {
-          pushPost(edge(sm, side, top, 0.22));
+          pushPost(edge(sm, side, top, 0.22), 1, coarse);
           const e = edge(sm, side, top + 2.5, 0.22);
-          pushLantern(e[0], e[1], e[2], 1);
-        } else pushBaluster(edge(sm, side, top, 0.22), 1.45 + (heightAt(sm) - top));
+          pushLantern(e[0], e[1], e[2], 1, coarse);
+        } else pushBaluster(edge(sm, side, top, 0.22), 1.45 + (heightAt(sm) - top), coarse);
       }
     }
     for (const s of deck.ends) {
@@ -1222,17 +1347,26 @@ function getAssets(index: number): Assets {
   const lampAt = layout.rideS(layout.stretch.distance(8.5) + 2.9);
   const ridePhase = Math.round((lampAt - ride.first) / TREAD - 0.5) % LAMP_EVERY;
   addDeck(ride, ridePhase);
+  for (const v of layout.landingLamps) {
+    pushPost(v);
+    pushLantern(v[0], v[1] + 2.5, v[2], 1);
+  }
   addDeck(layout.lower, 1);
   addDeck(layout.upper, 1);
   addDeck(layout.twin, 3);
+  layout.sister.forEach((deck, i) => addDeck(deck, 1 + 2 * i));
+  for (const rung of layout.rungs) addDeck(rung, 0);
   hxStairs.phi0 = layout.phi0;
   hxStairs.tops = layout.treadTops;
   hxStairs.low = layout.lowOff;
   hxStairs.high = layout.highOff;
   hxStairs.floor = -EYE;
   hxStairs.rise = layout.rise;
-  hxStairs.y0 = deckAt(layout.twin, 0).h - 3;
-  hxStairs.y1 = deckAt(layout.twin, layout.twin.end).h + 3;
+  hxNewel.span.value.set(deckAt(layout.twin, 0).h - 3, deckAt(layout.twin, layout.twin.end).h + 3);
+  const sisterNewel: NewelFrame = {
+    axis: { value: new Vector4(SISTER_AT[0], layout.sisterY, SISTER_AT[1], 1) },
+    span: { value: new Vector2(deckAt(layout.sister[0]!, 0).h - layout.sisterY - 3, deckAt(layout.sister[1]!, layout.sister[1]!.end).h - layout.sisterY + 3) },
+  };
   const stairs = sq.build();
   const rails = new BufferGeometry();
   rails.setAttribute("position", new BufferAttribute(new Float32Array(rp), 3));
@@ -1242,39 +1376,45 @@ function getAssets(index: number): Assets {
 
   // ---- central column: a solomonic (barley-sugar) shaft, wound against the stair ----
   const colY0 = COLUMN_Y0, colY1 = COLUMN_Y1;
-  const CS = COLUMN_LOBES * 26, CR = Math.ceil((colY1 - colY0) / 1.2);
   const LOBES = COLUMN_LOBES, TWIST = -COLUMN_TWIST, DEPTH = COLUMN_DEPTH;
-  const cp = new Float32Array((CS + 1) * (CR + 1) * 3);
-  const cn = new Float32Array(cp.length);
-  const cc = new Float32Array(cp.length);
-  const ci: number[] = [];
-  for (let j = 0; j <= CR; j++) {
-    const y = colY0 + ((colY1 - colY0) * j) / CR;
-    for (let i = 0; i <= CS; i++) {
-      const th = (i / CS) * TAU;
-      const ph = LOBES * (th + y * TWIST);
-      const r = COLUMN_R + DEPTH * Math.cos(ph);
-      const drdph = -DEPTH * Math.sin(ph);
-      const rTh = drdph * LOBES, rY = drdph * LOBES * TWIST;
-      const k = (j * (CS + 1) + i) * 3;
-      const c = Math.cos(th), s = Math.sin(th);
-      cp[k] = r * c; cp[k + 1] = y; cp[k + 2] = r * s;
-      const nx = r * c + rTh * s, ny = -r * rY, nz = r * s - rTh * c;
-      const nl = Math.hypot(nx, ny, nz);
-      cn[k] = nx / nl; cn[k + 1] = ny / nl; cn[k + 2] = nz / nl;
-      const shade = 0.62 + 0.38 * smooth(-1, 0.6, Math.cos(ph));
-      cc[k] = IVORY[0] * shade; cc[k + 1] = IVORY[1] * shade; cc[k + 2] = IVORY[2] * shade;
-      if (i < CS && j < CR) {
-        const a = j * (CS + 1) + i, b = a + CS + 1;
-        ci.push(a, b, a + 1, a + 1, b, b + 1);
+  /** `around` facets to a lobe, a ring every `course` of height */
+  const buildColumn = (around: number, course: number) => {
+    const CS = COLUMN_LOBES * around, CR = Math.ceil((colY1 - colY0) / course);
+    const cp = new Float32Array((CS + 1) * (CR + 1) * 3);
+    const cn = new Float32Array(cp.length);
+    const cc = new Float32Array(cp.length);
+    const ci: number[] = [];
+    for (let j = 0; j <= CR; j++) {
+      const y = colY0 + ((colY1 - colY0) * j) / CR;
+      for (let i = 0; i <= CS; i++) {
+        const th = (i / CS) * TAU;
+        const ph = LOBES * (th + y * TWIST);
+        const r = COLUMN_R + DEPTH * Math.cos(ph);
+        const drdph = -DEPTH * Math.sin(ph);
+        const rTh = drdph * LOBES, rY = drdph * LOBES * TWIST;
+        const k = (j * (CS + 1) + i) * 3;
+        const c = Math.cos(th), s = Math.sin(th);
+        cp[k] = r * c; cp[k + 1] = y; cp[k + 2] = r * s;
+        const nx = r * c + rTh * s, ny = -r * rY, nz = r * s - rTh * c;
+        const nl = Math.hypot(nx, ny, nz);
+        cn[k] = nx / nl; cn[k + 1] = ny / nl; cn[k + 2] = nz / nl;
+        const shade = 0.62 + 0.38 * smooth(-1, 0.6, Math.cos(ph));
+        cc[k] = IVORY[0] * shade; cc[k + 1] = IVORY[1] * shade; cc[k + 2] = IVORY[2] * shade;
+        if (i < CS && j < CR) {
+          const a = j * (CS + 1) + i, b = a + CS + 1;
+          ci.push(a, b, a + 1, a + 1, b, b + 1);
+        }
       }
     }
-  }
-  const column = new BufferGeometry();
-  column.setAttribute("position", new BufferAttribute(cp, 3));
-  column.setAttribute("normal", new BufferAttribute(cn, 3));
-  column.setAttribute("color", new BufferAttribute(cc, 3));
-  column.setIndex(ci);
+    const g = new BufferGeometry();
+    g.setAttribute("position", new BufferAttribute(cp, 3));
+    g.setAttribute("normal", new BufferAttribute(cn, 3));
+    g.setAttribute("color", new BufferAttribute(cc, 3));
+    g.setIndex(ci);
+    return g;
+  };
+  const column = buildColumn(26, 1.2);
+  const sisterColumn = buildColumn(12, 2.4); // the camera never comes within a dozen units of it
 
   // ---- shaft wall: one arcade module, bent onto the cylinder and sheared along the helix ----
   const W = WALL_W;
@@ -1366,10 +1506,10 @@ function getAssets(index: number): Assets {
     phase: rand() * TAU,
   });
   const satellites = [
-    sat(34, 7, 8, 1.3, 0.1, 0.5, 0.16), // hangs beside the fly-in
+    sat(36, 9, 30, 1.3, 0.1, 0.5, 0.16), // hangs beside the fly-in, short of the sister tower
     sat(-12, -24, 34, 0.2, 1.2, 0.5, -0.14), // below the bridge in
     sat(-35, 10, 5, 0.25, 0.3, 0.5, 0.18), // out over the void, half way up the turn
-    sat(33, 21, -29, 0.9, 0.5, 0.4, -0.12), // to the right of the arch
+    sat(-34, -14, -22, 0.9, 0.5, 0.4, -0.12), // low in the void on the far side of the turn
     sat(-18, 26, -38, 0.3, -1.1, 0.45, 0.14), // and to its left
     sat(84, 6, 50, 0.5, 0.45, 1.5, -0.07),
     sat(-92, 26, -54, 0.2, -0.95, 1.7, 0.06),
@@ -1441,6 +1581,7 @@ function getAssets(index: number): Assets {
   const wallMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "wall");
   const stairMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "stair");
   const columnMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "column");
+  const sisterColumnMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "column", sisterNewel);
   const postMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "post");
   const keyholeMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "keyhole");
   // the two bridges and the arch stand in the koi's water: where, as angles about the newel
@@ -1458,6 +1599,9 @@ function getAssets(index: number): Assets {
   const koi = createKoi({
     count: 84, rMin: layout.R + HALF_W + 5, rMax: WALL_R - 5, yMid: 6, yRange: 150, fogNear: FOG_NEAR, fogFar: FOG_FAR, skyGlsl: SKY_GLSL,
     keepOut: [bridgeIn, bridgeOut],
+    // the sister tower fills the water from the rungs to the wall: no fish comes round to it
+    wedge: { angle: Math.atan2(SISTER_AT[1], SISTER_AT[0]), halfAngle: 0.65, until: TIMING.total },
+    door: { centre: new Vector3(layout.doorPos.x, layout.doorPos.y + DOOR_CY, layout.doorPos.z), radius: 6.2, from: 17.5, to: 20 },
   });
   const glow = withVoidFog(new MeshBasicMaterial({ color: new Color(1.35, 0.6, 0.16) }), "globe");
   // lamplight in the keyhole before the portal opens: the globes' glass, turned down
@@ -1518,16 +1662,23 @@ function getAssets(index: number): Assets {
   });
 
   cache = {
-    index, layout, stairs, rails, column, wall, satellite,
+    index, layout, stairs, rails, column, sisterColumn, sisterColumnMat, wall, satellite,
     baluster: lathe(BALUSTER_PROFILE, 7),
     post: lathe(POST_PROFILE, 20),
     lantern: new SphereGeometry(0.22, 28, 16),
     sky: new SphereGeometry(1200, 24, 16),
     points, doorFrame, doorBack, doorPortal,
-    stone, keyholeMat, columnMat, postMat, wallMat, stairMat, koi, glow, veilMat, skyMat, pointsMat,
-    balusterM: new Float32Array(balusters),
-    postM: new Float32Array(posts),
-    lanternM: new Float32Array(lanterns),
+    stone, keyholeMat, columnMat, postMat,
+    depthOnly: new MeshBasicMaterial({ colorWrite: false, fog: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 2 }), wallMat, stairMat, koi, glow, veilMat, skyMat, pointsMat,
+    balusterM: new Float32Array(balusters[0]!),
+    postM: new Float32Array(posts[0]!),
+    lanternM: new Float32Array(lanterns[0]!),
+    coarseBaluster: lathe(BALUSTER_COARSE, 5),
+    coarsePost: lathe(POST_COARSE, 10),
+    coarseLantern: new SphereGeometry(0.22, 16, 9),
+    coarseBalusterM: new Float32Array(balusters[1]!),
+    coarsePostM: new Float32Array(posts[1]!),
+    coarseLanternM: new Float32Array(lanterns[1]!),
     wallM: new Float32Array(wallM),
     satellites,
   };
@@ -1556,13 +1707,31 @@ export default function Helix({ index, clock, camera, portalMaterial }: ScenePro
     sky.renderOrder = -10;
     const column = new Mesh(A.column, A.columnMat);
     const stairs = new Mesh(A.stairs, A.stairMat);
+    // Draw order, so that stone nothing sees is never shaded: the two newels lay down their depth
+    // first, everything that stands in front of them follows, then the newels themselves, and
+    // the arcade and the far stairs, which are behind it all, come last.
+    const columnDepth = new Mesh(A.column, A.depthOnly);
+    const sisterColumnDepth = new Mesh(A.sisterColumn, A.depthOnly);
+    columnDepth.renderOrder = sisterColumnDepth.renderOrder = -5;
+    column.renderOrder = 2;
     const rails = new Mesh(A.rails, A.stone);
     const balusters = instanced(A.baluster, A.postMat, A.balusterM);
     const postMesh = instanced(A.post, A.postMat, A.postM);
     const lanterns = instanced(A.lantern, A.glow, A.lanternM);
+    const coarse = [
+      instanced(A.coarseBaluster, A.postMat, A.coarseBalusterM),
+      instanced(A.coarsePost, A.postMat, A.coarsePostM),
+      instanced(A.coarseLantern, A.glow, A.coarseLanternM),
+    ];
+    const sisterColumn = new Mesh(A.sisterColumn, A.sisterColumnMat);
+    sisterColumn.position.set(SISTER_AT[0], A.layout.sisterY, SISTER_AT[1]);
+    sisterColumnDepth.position.copy(sisterColumn.position);
+    sisterColumn.renderOrder = 2;
     const wall = instanced(A.wall, A.wallMat, A.wallM);
+    wall.renderOrder = 3;
     const sats = new InstancedMesh(A.satellite, A.stone, A.satellites.length);
     sats.frustumCulled = false;
+    sats.renderOrder = 3;
     const points = new Points(A.points, A.pointsMat);
     points.frustumCulled = false;
     const door = new Group();
@@ -1576,8 +1745,12 @@ export default function Helix({ index, clock, camera, portalMaterial }: ScenePro
     const veil = new Mesh(A.doorPortal, A.veilMat);
     veil.position.z = 0.012;
     door.add(new Mesh(A.doorFrame, A.keyholeMat), doorBack, portal, veil);
-    root.add(sky, column, stairs, rails, balusters, postMesh, lanterns, wall, sats, A.koi.mesh, points, door);
-    return { A, root, sky, column, sats, veil, instancedMeshes: [balusters, postMesh, lanterns, wall, sats] };
+    root.add(sky, columnDepth, sisterColumnDepth, column, sisterColumn, stairs, rails, balusters, postMesh, lanterns, ...coarse, wall, sats, A.koi.mesh, points, door);
+    return {
+      A, root, sky, sats, veil,
+      columns: [column, columnDepth], sisterColumns: [sisterColumn, sisterColumnDepth],
+      instancedMeshes: [balusters, postMesh, lanterns, ...coarse, wall, sats],
+    };
   }, [index, portalMaterial]);
 
   useEffect(() => () => rig.instancedMeshes.forEach((m) => m.dispose()), [rig]);
@@ -1588,7 +1761,7 @@ export default function Helix({ index, clock, camera, portalMaterial }: ScenePro
   );
 
   useFrame((state) => {
-    const { A, sky, column, sats, veil } = rig;
+    const { A, sky, columns, sisterColumns, sats, veil } = rig;
     const { stretch, centre } = A.layout;
     const t = Math.min(TIMING.total, Math.max(0, clock.t));
     const { pose, ahead, look, q, o, fwd } = tmp;
@@ -1604,13 +1777,17 @@ export default function Helix({ index, clock, camera, portalMaterial }: ScenePro
     }
     camera.position.copy(pose.position).sub(centre);
     camera.quaternion.copy(pose.quaternion);
-    // the lens tightens on the last landing, and has settled before the two cameras share the track
-    const fov = FOV + (FOV_DOOR - FOV) * smooth(stretch.exit - 31, stretch.exit - 20, d);
+    // The lens is wide while the scene is a picture in the orbit's gate (and steady: the two
+    // cameras share the track), closes to the ride's as the camera turns onto the stair, tightens
+    // again on the last landing and has settled before the cameras share the track once more.
+    const fov =
+      FOV_IN + (FOV - FOV_IN) * smooth(stretch.joint + 2.2, stretch.joint + 12, d) + (FOV_DOOR - FOV) * smooth(stretch.exit - 31, stretch.exit - 20, d);
     if (camera.fov !== fov) camera.fov = fov;
 
     // --- the world turns ---
     sky.position.copy(camera.position);
-    column.rotation.y = -t * 0.035;
+    for (const m of columns) m.rotation.y = -t * 0.035;
+    for (const m of sisterColumns) m.rotation.y = t * 0.035; // the sister's newel turns the other way
     for (let i = 0; i < A.satellites.length; i++) {
       const s = A.satellites[i]!;
       q.setFromAxisAngle(Y_AXIS, s.phase + t * s.spin);
