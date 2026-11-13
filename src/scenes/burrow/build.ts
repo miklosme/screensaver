@@ -535,48 +535,11 @@ function doorLoop(ch: Chamber, door: Door): Vector3[] {
 }
 
 function buildDoorFrame(ch: Chamber, door: Door): BufferGeometry {
-  const loop = doorLoop(ch, door);
-  const radius = 0.27 * Math.sqrt(door.k);
-  const ref = door.t.clone().negate();
-  const geo = sweepTube(loop, true, radius, 10, ref);
+  const geo = sweepTube(doorLoop(ch, door), true, 0.27 * Math.sqrt(door.k), 10, door.t.clone().negate());
   const pos = geo.getAttribute("position") as BufferAttribute;
   const hgt = new Float32Array(pos.count);
   for (let i = 0; i < pos.count; i++) hgt[i] = pos.getY(i) - ch.c.y;
   geo.setAttribute("hgt", new BufferAttribute(hgt, 1));
-  // `rim`, for the trim's shader: the tube's radius, signed by which way round the tube the opening
-  // lies (+ when the tube's second axis, as sweepTube builds it, points into the opening); how far
-  // along the loop the ring of the tube is, in world units; how far the point stands out through the
-  // chamber's wall (about 0 where the tube is seated in it, negative inside the chamber); and its
-  // height above the floor's dish
-  const n = loop.length;
-  const mid = loop.reduce((a, p) => a.add(p), new Vector3()).divideScalar(n);
-  const T = new Vector3();
-  const N = new Vector3();
-  const B = new Vector3();
-  const rows = n + 1;
-  const ring = pos.count / rows;
-  const rim = new Float32Array(pos.count * 4);
-  let s = 0;
-  for (let i = 0; i < rows; i++) {
-    const k = i % n;
-    if (i > 0) s += loop[k]!.distanceTo(loop[i - 1]!);
-    T.copy(loop[(k + 1) % n]!).sub(loop[(k + n - 1) % n]!).normalize();
-    N.copy(ref).addScaledVector(T, -T.dot(ref)).normalize();
-    B.crossVectors(T, N);
-    const sgn = B.dot(mid.clone().sub(loop[k]!)) >= 0 ? 1 : -1;
-    for (let j = 0; j < ring; j++) {
-      const v = i * ring + j;
-      const o = v * 4;
-      const rx = pos.getX(v) - ch.c.x;
-      const ry = pos.getY(v) - ch.c.y - ch.yc;
-      const rz = pos.getZ(v) - ch.c.z;
-      rim[o] = sgn * radius;
-      rim[o + 1] = s;
-      rim[o + 2] = (Math.sqrt((rx * rx + rz * rz) / (ch.R * ch.R) + (ry * ry) / (ch.H * ch.H)) - 1) * ch.R;
-      rim[o + 3] = pos.getY(v) - floorY(ch, Math.hypot(pos.getX(v) - ch.c.x, pos.getZ(v) - ch.c.z));
-    }
-  }
-  geo.setAttribute("rim", new BufferAttribute(rim, 4));
   return geo;
 }
 
