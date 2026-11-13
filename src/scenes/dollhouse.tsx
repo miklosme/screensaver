@@ -52,11 +52,11 @@ import { createGarden, glScreen, onScreen } from "./dollhouse/garden";
  *
  * The camera is the rail's (./rail.ts): the dollhouse rides fall, and the garden is laid out round
  * that stretch from what its camera sees (see "the rail" and "layout" below). The ride: the garden
- * opens out with the navy doorway ahead and the stele small and blank from behind on the left; the
- * camera passes between the navy hall and the dusk avenue, climbs the first dune, dives through a
- * striped arch (an empty frame, from behind) into a hollow with a doorway on either hand, sweeps
- * round to the left up a second dune and under a giant hoop on its crest, from where the stele is
- * seen across the garden with its leaves swinging open, and goes down the stepping stones into it.
+ * opens out with the navy doorway ahead; the camera passes between the navy hall and the dusk
+ * avenue, climbs the first dune, dives through a striped arch (an empty frame, from behind) into a
+ * hollow with a doorway on either hand, and banks hard left there, which brings the stele into the
+ * middle of the picture, framed by the giant hoop on the crest of the second dune, its leaves
+ * beginning to swing. It flies under the hoop and down the stepping stones to the stele.
  */
 
 // ───────────────────────────── palette ─────────────────────────────
@@ -215,8 +215,10 @@ function keyed(keys: [number, number][]) {
 
 /**
  * All the scene adds to the rail's camera is where it looks while it has the track to itself
- * (FALL.free): degrees to the left of the rail's heading, and above it, by local time. It looks
- * across at the navy doorway as it passes, and into the long left-hand bend that ends at the stele.
+ * (FALL.free): degrees to the left of the rail's heading, and above it, by local time, as it looks
+ * across at the navy doorway in passing and down the far side of the first dune; and from the
+ * left-hander in the hollow on, how far it has turned to the stele (HOLD: 1 is looking straight at
+ * it), which comes round into the middle of the picture there and is held until the approach.
  */
 const GLANCE_YAW = keyed([
   [5.6, 0],
@@ -224,24 +226,27 @@ const GLANCE_YAW = keyed([
   [9.2, -25],
   [10, -20],
   [11.2, 0],
-  [13.6, 0],
-  [15.6, 30],
-  [18, 30],
-  [20, 0],
 ]);
 const GLANCE_PITCH = keyed([
   [9.6, 0],
   [10.6, -8],
   [11.8, -4],
-  [13, 0],
-  [15.6, 0],
-  [16.6, -4],
-  [17.8, 0],
+  // it does not stare at the sand all the way down the dive through the arch
+  [12.4, 0],
+  [13.4, 6],
+  [14.4, 6],
+  [15.4, 0],
+]);
+const HOLD = keyed([
+  [14, 0],
+  [15.4, 1],
 ]);
 /** steady while two cameras share the track (until 5.6 s, from 20 s) */
 const fovAt = (t: number) => 50 + 7 * smoothstep(13, 19.9, t);
 const _pose = createFrame();
 const _aim = new Vector3();
+/** what the camera holds in the middle of the picture from the hollow on: the stele's doorway */
+const EXIT_AIM = new Vector3(0, HERO_Y + PLINTH + 3.2, 0);
 /** the camera at local time t: a pure function of t */
 function cameraAt(t: number, camera: PerspectiveCamera) {
   const pose = poseAt(t, _pose);
@@ -255,6 +260,8 @@ function cameraAt(t: number, camera: PerspectiveCamera) {
     _aim.y = flat * Math.tan(Math.atan2(_aim.y, flat) + pitch * DEG);
     lookTowards(pose, _aim.multiplyScalar(20).add(pose.position), free);
   }
+  const hold = HOLD(t) * free;
+  if (hold > 0) lookTowards(pose, EXIT_AIM, hold);
   camera.quaternion.copy(pose.quaternion);
   const fov = fovAt(t);
   if (camera.fov !== fov) {
@@ -480,23 +487,23 @@ const door = (at: XZ, to: XZ, scale: number, pal: number, frame: number, room: n
 });
 /** the navy doorway onto the colonnaded hall: the opening looks at it, and the camera passes close by its left jamb */
 const D1 = beside(20, 4.1, 20.8);
-/** the striped arch the camera dives through from behind, on the far side of the first dune */
-const ARCH_D = 63;
-/** the giant hoop astride the track on the crest of the second dune */
-const HOOP_D = 81.5;
+/** the striped arch the camera dives through from behind, on the far side of the first dune, where the left-hander begins */
+const ARCH_D = 61.3;
+/** the giant hoop astride the track on the crest of the second dune: from the hollow, the stele is seen through it */
+const HOOP_D = 83;
 const DOORS: DoorDef[] = [
   door(D1, eyeAt(3.5), 1.35, 0, 0, 0),
   // beside it in the opening, across the plain
-  door(seen(3, -13, 31), eyeAt(2.5), 1.25, 1, 2, 2),
+  door(seen(3, -14, 31), eyeAt(2.5), 1.25, 1, 2, 2),
   door(beside(24, -8.5), eyeAt(4.5), 0.36, 2, 2, 1, true),
   door(seen(1, 5, 95), eyeAt(1), 1.9, 0, 3, 1),
   // across the hollow between the dunes: one to the left of the dive, one to the right
-  door(seen(12, -27, 29), eyeAt(12.2), 1.5, 2, 3, 1),
+  door(seen(12, -22, 33), eyeAt(12.2), 1.5, 2, 3, 1),
   door(seen(12, 26, 24), eyeAt(12.2), 1.2, 3, 1, 3),
   // the arch across the track: its front faces the way the camera is going
   door(beside(ARCH_D, 0), beside(ARCH_D + 4, 0), 1.4, 2, 0, 2),
-  // outside the long bend
-  door(seen(15.5, -27, 34), eyeAt(15.5), 1.3, 1, 1, 0),
+  // beyond the arch, seen through it from the first dune; and a hut beside the way down to the stele
+  door(seen(12.3, -3, 40), eyeAt(12.3), 1.3, 1, 1, 0),
   door(beside(87, 9.5), eyeAt(16), 0.4, 3, 3, 3, true),
   // behind and beside the stele, seen on the final approach
   { x: -15, z: -13, fx: 0.25, fz: 1, scale: 1.15, pal: 1, frame: 3, room: 1 },
@@ -537,7 +544,7 @@ const STONE_AT: XZ[] = (() => {
   const c = { x: D1.x + (DOORS[0]!.fx / l) * 1.0, z: D1.z + (DOORS[0]!.fz / l) * 1.0 };
   run((k) => ({ x: (1 - k) * (1 - k) * a.x + 2 * k * (1 - k) * b.x + k * k * c.x, z: (1 - k) * (1 - k) * a.z + 2 * k * (1 - k) * b.z + k * k * c.z }), 0.9);
   // down to the plinth: under the track, as far as the plinth's edge
-  const d0 = 84;
+  const d0 = 75;
   const d1 = FALL.exit - 9.4;
   run((k) => beside(d0 + (d1 - d0) * k, 0), 1.1);
   return out;
@@ -572,11 +579,18 @@ const SIGHT_LINES: [XZ, XZ, number][] = [
   [eyeAt(1.5), DOORS[1]!, 4],
   [eyeAt(12), DOORS[4]!, 4],
   [eyeAt(12), DOORS[5]!, 4],
-  [eyeAt(15.2), DOORS[7]!, 4],
+  // through the arch, to the doorway beyond it
+  [eyeAt(12), DOORS[7]!, 5],
   // the dive from the first dune through the arch, and the floor of the hollow
   [eyeAt(11.8), eyeAt(15.2), 9],
-  [eyeAt(16.4), { x: 0, z: 0 }, 5],
+  // the stele, from where it comes into sight in the hollow to the approach
+  [eyeAt(14.6), { x: 0, z: 0 }, 6],
+  [eyeAt(15.5), { x: 0, z: 0 }, 7],
   [eyeAt(18), { x: 0, z: 0 }, 5],
+  // nothing tall beside the lens as the scene opens, and nothing looming behind the arch in the hollow
+  [eyeAt(0), seen(0, 28, 13), 5],
+  [eyeAt(2.5), seen(2.5, 30, 13), 5],
+  [seen(12, 0, 12), seen(12, 0, 36), 11],
 ];
 /** true where a prop of radius r stands clear of the camera's track, the doors, the stele and the lines of sight */
 const clear = (x: number, z: number, r: number) => {
@@ -637,8 +651,11 @@ const BEDS = (
         [68, -3.6],
         [70, -4],
         [73, 3.4],
+        [73, -2.8],
+        [75, 2.6],
         [76, -3.6],
         [79, 4.2],
+        [81, -2.8],
         [86, -3.4],
         [89, 3.6],
         [92, -4.6],
@@ -651,6 +668,27 @@ const BEDS = (
       return { ...at, tx: (on.x - at.x) / l, tz: (on.z - at.z) / l, along: 2.4, across: 1.0 };
     }),
   );
+
+/**
+ * True where a thing of radius r shows in the middle ground of the picture at local time t: within
+ * `reach` of the camera and inside its frame. What stands there is placed on purpose (the
+ * doorways, the groves, the skyline's hoops); a dome or a hoop scattered into it would loom over
+ * them.
+ */
+const inPicture = (t: number, reach: number) => {
+  const from = eyeAt(t);
+  const f = poseAt(t).tangent;
+  const l = Math.hypot(f.x, f.z);
+  return (x: number, z: number, r = 0) => {
+    const dx = x - from.x;
+    const dz = z - from.z;
+    const d = Math.hypot(dx, dz);
+    return d < reach + r && (dx * f.x + dz * f.z) / l / d > Math.cos(47 * DEG + Math.atan2(r, d));
+  };
+};
+/** the opening, and the view from the first dune through the arch */
+const inOpening = inPicture(0, 72);
+const inHollow = inPicture(12, 66);
 
 /**
  * Where on its circle round the garden a flock is when the scene begins, for it to cross the line
@@ -667,7 +705,7 @@ function flockLead(from: XZ, to: XZ, radius: number, speed: number, t: number) {
   return Math.atan2(oz + (dz / l) * k, ox + (dx / l) * k) - speed * t;
 }
 /** one flock is over the far garden in the opening, the other over the stele as it comes into sight */
-const FLOCKS: [number, number] = [flockLead(eyeAt(1.5), seen(1.5, 8, 60), 82, 8.25 / 82, 1.5), flockLead(eyeAt(17.5), { x: 0, z: 0 }, 50, -8.25 / 50, 17.5)];
+const FLOCKS: [number, number] = [flockLead(eyeAt(1.5), seen(1.5, 8, 60), 82, 8.25 / 82, 1.5), flockLead(eyeAt(15.5), { x: 0, z: 0 }, 50, -8.25 / 50, 15.5)];
 
 /**
  * Lollipop trees planted on purpose: groves along the skyline of the opening, between and behind
@@ -676,7 +714,7 @@ const FLOCKS: [number, number] = [flockLead(eyeAt(1.5), seen(1.5, 8, 60), 82, 8.
 const GROVES = (
   [
     [-33, 50],
-    [-21, 66],
+    [-25, 80],
     [-9, 74],
     [4, 60],
     [15, 47],
@@ -687,7 +725,6 @@ const GROVES = (
 /** hoops on that skyline: [degrees right of the opening's view, distance, radius] */
 const SKYLINE_HOOPS = (
   [
-    [-25, 92, 15],
     [-3, 120, 19],
     [22, 84, 13],
   ] as const
@@ -2523,8 +2560,8 @@ function makeSkyMaterial() {
 }
 
 // ───────────────────────────── scene ─────────────────────────────
-/** the leaves begin to swing as the second dune is crested and stand open as the approach begins */
-const LEAVES_OPEN = [15.6, 19.8] as const;
+/** the leaves begin to swing as the stele comes into sight in the hollow and stand open before the approach begins */
+const LEAVES_OPEN = [13.4, 18.8] as const;
 
 /**
  * The sand as a mesh: a square grid warped like the shadow mask, so that its cells are half a unit
@@ -2743,7 +2780,8 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     const K = crowns.current!;
     let n = 0;
     const GROVE = 6;
-    let tries = 0;
+    // each grove has its own budget of tries, so that one with no room cannot starve the next
+    const groveTries: number[] = [];
     while (n < T.count) {
       const a = rnd() * Math.PI * 2;
       const r = 10 + Math.pow(rnd(), 0.75) * 190;
@@ -2751,8 +2789,9 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       let z = GC.z + Math.sin(a) * r;
       let hgt = (1.4 + rnd() * 3.2) * (1 + r / 160);
       // the first few stand in the groves of the opening's skyline
-      const grove = GROVES[Math.floor(n / GROVE)];
-      if (grove && tries++ < 4000) {
+      const gi = Math.floor(n / GROVE);
+      const grove = GROVES[gi];
+      if (grove && (groveTries[gi] = (groveTries[gi] ?? 0) + 1) < 600) {
         const gr = 1.5 + Math.sqrt(rnd()) * 7;
         x = grove.x + Math.cos(a) * gr;
         z = grove.z + Math.sin(a) * gr;
@@ -2815,7 +2854,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       const s = 7 + rnd() * 16 + r * 0.03;
       const tall = 0.7 + rnd() * 0.9;
       const ci = Math.floor(rnd() * domeCols.length);
-      if (!clear(x, z, s + 8)) continue;
+      if (!clear(x, z, s + 8) || inOpening(x, z, s)) continue;
       o.position.set(x, ground(x, z) - s * 0.25, z);
       o.rotation.set(0, rnd() * 6, 0);
       o.scale.set(s, s * tall, s);
@@ -2855,7 +2894,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
         // square on to the opening's camera
         ({ x, z, s } = sky);
         rot = Math.atan2(x - TRACK[12]!.x, z - TRACK[12]!.z);
-      } else if (!clear(x, z, s + 5) || !clear(x + Math.cos(rot) * s, z - Math.sin(rot) * s, 5) || !clear(x - Math.cos(rot) * s, z + Math.sin(rot) * s, 5)) continue;
+      } else if (inOpening(x, z, s) || inHollow(x, z, s) || !clear(x, z, s + 5) || !clear(x + Math.cos(rot) * s, z - Math.sin(rot) * s, 5) || !clear(x - Math.cos(rot) * s, z + Math.sin(rot) * s, 5)) continue;
       o.position.set(x, ground(x, z) - s * 0.12, z);
       o.rotation.set(0, rot, 0);
       const tall = n === 0 ? 1.05 : 0.8 + rnd() * 0.7;
