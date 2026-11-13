@@ -229,27 +229,25 @@ interface DoorDef {
   pal: number;
   frame: number;
   hut?: boolean;
-  /** world radius of the rotunda inside */
-  R: number;
 }
 const DOORS: DoorDef[] = [
-  { x: D1.x, z: D1.z, fx: 0.0, fz: -1, scale: 1, pal: 0, frame: 0, R: 14 },
+  { x: D1.x, z: D1.z, fx: 0.0, fz: -1, scale: 1, pal: 0, frame: 0 },
   // seen behind D1 in the opening shot
-  { x: -21, z: 50, fx: 0.75, fz: -1, scale: 1.25, pal: 1, frame: 2, R: 22 },
-  { x: 5, z: 58, fx: 0.15, fz: -1, scale: 0.34, pal: 3, frame: 1, hut: true, R: 14 },
-  { x: -42, z: 78, fx: 0.7, fz: -1, scale: 1.7, pal: 2, frame: 3, R: 26 },
+  { x: -21, z: 50, fx: 0.75, fz: -1, scale: 1.25, pal: 1, frame: 2 },
+  { x: 5, z: 58, fx: 0.15, fz: -1, scale: 0.34, pal: 3, frame: 1, hut: true },
+  { x: -42, z: 78, fx: 0.7, fz: -1, scale: 1.7, pal: 2, frame: 3 },
   // seen across D1 while orbiting
-  { x: -13, z: 33, fx: 1, fz: 0.25, scale: 0.36, pal: 2, frame: 2, hut: true, R: 15 },
-  { x: -27, z: 22, fx: 1, fz: 0.35, scale: 1.1, pal: 3, frame: 1, R: 20 },
-  { x: -46, z: 40, fx: 1, fz: 0.0, scale: 0.5, pal: 1, frame: 3, hut: true, R: 16 },
+  { x: -13, z: 33, fx: 1, fz: 0.25, scale: 0.36, pal: 2, frame: 2, hut: true },
+  { x: -27, z: 22, fx: 1, fz: 0.35, scale: 1.1, pal: 3, frame: 1 },
+  { x: -46, z: 40, fx: 1, fz: 0.0, scale: 0.5, pal: 1, frame: 3, hut: true },
   // behind / beside the hero stele, seen on the final approach
-  { x: -15, z: -13, fx: 0.25, fz: 1, scale: 1.15, pal: 1, frame: 3, R: 20 },
-  { x: 17, z: -24, fx: -0.3, fz: 1, scale: 1.4, pal: 2, frame: 1, R: 24 },
-  { x: 10.5, z: -3, fx: -0.25, fz: 1, scale: 0.34, pal: 0, frame: 2, hut: true, R: 14 },
-  { x: -9, z: 7, fx: 0.45, fz: 1, scale: 0.3, pal: 3, frame: 0, hut: true, R: 13 },
-  { x: -34, z: -44, fx: 0.4, fz: 1, scale: 2.0, pal: 0, frame: 2, R: 30 },
-  { x: 40, z: -58, fx: -0.4, fz: 1, scale: 0.6, pal: 1, frame: 0, hut: true, R: 18 },
-  { x: 30, z: 6, fx: -1, fz: 0.5, scale: 0.9, pal: 3, frame: 3, R: 18 },
+  { x: -15, z: -13, fx: 0.25, fz: 1, scale: 1.15, pal: 1, frame: 3 },
+  { x: 17, z: -24, fx: -0.3, fz: 1, scale: 1.4, pal: 2, frame: 1 },
+  { x: 10.5, z: -3, fx: -0.25, fz: 1, scale: 0.34, pal: 0, frame: 2, hut: true },
+  { x: -9, z: 7, fx: 0.45, fz: 1, scale: 0.3, pal: 3, frame: 0, hut: true },
+  { x: -34, z: -44, fx: 0.4, fz: 1, scale: 2.0, pal: 0, frame: 2 },
+  { x: 40, z: -58, fx: -0.4, fz: 1, scale: 0.6, pal: 1, frame: 0, hut: true },
+  { x: 30, z: 6, fx: -1, fz: 0.5, scale: 0.9, pal: 3, frame: 3 },
 ];
 
 /** true where a prop of radius r stands clear of the camera's track, the doors and the stele */
@@ -465,17 +463,53 @@ const TINTS = 160;
 const FRAME_COLORS = ["#f4ead4", "#f6b598", "#a2dcbf", "#a6cbee"];
 const HUT_COLORS = ["#f3e4c6", "#f4a98e", "#93d6b8", "#9cc3ec"];
 
-// interior palettes: wall low, wall high, floor, glow, orb. The rooms are the darkest, richest
-// things in the garden: each doorway is a jewel set in pale sand.
+// interior palettes: deep shade, lit surface, the room's far haze, its light, its accent. A room is
+// in shade, so everything in it but its light is darker and more saturated than the sunlit garden:
+// each doorway is a dark jewel set in pale sand.
 const INTERIORS: [string, string, string, string, string][] = [
-  ["#2c3f96", "#7fa6ee", "#1f2a70", "#f4dfae", "#f4907c"],
-  ["#a83c6a", "#f09aaa", "#7a2c58", "#f4e6b8", "#7fdcc8"],
-  ["#5a3fa4", "#b09af0", "#3e2c7c", "#f4d2ba", "#f4c766"],
-  ["#177a72", "#84dcc0", "#105650", "#f4eab4", "#f4849a"],
+  ["#182060", "#4a6ccc", "#7c9ade", "#f6e8b6", "#f48e78"],
+  ["#4c1846", "#b85084", "#d88aa8", "#f6e6bc", "#78dcc6"],
+  ["#281c60", "#6e56c8", "#a08cde", "#f6dcbc", "#f4c460"],
+  ["#0a3c46", "#2a8e86", "#74c0b0", "#f6ecb6", "#f48098"],
 ];
 
 /** the kind of room behind each doorway (see makeInteriorMaterial), in the order of DOORS: no two neighbours alike */
-const ROOMS = [0, 2, 3, 1, 3, 0, 2, 1, 3, 0, 2, 1, 0, 3];
+const ROOMS = [0, 2, 3, 1, 1, 3, 2, 1, 0, 3, 2, 0, 1, 2];
+
+/** the furthest the eye is taken to be from a doorway when its room is drawn, in door units (see makeInteriorMaterial) */
+const EYE_FAR = 20;
+/** the height in a doorway (which is 5.6 tall) at which its room's horizon is put */
+const HORIZON_Y = 3.5;
+/**
+ * Where a doorway is mostly seen from, as the shear (sideways, upwards, per unit of depth) that
+ * turns its room to face that way: the points of the camera's track in front of it, the near and
+ * the square-on ones counting for most. It follows the track, whatever the track becomes.
+ */
+function aimOf(d: DoorDef, path: Vector3[]) {
+  const ry = Math.atan2(d.fx, d.fz);
+  const c = Math.cos(ry);
+  const s = Math.sin(ry);
+  const gy = ground(d.x, d.z);
+  let sx = 0;
+  let sy = 0;
+  let sz = 0;
+  let sw = 0;
+  for (const p of path) {
+    const lx = (c * (p.x - d.x) - s * (p.z - d.z)) / d.scale;
+    const lz = (s * (p.x - d.x) + c * (p.z - d.z)) / d.scale;
+    const ly = (p.y - gy) / d.scale;
+    if (lz < 1) continue;
+    const dist2 = lx * lx + ly * ly + lz * lz;
+    const w = (lz * lz) / dist2 / (Math.sqrt(dist2) + 15);
+    sx += w * lx;
+    sy += w * ly;
+    sz += w * lz;
+    sw += w;
+  }
+  if (sw === 0) return new Vector2(0, 0);
+  const clamp = (v: number, m: number) => Math.min(m, Math.max(-m, v));
+  return new Vector2(clamp(-sx / sz, 0.5), clamp((HORIZON_Y * sw - sy) / sz, 0.25));
+}
 
 // ───────────────────────────── shaders ─────────────────────────────
 const FOG_GLSL = /* glsl */ `
@@ -551,31 +585,46 @@ const SAND_GLSL = /* glsl */ `
 
 /**
  * What lies behind a doorway, ray-cast in the fragment shader of its flat opening from the view ray
- * in the door's own space, so that it has its own vanishing point and true parallax. Four kinds of
- * room, picked per door (ROOMS below):
- * 0 ENFILADE: a gallery of rooms opening one into the next through arches, receding to a lit sky,
- *   a striped ball turning in the fourth room;
- * 1 ROTUNDA: a domed hall with a lit arcade round its wall, an orb under the oculus;
- * 2 AVENUE: open air under the room's own sky, a winding avenue of hoops marching to the horizon
- *   under a slowly turning ringed planet;
- * 3 TUNNEL: a round tunnel of discs, each cut with an arch that is turned a little further than the
- *   last, the whole screw slowly twisting, towards a glow.
- * Everything is in units of R, the room's size, so a little hut holds as much as a tall door.
- * Edges are antialiased by the width of a pixel at the distance of the hit (px * t), and layers
- * are composited front to back, which keeps the many thin arch edges from crawling.
+ * in the door's own space, so that it has its own vanishing point and true parallax.
+ *
+ * Every room is built the same way, because that is what makes a hole in a sheet of paper read as a
+ * vast space at any size: a dark reveal just inside the frame (a wall far thicker than the door),
+ * then near surfaces in deep shade, a floor that runs away to the room's own horizon, air that
+ * lightens and hazes with distance, and one small bright thing far inside. Value carries the depth:
+ * nothing inside is as light as the sunlit garden except the far light.
+ *
+ * Four kinds of room, picked per door (ROOMS above):
+ * 0 HALL: a nave between two rows of columns, lit pools under its skylights, a ball turning in the
+ *   fourth pool, a far doorway onto daylight;
+ * 1 ROTUNDA: a round hall ringed with dozens of small lit doors, an orb under the oculus;
+ * 2 AVENUE: open air under the room's own dusk sky, striped hoops marching down a pale path to the
+ *   horizon under a slowly turning ringed planet;
+ * 3 FOREST: the hall again, lower and wider, four rows of columns.
+ *
+ * Two things are done to the ray before it enters the room, both of them linear (so the room stays
+ * one solid thing with consistent parallax):
+ * - the eye is never taken to be further than EYE_FAR from the door. From far away a doorway is a
+ *   telephoto slot that would show only a sliver of floor; held at EYE_FAR it shows the whole
+ *   composition, and the room dollies as the camera closes in;
+ * - the room is sheared by `aim` so that its long axis and its horizon point at where the door is
+ *   mostly seen from (aimOf), which puts the far light in the opening, not off behind the frame.
+ *
+ * No room has a loop except the avenue's hoops: the rows of columns are found in closed form (the
+ * first column of a periodic row that a ray meets). Edges are antialiased by the width of a pixel
+ * at the distance of the hit (px * t), and the floors by a box-filtered checker.
  */
-function makeInteriorMaterial(pal: number, R: number, room: number, seed: number) {
+function makeInteriorMaterial(pal: number, room: number, seed: number, aim: Vector2) {
   const p = INTERIORS[pal]!;
   return new ShaderMaterial({
     side: FrontSide,
+    defines: { ROOM: room },
     uniforms: {
       uT: { value: 0 },
-      R: { value: R },
-      uRoom: { value: room },
       uSeed: { value: seed },
+      uAim: { value: aim },
       cLow: { value: new Color().setRGB(...onScreen(p[0])) },
       cHigh: { value: new Color().setRGB(...onScreen(p[1])) },
-      cFloor: { value: new Color().setRGB(...onScreen(p[2])) },
+      cFog: { value: new Color().setRGB(...onScreen(p[2])) },
       cGlow: { value: new Color().setRGB(...onScreen(p[3])) },
       cOrb: { value: new Color().setRGB(...onScreen(p[4])) },
     },
@@ -589,24 +638,31 @@ function makeInteriorMaterial(pal: number, R: number, room: number, seed: number
       }
     `,
     fragmentShader: /* glsl */ `
-      uniform float R;
       uniform float uT;
-      uniform float uRoom;
       uniform float uSeed;
-      uniform vec3 cLow, cHigh, cFloor, cGlow, cOrb;
+      uniform vec2 uAim;
+      uniform vec3 cLow, cHigh, cFog, cGlow, cOrb;
       varying vec3 vP;
       varying vec3 vCam;
       const float TAU = 6.2831853;
-      float aastep(float e, float x) { float w = fwidth(x) * 0.75 + 1e-5; return smoothstep(e - w, e + w, x); }
+      const float A = ${D_A.toFixed(2)}, HS = ${D_HS.toFixed(2)};
+      /** depth of the reveal, and the furthest the eye is taken to be from the door */
+      const float REVEAL = 0.4, EYE_FAR = ${EYE_FAR.toFixed(1)};
+
       float archSd(vec2 q, float a, float hs) { return q.y < hs ? abs(q.x) - a : length(q - vec2(0.0, hs)) - a; }
       mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, s, -s, c); }
-      /** a checker of cell size c, its contrast fading as the cells shrink below a few pixels (w: world size of a pixel) */
-      float checker(vec2 q, float c, float w) {
-        vec2 f = abs(fract(q / c) - 0.5) * 2.0 - 0.5;   // > 0 in one half of a cell
-        float e = w / c * 2.0 + 1e-4;
-        float k = smoothstep(-e, e, f.x) * 2.0 - 1.0;
-        k *= smoothstep(-e, e, f.y) * 2.0 - 1.0;
-        return 0.5 + 0.5 * k * (1.0 - smoothstep(0.15, 0.5, w / c));
+      /** a checker of unit cells, box-filtered over a footprint w (in cells): it fades to its mean where the cells are smaller than a pixel */
+      float checker(vec2 p, vec2 w) {
+        w = max(w, 1e-4);
+        vec2 i = 2.0 * (abs(fract((p - 0.5 * w) * 0.5) - 0.5) - abs(fract((p + 0.5 * w) * 0.5) - 0.5)) / w;
+        return 0.5 - 0.5 * i.x * i.y;
+      }
+      /** the footprint of a pixel on a level floor, along x and z */
+      vec2 floorW(vec3 rd, float t, float px) {
+        vec2 d = rd.xz / max(length(rd.xz), 1e-4);
+        float across = px * t;
+        float along = across / max(abs(rd.y), 0.03);
+        return abs(d) * along + abs(d.yx) * across;
       }
       /** a ball: x = distance along the ray (1e9 if missed), y = coverage of the pixel */
       vec2 ball(vec3 ro, vec3 rd, vec3 c, float r, float px) {
@@ -623,281 +679,351 @@ function makeInteriorMaterial(pal: number, R: number, room: number, seed: number
         float s = sin(ang * 4.0 + n.y * 2.5);
         float m = smoothstep(-0.25, 0.25, s);
         float l = 0.55 + 0.45 * dot(n, normalize(vec3(0.3, 1.0, 0.45)));
-        return mix(a, b, m) * (0.45 + 0.75 * l);
+        return mix(a, b, m) * (0.4 + 0.85 * l);
       }
-      /** the far light at the end of a room: a pale sky, brightest round a low sun straight ahead */
-      vec3 farSky(vec3 rd) {
-        float h = clamp(rd.y * 1.6 + 0.15, 0.0, 1.0);
-        vec3 c = mix(cGlow * 1.35, mix(cGlow, cHigh, 0.55), h);
-        float s = max(0.0, dot(rd, normalize(vec3(0.0, 0.12, -1.0))));
-        c += cGlow * (0.9 * pow(s, 60.0) + 2.4 * smoothstep(0.9975, 0.9985, s));
-        return c;
+      /** the room's own air: a surface t away fades into a lighter haze */
+      vec3 air(vec3 c, float t, float len) { return mix(c, cFog, 0.86 * (1.0 - exp(-t / len))); }
+
+      #if ROOM == 0 || ROOM == 3
+      // ── the hall, and the forest of columns ──
+      #if ROOM == 0
+        const float H_W = 8.2, H_H = 8.8;
+      #else
+        const float H_W = 11.4, H_H = 7.0;
+      #endif
+      const float H_CX = 2.85, H_RC = 0.3, H_S = 5.6, H_L = 67.2, H_FOG = 42.0;
+      /**
+       * A row of round columns at x = xr, z = -(k + off) H_S for k = 0, 1 ..: the first one the ray
+       * meets, found without a loop. The ray crosses the row's line at one place, and the columns it
+       * can touch lie within rSel of there (stretched by the angle of the crossing); the first is the
+       * nearest of them to the door. rgb: its colour, a: how much of the pixel it covers.
+       */
+      vec4 column(vec3 ro, vec3 rd, float px, float xr, float off, float rSel, out float tc) {
+        tc = 1e9;
+        float rx = abs(rd.x) < 1e-5 ? 1e-5 : rd.x;
+        float z0 = ro.z + rd.z * (xr - ro.x) / rx;
+        float dl2 = max(dot(rd.xz, rd.xz), 1e-8);
+        float dl = sqrt(dl2);
+        float k = max(0.0, ceil(-(z0 + rSel * dl / abs(rx)) / H_S - off));
+        float zk = -(k + off) * H_S;
+        vec2 oc = vec2(ro.x - xr, ro.z - zk);
+        float qb = dot(oc, rd.xz);
+        float tm = -qb / dl2;                                   // closest approach, in plan
+        if (tm <= 0.0) return vec4(0.0);
+        float dp = sqrt(max(dot(oc, oc) - qb * qb / dl2, 0.0));
+        float y = ro.y + rd.y * tm;
+        // a drum at the foot, a flare under the ceiling
+        float r = H_RC * (1.0 + 0.6 * (1.0 - smoothstep(0.4, 0.5, y)) + 1.0 * smoothstep(H_H - 1.5, H_H - 0.1, y));
+        float cov = clamp((r - dp) / (px * tm) + 0.5, 0.0, 1.0);
+        if (cov <= 0.0) return vec4(0.0);
+        tc = tm - sqrt(max(r * r - dp * dp, 0.0)) / dl;
+        vec3 h = ro + rd * tc;
+        vec2 n = normalize(vec2(h.x - xr, h.z - zk) + 1e-5);
+        // lit from the nave and from the far end
+        float lam = 0.5 + 0.5 * dot(n, normalize(vec2(-sign(xr), -0.9)));
+        float deep = smoothstep(0.0, 20.0, -h.z);
+        vec3 c = mix(cLow * 0.42, mix(cLow, cHigh, 0.92), lam * lam * (0.35 + 0.65 * deep));
+        // it stands on the floor
+        c *= 0.4 + 0.6 * smoothstep(0.0, 1.8, h.y);
+        return vec4(air(c, tc, H_FOG), cov);
       }
 
-      // ── 0: enfilade ──
-      vec3 enfilade(vec3 ro, vec3 rd, float px) {
-        float W = 0.26 * R, H = 0.56 * R, s = 0.3 * R;
-        float aP = 0.6 * W, hsP = 0.46 * H;
-        const int NP = 8;
-        float zEnd = -s * float(NP);
-        // the box of the gallery: side walls, floor and ceiling
-        float tx = (sign(rd.x) * W - ro.x) / (abs(rd.x) < 1e-5 ? 1e-5 : rd.x);
-        float ty = rd.y < 0.0 ? -ro.y / rd.y : (H - ro.y) / max(rd.y, 1e-5);
-        float tb = min(tx, ty);
-        vec3 pb = ro + rd * tb;
-        vec3 fogC = mix(cGlow, cHigh, 0.5) * 0.85;
-        vec3 bg;
-        if (pb.z < zEnd) {
-          bg = farSky(rd);
+      vec3 room(vec3 ro, vec3 rd, float px) {
+        float sx = rd.x < 0.0 ? -1.0 : 1.0;
+        float rx = abs(rd.x) < 1e-5 ? sx * 1e-5 : rd.x;
+        float tW = (sx * H_W - ro.x) / rx;
+        float tF = rd.y < 0.0 ? -ro.y / rd.y : 1e9;
+        float tC = rd.y > 0.0 ? (H_H - ro.y) / rd.y : 1e9;
+        float tE = (-H_L - ro.z) / min(rd.z, -1e-5);
+        float t = min(min(tW, tE), min(tF, tC));
+        vec3 p = ro + rd * t;
+        // the lights are over z = -m H_S, m = 1, 2 ..; the columns stand half way between them
+        float m = floor(-p.z / H_S + 0.5);
+        float zl = -m * H_S;
+        float on = step(0.5, m);
+        float zc = -(floor(-p.z / H_S) + 0.5) * H_S;
+        float deep = smoothstep(0.0, 20.0, -p.z);               // the near end is the darkest
+        // the ball, turning in the fourth pool of light
+        vec3 bc = vec3(0.0, 2.2 + 0.3 * sin(uT * 0.9 + uSeed * 6.0), -4.0 * H_S);
+        float br = 1.05;
+        vec3 col;
+        if (t == tF) {
+          const float CELL = 1.425;
+          float c = checker(p.xz / CELL, floorW(rd, t, px) / CELL);
+          col = mix(cLow * 0.55, mix(cLow, cHigh, 0.5), c);
+          vec2 dq = vec2(p.x, p.z - zl);
+          float pool = on * (1.0 - smoothstep(0.7, 1.9, length(dq)));
+          // light from the aisle windows lies across the aisle floor
+          float win = on * exp(-pow((p.z - zl) / 1.1, 2.0)) * smoothstep(H_CX, H_W, abs(p.x));
+          // and the far doorway lays a carpet of light down the nave
+          float carpet = exp(-pow(p.x / 1.3, 2.0)) * pow(deep, 1.5) * smoothstep(0.0, H_L, -p.z);
+          // contact: round every column's foot, along the walls, under the ball
+          float ao = smoothstep(H_RC * 1.2, H_RC * 4.5, length(vec2(abs(p.x) - H_CX, p.z - zc)));
+          #if ROOM == 3
+            ao *= smoothstep(H_RC * 1.2, H_RC * 4.5, length(vec2(abs(p.x) - 7.1, p.z - zl)));
+          #endif
+          ao *= 0.5 + 0.5 * smoothstep(0.0, 1.6, H_W - abs(p.x));
+          vec2 db = p.xz - bc.xz;
+          ao *= 1.0 - 0.65 * exp(-dot(db, db) / (br * br * 1.4));
+          col = col * (0.3 + 0.25 * deep + 0.75 * pool + 0.6 * win) * mix(0.35, 1.0, ao) + mix(cFog, cGlow, 0.5) * (0.14 * pool * ao) + cGlow * (0.3 * carpet);
+        } else if (t == tC) {
+          float w = px * t / max(rd.y, 0.05) + 1e-4;
+          float d = length(vec2(p.x, p.z - zl));
+          float sk = on * (1.0 - smoothstep(-w, w, d - 1.0));
+          float beam = 1.0 - smoothstep(-w, w, abs(p.z - zc) - 0.45);
+          col = cLow * (0.36 + 0.2 * deep) * (1.0 - 0.4 * beam);
+          col += cGlow * 0.3 * on * exp(-d * d / 6.0);
+          col = mix(col, cGlow * 2.2, sk);
+        } else if (t == tE) {
+          col = mix(cLow, cHigh, 0.6);
         } else {
-          float k = floor(-pb.z / s);
-          float zc = -(k + 0.5) * s;               // middle of this room
-          float alt = mod(k, 2.0);
-          if (ty < tx && rd.y < 0.0) {
-            float c = checker(pb.xz + vec2(0.0, s * 0.25), s * 0.25, px * tb);
-            bg = mix(cFloor * 0.8, mix(cFloor, cHigh, 0.4), c);
-            // a pool of daylight in each room from a skylight
-            vec2 dq = vec2(pb.x / W, (pb.z - zc) / s);
-            bg += cGlow * 0.32 * exp(-dot(dq, dq) * 3.0);
-            bg *= 0.82 + 0.18 * smoothstep(0.0, 0.6, abs(pb.x) / W - 0.3);
-          } else if (ty < tx) {
-            // ceiling: coffers, a skylight in every room
-            float sk = 1.0 - smoothstep(0.0, px * tb * 2.0 + 0.02 * R, length(vec2(pb.x, (pb.z - zc) * 0.8)) - 0.22 * W);
-            bg = mix(cLow * 0.7, cGlow * 1.6, sk);
-          } else {
-            // walls: dark low, lit high, a niche in every room glowing with yet another world
-            bg = mix(cLow * 0.75, cHigh * 0.8, 0.6 * smoothstep(0.1, 1.0, pb.y / H));
-            bg = mix(bg, mix(bg, cOrb * 0.7, 0.4), alt * 0.6);
-            float n = archSd(vec2(pb.z - zc, pb.y), 0.16 * s, 0.32 * H);
-            float wN = px * tb * 1.5 + 1e-4;
-            float rim = smoothstep(-wN, wN, n + 0.035 * R) * (1.0 - smoothstep(-wN, wN, n));
-            bg = mix(bg, mix(cGlow, cOrb, 0.3 + 0.3 * sin(uT * 0.7 + k * 1.3)) * 1.25, 1.0 - smoothstep(-wN, wN, n));
-            bg = mix(bg, cHigh * 1.1, rim);
-            // a skirting line
-            bg *= 1.0 - 0.3 * (1.0 - smoothstep(0.0, px * tb + 0.01 * R, pb.y - 0.05 * H));
-          }
-          bg = mix(bg, fogC, 0.9 * (1.0 - exp(-tb / (R * 4.5))));
+          // the aisle wall: a tall lit window opposite every skylight
+          float w = px * t * 1.5 + 1e-4;
+          col = mix(cLow * 0.5, mix(cLow, cHigh, 0.4), 0.1 + 0.45 * deep) * (0.5 + 0.5 * smoothstep(0.0, 1.6, p.y));
+          vec2 q = vec2(p.z - zl, p.y - 1.7);
+          float sd = max(archSd(q, 0.95, 2.6), -q.y);
+          float inside = on * (1.0 - smoothstep(-w, w, sd));
+          float rim = on * (1.0 - smoothstep(-w, w, sd - 0.28));
+          col = mix(col, mix(cLow, cHigh, 0.85), rim * 0.8);
+          // a skirting, and a string course under the sills
+          col *= 1.0 - 0.3 * (1.0 - smoothstep(-w, w, p.y - 0.4));
+          col = mix(col, mix(cLow, cHigh, 0.8), 0.55 * (1.0 - smoothstep(-w, w, abs(p.y - 1.5) - 0.09)));
+          // glazing bars
+          float bars = 1.0 - smoothstep(-w, w, min(abs(q.x), abs(q.y - 2.6)) - 0.055);
+          vec3 pane = mix(cGlow, cOrb, 0.25 + 0.2 * sin(uT * 0.6 + m * 1.7)) * (1.1 + 0.7 * smoothstep(1.7, 5.2, p.y));
+          col = mix(col, mix(pane, cLow, 0.75 * bars), inside);
         }
-        // the arches, front to back, with the ball in the fourth room
-        vec3 acc = vec3(0.0);
-        float T = 1.0;
-        vec3 bc = vec3(0.0, 0.3 * H + 0.03 * R * sin(uT * 0.9 + uSeed * 6.0), -3.5 * s);
-        float br = 0.075 * R;
-        for (int k = 0; k < NP; k++) {
-          float zk = -s * float(k + 1);
-          float tz = (zk - ro.z) / min(rd.z, -1e-5);
-          if (k == 3) {
-            vec2 hb = ball(ro, rd, bc, br, px);
-            if (hb.x < tb) {
-              vec3 n = normalize(ro + rd * hb.x - bc);
-              vec3 c = stripedBall(n, cOrb, cGlow * 1.2, uT * 0.5);
-              c = mix(c, fogC, 0.9 * (1.0 - exp(-hb.x / (R * 4.5))));
-              acc += T * hb.y * c;
-              T *= 1.0 - hb.y;
-            }
-          }
-          if (tz > tb) break;
-          vec3 p = ro + rd * tz;
-          float sd = archSd(p.xy, aP, hsP);
-          float w = px * tz * 1.2 + 1e-4;
-          float cov = smoothstep(-w, w, sd);
-          float alt = mod(float(k), 2.0);
-          vec3 c = mix(mix(cLow, cHigh, 0.3), mix(cLow, cOrb, 0.45), alt);
-          c *= 0.75 + 0.35 * smoothstep(0.0, H, p.y);
-          // a moulded reveal round each arch
-          float rim = 1.0 - smoothstep(-w, w, sd - 0.028 * R);
-          c = mix(c, mix(cGlow, cHigh, 0.55) * 0.95, rim * 0.9);
-          c = mix(c, cLow * 0.8, 0.5 * (1.0 - smoothstep(-w, w, sd - 0.045 * R)) * (1.0 - rim));
-          c = mix(c, fogC, 0.9 * (1.0 - exp(-tz / (R * 4.5))));
-          acc += T * cov * c;
-          T *= 1.0 - cov;
-          if (T < 0.01) break;
+        col = air(col, t, H_FOG);
+        // the far end: a doorway like the one we look through, onto daylight, and its light in the hall's air
+        if (t == tE) {
+          float w = px * t * 1.5 + 1e-4;
+          col = mix(col, cGlow * 3.4, 1.0 - smoothstep(-w, w, archSd(p.xy, 1.35, 2.5)));
         }
-        return acc + T * bg;
-      }
+        float g = max(0.0, dot(rd, normalize(vec3(-ro.x, 2.2 - ro.y, -H_L))));
+        col += cGlow * (0.4 * pow(g, 1400.0) + 0.1 * pow(g, 120.0));
 
-      // ── 1: rotunda ──
-      vec3 rotunda(vec3 ro, vec3 rd) {
-        vec3 C = vec3(0.0, 0.0, -R * 0.9);         // centre of the rotunda floor
-        vec3 oc = ro - C;
-        float b = dot(oc, rd);
-        float h = b * b - (dot(oc, oc) - R * R);
-        float tS = -b + sqrt(max(h, 0.0));
+        // the columns: the row on the side the ray leans to (the one further out too, in the forest)
+        float tc, tc2;
+        vec4 c1 = column(ro, rd, px, sx * H_CX, 0.5, H_RC, tc);
+        if (tc > t) c1.a = 0.0;
+        // the same row again with the widest radius, for a drum or a flare nearer than the shaft found above
+        vec4 c0 = column(ro, rd, px, sx * H_CX, 0.5, H_RC * 2.0, tc2);
+        if (tc2 > t || tc2 >= tc) c0.a = 0.0;
+        #if ROOM == 3
+          float tc3;
+          vec4 c3 = column(ro, rd, px, sx * 7.1, 1.0, H_RC, tc3);
+          if (tc3 < t) col = mix(col, c3.rgb, c3.a);
+        #endif
+        vec2 hb = ball(ro, rd, bc, br, px);
+        vec3 bcol = vec3(0.0);
+        if (hb.x < t) {
+          vec3 n = normalize(ro + rd * hb.x - bc);
+          bcol = stripedBall(n, cOrb, cGlow * 1.25, uT * 0.5) * 1.15;
+          bcol = mix(bcol, cFog, 0.5 * (1.0 - exp(-hb.x / H_FOG)));
+        } else hb.y = 0.0;
+        if (hb.x > min(tc, tc2)) col = mix(col, bcol, hb.y);
+        col = mix(col, c1.rgb, c1.a);
+        col = mix(col, c0.rgb, c0.a);
+        if (hb.x <= min(tc, tc2)) col = mix(col, bcol, hb.y);
+        return col;
+      }
+      #endif
+
+      #if ROOM == 1
+      // ── the rotunda ──
+      vec3 room(vec3 ro, vec3 rd, float px) {
+        const float RR = 42.0, HSP = 12.0, FOGL = 100.0, N = 72.0;
+        vec3 C = vec3(0.0, 0.0, -(RR - 0.6));                  // centre of the floor
+        vec2 o = ro.xz - C.xz;
+        float qa = max(dot(rd.xz, rd.xz), 1e-6), qb = dot(o, rd.xz), qc = dot(o, o) - RR * RR;
+        float tS = (-qb + sqrt(max(qb * qb - qa * qc, 0.0))) / qa;
         float tF = rd.y < -1e-4 ? -ro.y / rd.y : 1e9;
         float t = min(tS, tF);
         vec3 p = ro + rd * t;
-        vec3 q = p - C;
-        float ang = atan(q.x, q.z);
+        // the orb under the oculus
+        vec3 oC = C + vec3(0.0, 3.4 + 0.5 * sin(uT * 0.8 + uSeed * 6.0), 0.0);
+        float oR = 2.0;
+        float deep = smoothstep(0.0, 34.0, -p.z);
         vec3 col;
         if (tF < tS) {
-          float r = length(q.xz) / R;
-          float rings = r * 9.0;
-          float seg = ang / TAU * 28.0;
-          float chk = abs(mix(-1.0, 1.0, aastep(0.5, fract(rings))) * mix(-1.0, 1.0, aastep(0.5, fract(seg))) * 0.5 + 0.5);
-          chk = mix(0.5, chk, smoothstep(0.03, 0.12, r) * (1.0 - smoothstep(0.0, 0.9, fwidth(seg))) * (1.0 - smoothstep(0.0, 0.9, fwidth(rings))));
-          col = mix(cFloor, mix(cFloor, cHigh, 0.45), chk);
-          col += cHigh * 0.35 * exp(-r * r * 7.0);
-          col *= 1.0 - 0.35 * (1.0 - smoothstep(0.08, 0.2, r));
-          col = mix(col, cLow, smoothstep(0.75, 1.0, r) * 0.5);
+          vec2 q = p.xz - C.xz;
+          float r = length(q);
+          float ang = atan(q.x, q.y);
+          const float RING = 2.0;
+          vec2 fw = floorW(rd, t, px);
+          float wm = max(fw.x, fw.y);
+          float c = checker(vec2(r / RING, ang / TAU * N), vec2(wm / RING, wm * N / (TAU * max(r, 0.5))));
+          c = mix(0.5, c, smoothstep(5.0, 7.0, r));
+          col = mix(cLow * 0.55, mix(cLow, cHigh, 0.5), c);
+          float pool = 1.0 - smoothstep(2.5, 6.0, r);
+          // every little door lays its light on the floor before it
+          float spill = exp(-(RR - r) / 2.2) * (0.35 + 0.65 * pow(0.5 + 0.5 * cos(ang * N), 3.0)) * smoothstep(4.0, 16.0, -p.z);
+          float ao = 1.0 - 0.75 * exp(-r * r / (oR * oR * 1.3));
+          ao *= 0.55 + 0.45 * smoothstep(0.0, 1.0, RR - r);
+          col = col * (0.3 + 0.25 * deep + 0.9 * pool + 0.8 * spill) * ao + cGlow * (0.16 * pool * ao + 0.25 * spill);
+        } else if (p.y < HSP) {
+          vec2 q = p.xz - C.xz;
+          float u = atan(q.x, q.y) / TAU * N;
+          float cw = TAU * RR / N;
+          float w = px * t * 1.5 + 1e-4;
+          col = mix(cLow * 0.5, mix(cLow, cHigh, 0.55), 0.15 + 0.5 * deep) * (0.5 + 0.5 * smoothstep(0.0, 1.4, p.y));
+          // a cornice over the doors, another under the dome
+          float corn = (1.0 - smoothstep(-w, w, abs(p.y - 3.4) - 0.16)) + (1.0 - smoothstep(-w, w, abs(p.y - 7.6) - 0.16)) + (1.0 - smoothstep(-w, w, abs(p.y - HSP + 0.3) - 0.3));
+          col = mix(col, mix(cLow, cHigh, 0.9), 0.6 * corn);
+          // a ring of small doors, each lit from the room behind it
+          float lx = (fract(u) - 0.5) * cw;
+          float sd = archSd(vec2(lx, p.y), 0.75, 1.45);
+          float lit = 0.75 + 0.25 * sin(uT * 0.9 - floor(u) * 0.8);
+          col = mix(col, mix(cLow, cHigh, 0.9), 0.8 * (1.0 - smoothstep(-w, w, sd - 0.22)));
+          col = mix(col, mix(cGlow, cOrb, 0.2 + 0.25 * sin(floor(u) * 2.4)) * (1.5 * lit), 1.0 - smoothstep(-w, w, sd));
+          // round windows above them
+          // two galleries of smaller windows above them
+          float lx2 = (fract(u + 0.5) - 0.5) * cw;
+          float sd2 = min(max(archSd(vec2(lx2, p.y - 4.5), 0.42, 1.0), 4.5 - p.y), max(archSd(vec2(lx, p.y - 8.6), 0.42, 0.9), 8.6 - p.y));
+          col = mix(col, mix(cGlow, cOrb, 0.3) * (0.8 + 0.25 * sin(floor(u) * 5.1 + uT * 0.3)), 1.0 - smoothstep(-w, w, sd2));
         } else {
-          float y = q.y / R;
-          col = mix(cLow, cHigh, 0.75 * smoothstep(0.15, 1.0, y));
-          float rib = abs(fract(ang / TAU * 22.0) - 0.5);
-          col = mix(col, cHigh, 0.35 * (1.0 - smoothstep(0.0, 0.035, rib)) * smoothstep(0.42, 0.5, y));
-          float lat = abs(fract(y * 7.0) - 0.5);
-          col *= 1.0 - 0.10 * (1.0 - smoothstep(0.0, 0.05, lat)) * smoothstep(0.44, 0.5, y);
-          float u = (fract(ang / TAU * 22.0 + 0.5) - 0.5) * 2.0;
-          float v = y / 0.34;
-          float au = abs(u) / 0.56;
-          float inside = step(au, 1.0) * step(v, 0.62 + 0.36 * sqrt(max(0.0, 1.0 - au * au)));
-          float edge = step(abs(u) / 0.66, 1.0) * step(v, 0.66 + 0.40 * sqrt(max(0.0, 1.0 - min(1.0, au * au * 0.72))));
-          col = mix(col, cLow * 0.82, (edge - inside) * 0.9);
-          float lit = 0.8 + 0.2 * sin(uT * 1.1 - floor(ang / TAU * 22.0 + 0.5) * 0.9);
-          col = mix(col, mix(cGlow, cOrb, 0.25 + 0.5 * v) * lit * 1.5, inside * 0.92);
-          float oc2 = smoothstep(0.955, 0.965, y);
-          col = mix(col, cGlow, 0.5 * smoothstep(0.7, 0.96, y));
-          col = mix(col, vec3(4.0, 3.8, 3.2), oc2);
+          // the dome: ribs running up to the oculus
+          vec3 Cd = C + vec3(0.0, HSP, 0.0);
+          vec3 od = ro - Cd;
+          float b = dot(od, rd);
+          t = -b + sqrt(max(b * b - (dot(od, od) - RR * RR), 0.0));
+          p = ro + rd * t;
+          vec3 n = (p - Cd) / RR;
+          float u = atan(n.x, n.z) / TAU * N * 0.5;
+          float w = px * t * 1.5 / RR * N * 0.08 / max(length(n.xz), 0.05) + 1e-4;
+          float rib = 1.0 - smoothstep(0.06 - w, 0.06 + w, abs(fract(u) - 0.5));
+          col = cLow * (0.38 + 0.3 * n.y);
+          col = mix(col, mix(cLow, cHigh, 0.6), 0.5 * rib * (1.0 - smoothstep(0.7, 0.95, n.y)));
+          col += cGlow * 0.5 * smoothstep(0.75, 0.97, n.y);
+          col = mix(col, cGlow * 3.4, smoothstep(0.972, 0.978, n.y));
         }
-        col = mix(col, mix(cHigh, cGlow, 0.35), 0.2 * (1.0 - exp(-t / (R * 1.9))));
-        vec3 oC = C + vec3(0.0, R * (0.36 + 0.04 * sin(uT * 0.8 + R)), 0.0);
-        float oR = R * 0.15;
-        vec3 oo = ro - oC;
-        float ob = dot(oo, rd);
-        float oh = ob * ob - (dot(oo, oo) - oR * oR);
-        if (oh > 0.0) {
-          float to = -ob - sqrt(oh);
-          if (to > 0.0 && to < t) {
-            vec3 n = (ro + rd * to - oC) / oR;
-            float l = 0.5 + 0.5 * n.y;
-            vec3 oc3 = mix(cOrb * 0.62, mix(cOrb, cGlow, 0.5), l * l);
-            oc3 += 0.25 * cGlow * pow(1.0 - max(0.0, -dot(n, rd)), 3.0);
-            col = mix(col, oc3, smoothstep(0.0, oR * 0.08, sqrt(oh)));
-          }
+        col = air(col, t, FOGL);
+        // the shaft of light falling from the oculus
+        float tm = -qb / qa;
+        float dp2 = max(dot(o, o) - qb * qb / qa, 0.0);
+        col += cGlow * 0.16 * exp(-dp2 / 12.0) * smoothstep(0.0, 4.0, tm) * (1.0 - smoothstep(t * 0.8, t, tm));
+        vec2 hb = ball(ro, rd, oC, oR, px);
+        if (hb.x < t) {
+          vec3 n = normalize(ro + rd * hb.x - oC);
+          vec3 c = stripedBall(n, cOrb, cGlow * 1.25, uT * 0.4) * 1.2;
+          col = mix(col, mix(c, cFog, 0.45 * (1.0 - exp(-hb.x / FOGL))), hb.y);
         }
         return col;
       }
+      #endif
 
-      // ── 2: avenue of hoops under the room's own sky ──
-      vec3 avenue(vec3 ro, vec3 rd, float px) {
-        float s = 0.4 * R;
-        float a = 0.12 * R, hs = 0.11 * R, band = 0.025 * R;
-        const int NP = 10;
-        // sky: deep overhead, its glow along the horizon, a ringed planet turning slowly
-        float hgt = clamp(rd.y, 0.0, 1.0);
-        vec3 sky = mix(cGlow * 1.15, mix(cLow, cHigh, 0.25), smoothstep(0.0, 0.35, hgt));
-        vec3 P = normalize(vec3(-0.2 + 0.4 * uSeed, 0.13, -1.0));
+      #if ROOM == 2
+      // ── an avenue of hoops under the room's own dusk ──
+      float hoopX(float k) { return sin(k * 0.9 + uSeed * 6.0) * 1.3 * smoothstep(0.0, 1.0, k); }
+      vec3 room(vec3 ro, vec3 rd, float px) {
+        const float S = 7.0, HA = 2.55, HH = 2.2, BAND = 0.44, FOGL = 110.0;
+        const int NP = 7;
+        // the sky: deep overhead, a band of light along the horizon, brightest straight ahead
+        float h = max(rd.y, 0.0);
+        float ahead = max(0.0, -rd.z / max(length(rd.xz), 1e-4));
+        ahead *= ahead;
+        vec3 hor = mix(cFog, cGlow, 0.15 + 0.55 * ahead) * (0.7 + 0.5 * ahead);
+        vec3 sky = mix(mix(cLow, cHigh, 0.55), cLow * 0.55, smoothstep(0.0, 0.11, h));
+        sky = mix(sky, hor, exp(-h * 70.0));
+        // a ringed planet low over the end of the avenue, turning slowly
+        vec3 P = normalize(vec3(-0.06 + 0.12 * uSeed, 0.085, -1.0));
         vec3 ex = normalize(cross(vec3(0.0, 1.0, 0.0), P));
         vec3 ey = cross(P, ex);
-        vec2 pp = vec2(dot(rd, ex), dot(rd, ey)) / 0.075;   // planet's disc, radius 1
-        float pw = px / 0.075 * 1.5 + 1e-4;
+        vec2 pp = vec2(dot(rd, ex), dot(rd, ey)) / 0.04;      // the planet's disc, radius 1
+        float pw = px / 0.04 * 1.5 + 1e-4;
         float pd = length(pp);
         float disc = 1.0 - smoothstep(1.0 - pw, 1.0 + pw, pd);
         vec2 rq = rot(0.35) * pp;
         float ring = length(rq * vec2(1.0, 4.2));
         float ringM = (1.0 - smoothstep(1.85 - pw * 3.0, 1.85 + pw * 3.0, ring)) * smoothstep(1.4 - pw * 3.0, 1.4 + pw * 3.0, ring);
-        float front = step(0.0, rq.y);               // the near half of the ring passes in front
-        vec3 pc = stripedBall(normalize(vec3(pp.x, pp.y, sqrt(max(0.0, 1.0 - pd * pd)))).xzy, cOrb, cGlow * 1.1, uT * 0.12);
-        sky = mix(sky, mix(cHigh, cGlow, 0.6) * 1.15, ringM * (1.0 - front) * (1.0 - disc));
+        float front = step(0.0, rq.y);                         // the near half of the ring passes in front
+        vec3 pc = stripedBall(normalize(vec3(pp.x, pp.y, sqrt(max(0.0, 1.0 - pd * pd)))).xzy, cOrb * 1.3, cGlow * 1.7, uT * 0.12);
+        sky += cGlow * 0.3 * exp(-pd * pd * 0.45) * step(0.0, rd.y);
+        sky = mix(sky, cGlow * 1.5, ringM * (1.0 - front) * (1.0 - disc));
         sky = mix(sky, pc, disc);
-        sky = mix(sky, mix(cHigh, cGlow, 0.6) * 1.2, ringM * front);
-        // ground
+        sky = mix(sky, cGlow * 1.7, ringM * front);
+        // the plain
         float tf = rd.y < 0.0 ? -ro.y / rd.y : 1e9;
         vec3 bg = sky;
         if (tf < 1e8) {
           vec3 g = ro + rd * tf;
-          float c = checker(g.xz, 0.22 * R, px * tf / max(-rd.y, 0.05) * 0.5);
-          vec3 fl = mix(cFloor * 0.8, mix(cFloor, cHigh, 0.4), c);
-          // the avenue's path
-          float path = abs(g.x - sin((-g.z / s - 1.0) * 0.9 + uSeed * 6.0) * 0.14 * R * smoothstep(s, 2.0 * s, -g.z));
-          fl = mix(fl, cGlow * 0.95, 0.7 * (1.0 - smoothstep(0.07 * R, 0.07 * R + px * tf * 2.0, path)));
-          bg = mix(fl, cGlow * 1.15, 1.0 - exp(-tf / (R * 7.0)));
+          const float CELL = 1.6;
+          vec2 fw = floorW(rd, tf, px);
+          float c = checker(g.xz / CELL, fw / CELL);
+          float deep = smoothstep(0.0, 24.0, -g.z);
+          vec3 fl = mix(cLow * 0.55, mix(cLow, cHigh, 0.5), c) * (0.4 + 0.35 * deep);
+          // the avenue's path, winding under the hoops
+          float pathx = sin((-g.z / S - 1.0) * 0.9 + uSeed * 6.0) * 1.3 * smoothstep(S, 2.0 * S, -g.z);
+          float path = 1.0 - smoothstep(0.85 - fw.x, 0.85 + fw.x, abs(g.x - pathx));
+          fl = mix(fl, mix(cFog, cGlow, 0.6) * (0.3 + 0.7 * deep), 0.9 * path);
+          // each hoop stands in a pool of shade, and throws its shadow back at us from the low light ahead
+          float k = max(floor(-g.z / S), 0.0);
+          float zk = -(k + 1.0) * S;
+          float foot = abs(abs(g.x - hoopX(k)) - (HA + BAND * 0.5));
+          float sh = (1.0 - smoothstep(BAND * 0.4, BAND * 0.9 + fw.x, foot)) * exp(-(g.z - zk) / 2.2);
+          fl *= 1.0 - 0.7 * sh;
+          bg = mix(fl, hor, 1.0 - exp(-tf / FOGL));
         }
         vec3 acc = vec3(0.0);
         float T = 1.0;
-        for (int k = 0; k < NP; k++) {
-          float zk = -s * (float(k) + 1.0);
-          float tz = (zk - ro.z) / min(rd.z, -1e-5);
+        for (int i = 0; i < NP; i++) {
+          float k = float(i);
+          float tz = (-S * (k + 1.0) - ro.z) / min(rd.z, -1e-5);
           if (tz > tf) break;
           vec3 p = ro + rd * tz;
-          float xk = sin(float(k) * 0.9 + uSeed * 6.0) * 0.14 * R * smoothstep(0.0, 1.0, float(k));
-          float sd = abs(archSd(vec2(p.x - xk, p.y), a + band * 0.5, hs)) - band * 0.5;
+          vec2 q = vec2(p.x - hoopX(k), p.y);
+          float sdi = archSd(q, HA, HH);
+          float sd = abs(sdi - BAND * 0.5) - BAND * 0.5;
           float w = px * tz * 1.2 + 1e-4;
           float cov = (1.0 - smoothstep(-w, w, sd)) * smoothstep(-w, w, p.y);
           if (cov <= 0.0) continue;
-          float alt = mod(float(k), 3.0);
-          vec3 c = alt < 0.5 ? cOrb : alt < 1.5 ? mix(cLow, cHigh, 0.5) : mix(cGlow, cOrb, 0.5);
-          // lit on its sunny side, a stripe of shade along the inside of the band
-          float across = clamp((archSd(vec2(p.x - xk, p.y), a, hs)) / band, 0.0, 1.0);
-          c *= 0.62 + 0.5 * across;
-          c = mix(c, cGlow * 1.15, 1.0 - exp(-tz / (R * 7.0)));
+          // candy stripes round the band, like the hoops in the garden outside
+          float along = q.y < HH ? q.y : HH + (HA + BAND * 0.5) * atan(abs(q.x), q.y - HH);
+          float st = along / 0.62 + k * 0.37;
+          float fine = w / 0.62 * 4.0;
+          float stripe = mix(0.5, smoothstep(-fine, fine, sin(st * TAU)), 1.0 - smoothstep(0.25, 0.8, fine));
+          vec3 c = mix(mix(cLow, cOrb, 0.75), mix(cHigh, cGlow, 0.6), stripe);
+          // dark against the light ahead, a rim of it round the inside of the band
+          float across = clamp(sdi / BAND, 0.0, 1.0);
+          c *= (0.36 + 0.3 * smoothstep(0.0, 4.0, k)) * (1.25 - 0.5 * across) * (0.55 + 0.45 * smoothstep(0.0, 1.2, p.y));
+          c = mix(c, hor, 1.0 - exp(-tz / FOGL));
           acc += T * cov * c;
           T *= 1.0 - cov;
           if (T < 0.01) break;
         }
         return acc + T * bg;
       }
-
-      // ── 3: a twisting tunnel of arch-cut discs ──
-      vec3 tunnel(vec3 ro, vec3 rd, float px) {
-        float Rt = 0.5 * R, yc = 0.44 * R, s = 0.36 * R;
-        const int NP = 10;
-        float zEnd = -s * float(NP);
-        vec2 o = ro.xy - vec2(0.0, yc);
-        vec2 d = rd.xy;
-        float qa = max(dot(d, d), 1e-6), qb = dot(o, d), qc = dot(o, o) - Rt * Rt;
-        float tc = (-qb + sqrt(max(qb * qb - qa * qc, 0.0))) / qa;
-        vec3 pc = ro + rd * tc;
-        vec3 fogC = mix(cGlow, cOrb, 0.25) * 1.1;
-        vec3 bg;
-        if (pc.z < zEnd) {
-          float g = length(rd.xy / max(-rd.z, 1e-3));
-          bg = mix(cGlow * 2.2, fogC, smoothstep(0.0, 0.25, g));
-        } else {
-          vec2 q = pc.xy - vec2(0.0, yc);
-          float ang = atan(q.y, q.x);
-          float sp = sin(ang * 5.0 + pc.z / s * 1.6 + uT * 0.12);
-          float w = px * tc * 5.0 / Rt + 1e-3;
-          bg = mix(cLow * 0.75, mix(cLow, cHigh, 0.45), smoothstep(-w, w, sp));
-          bg *= 0.75 + 0.25 * smoothstep(-Rt, Rt, q.y);
-          bg = mix(bg, fogC, 1.0 - exp(-tc / (R * 4.0)));
-        }
-        vec3 acc = vec3(0.0);
-        float T = 1.0;
-        float twist = 0.42 + 0.1 * sin(uT * 0.21 + uSeed * 6.0);
-        for (int k = 0; k < NP; k++) {
-          float zk = -s * float(k + 1);
-          float tz = (zk - ro.z) / min(rd.z, -1e-5);
-          if (tz > tc) break;
-          vec3 p = ro + rd * tz;
-          vec2 q = rot(float(k + 1) * twist) * (p.xy - vec2(0.0, yc));
-          float sd = archSd(q + vec2(0.0, 0.08 * Rt), 0.36 * Rt, 0.12 * Rt);
-          float w = px * tz * 1.2 + 1e-4;
-          float cov = smoothstep(-w, w, sd);
-          float alt = mod(float(k), 2.0);
-          vec3 c = mix(mix(cLow, cOrb, 0.5), mix(cLow, cHigh, 0.4), alt);
-          float rim = 1.0 - smoothstep(-w, w, sd - 0.05 * R);
-          c = mix(c, mix(cGlow, cHigh, 0.4), rim);
-          c *= 0.78 + 0.22 * smoothstep(-Rt, Rt, q.y);
-          c = mix(c, fogC, 1.0 - exp(-tz / (R * 4.0)));
-          acc += T * cov * c;
-          T *= 1.0 - cov;
-          if (T < 0.01) break;
-        }
-        return acc + T * bg;
-      }
+      #endif
 
       void main() {
         vec3 ro = vP;
         vec3 rd = normalize(vP - vCam);
-        // the angle one pixel subtends, so an edge at distance t is px * t wide
-        float px = length(fwidth(rd)) + 1e-5;
-        vec3 col;
-        if (uRoom < 0.5) col = enfilade(ro, rd, px);
-        else if (uRoom < 1.5) col = rotunda(ro, rd);
-        else if (uRoom < 2.5) col = avenue(ro, rd, px);
-        else col = tunnel(ro, rd, px);
-        // soft dark threshold so the opening reads as depth
-        col *= 0.72 + 0.28 * smoothstep(0.0, 0.5, vP.y);
+        // the reveal: the wall the door is cut through, far thicker than the door. A ray that leaves
+        // the arch before it is REVEAL deep has struck it
+        float t1 = REVEAL / max(-rd.z, 1e-4);
+        float sd0 = min(archSd(ro.xy, A, HS), -1e-3);
+        float sd1 = archSd(ro.xy + rd.xy * t1, A, HS);
+        float f = clamp(sd0 / (sd0 - max(sd1, 1e-4)), 0.0, 1.0);
+        float tJ = t1 * f;
+        float tFl = rd.y < 0.0 ? max(ro.y, 0.0) / -rd.y : 1e9;
+        float wj = fwidth(sd1) * 0.75 + 1e-4;
+        float jamb = smoothstep(-wj, wj, sd1) * step(tJ, tFl);
+        float yj = ro.y + rd.y * tJ;
+        // daylight on its lip, dark within, a line of the room's light on its inner edge
+        vec3 jc = cLow * (0.2 + 0.55 * exp(-f * 4.0)) * (0.55 + 0.45 * smoothstep(0.0, 1.4, yj));
+        jc += mix(cLow, cHigh, 0.7) * 0.22 * smoothstep(0.86, 1.0, f);
+
+        // the room, from an eye held within EYE_FAR of the door and through the room's own shear
+        vec3 c0 = vec3(0.0, 2.8, 0.0);
+        vec3 e = vCam - c0;
+        vec3 rv = normalize(vP - (c0 + e * min(1.0, EYE_FAR / length(e))));
+        rv.xy += uAim * rv.z;
+        rv = normalize(rv);
+        float px = length(fwidth(rv)) + 1e-5;
+        vec3 col = room(vec3(ro.x, max(ro.y, 1e-3), 0.0), rv, px);
+        // the floor just inside is in the shade of the reveal
+        col *= 0.6 + 0.4 * smoothstep(0.0, 1.0, tFl * -rd.z / REVEAL - 0.2);
+        col = mix(col, jc, jamb);
         gl_FragColor = vec4(col, 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -1796,6 +1922,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
   const mat = useMemo(() => {
     const open = { value: 0 };
+    const track = cam.curve.getSpacedPoints(240);
     /** `c` is the colour on screen of its sunny side; "#ffffff" leaves the albedo to the instance colours */
     const lambert = (c: string, key: string, glsl = "", ao = "1.0") =>
       sunlit(new MeshLambertMaterial({ color: c === "#ffffff" ? c : painted(c) }), key, glsl, ao);
@@ -1811,7 +1938,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       frames: FRAME_COLORS.map((c) => lambert(c, "frame", "", FRAME_AO)),
       paper: FRAME_COLORS.map((c) => lambert(c, "paper", PAPER, FRAME_AO)),
       huts: HUT_COLORS.map((c) => lambert(c, "hut", "", "smoothstep(-0.37, 0.2, vOb.y)")),
-      interiors: DOORS.map((d, i) => makeInteriorMaterial(d.pal, d.R / d.scale, ROOMS[i]!, mulberry32(907 + i * 31)())),
+      interiors: DOORS.map((d, i) => makeInteriorMaterial(d.pal, ROOMS[i]!, mulberry32(907 + i * 31)(), aimOf(d, track))),
       steleBack: lambert("#f4b49c", "frame", "", FRAME_AO),
       trim: lambert("#f5e0cc", "plain"),
       // the underside of a crown is in its own shade
@@ -1827,7 +1954,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       tint: makeShadowMaterial("TINT"),
       cloud: sunlit(new MeshLambertMaterial({ color: "#ffffff", emissive: "#8f96ad", fog: false }), "cloud"),
     };
-  }, []);
+  }, [cam]);
 
   const garden = useMemo(() => {
     const pathPts = cam.curve.getPoints(80);
