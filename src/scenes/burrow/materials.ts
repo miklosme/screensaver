@@ -100,6 +100,7 @@ const WALL_FRAG = /* glsl */ `
   uniform float uRidgeAll;  // > 0 paints the whole surface in the ridge colour (trims)
   uniform float uSpotGain;
   uniform float uRidgeAmt;
+  uniform vec4 uPool;       // the hoop's centre and how strongly it lights the floor under it (floors only)
   ${FOG_GLSL}
   #if MODE == 1
     uniform vec4 uCh[3];
@@ -279,6 +280,18 @@ const WALL_FRAG = /* glsl */ `
     float far = dist * dist / (dist * dist + 12.0);
     col += vec3(0.42, 0.05, 0.30) * graze * (0.05 + 0.16 * length(vGlow) + 0.2 * far / (1.0 + dist * dist / 60.0));
 
+    // under the hoop: a soft contact shadow, a warm pool of the daylight that comes through it and a
+    // wider one of its mint, falling off with distance
+    if (uPool.w > 0.0) {
+      vec2 dp = vW.xz - uPool.xz;
+      float d2 = dot(dp, dp);
+      float contact = exp(-d2 / 0.45);
+      float warm = exp(-d2 / 2.4);
+      float mint = 1.0 / (1.0 + d2 / 5.0);
+      col *= 1.0 - 0.6 * contact;
+      col += (vec3(1.0, 0.66, 0.42) * warm * 0.42 + vec3(0.1, 0.75, 0.55) * mint * mint * 0.3) * (1.0 - 0.75 * contact) * uPool.w;
+    }
+
     // bioluminescent pores along the ribs; a slow wave of light runs ahead along the route
     float row2 = vPat.y * uSpotK;
     vec2 cell = vec2(floor(vPat.x), floor(row2));
@@ -309,6 +322,8 @@ interface WallOptions {
   ridgeAmt?: number;
   /** scales round a ring; for a dome also the latitude of ring 0 and the step per ring */
   ring?: [number, number, number];
+  /** the hoop's centre: the floor under it is lit by it */
+  pool?: Vector3;
 }
 
 function wallUniforms(shared: Shared, o: WallOptions) {
@@ -321,6 +336,7 @@ function wallUniforms(shared: Shared, o: WallOptions) {
     uSpotGain: { value: o.spotGain ?? 1 },
     uRidgeAmt: { value: o.ridgeAmt ?? 0.7 },
     uRing: { value: new Vector3(...(o.ring ?? [0, 0, 0])) },
+    uPool: { value: o.pool ? new Vector4(o.pool.x, o.pool.y, o.pool.z, 1) : new Vector4() },
   };
 }
 
@@ -505,5 +521,116 @@ export function createMoteMaterial(shared: Shared) {
     transparent: true,
     blending: AdditiveBlending,
     depthWrite: false,
+  });
+}
+
+/**
+ * THE HOOP'S BAND: pearl. A rounded outer band whose sheen runs through mint, rose and peach as it
+ * turns from the eye, cut into segments by fine engraved lines; down the middle of each face a
+ * recessed channel of deep plum enamel that the beads (a glow material) sit in. The inner edge
+ * catches the daylight of the world inside it.
+ */
+export function createHoopMaterial(shared: Shared) {
+  return new ShaderMaterial({
+    uniforms: { ...shared },
+    vertexShader: /* glsl */ `
+      attribute vec2 pat;
+      attribute vec3 sec;
+      varying vec3 vW;
+      varying vec3 vN;
+      varying vec2 vPat;
+      varying vec3 vSec;
+      void main() {
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vW = w.xyz;
+        vN = mat3(modelMatrix) * normal;
+        vPat = pat;
+        vSec = sec;
+        gl_Position = projectionMatrix * viewMatrix * w;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      ${FOG_GLSL}
+      varying vec3 vW;
+      varying vec3 vN;
+      varying vec2 vPat;
+      varying vec3 vSec;
+      void main() {
+        vec3 V = cameraPosition - vW;
+        float dist = length(V);
+        V /= dist;
+        vec3 n = normalize(vN);
+        float ndv = abs(dot(n, V));
+        float chan = smoothstep(0.25, 0.6, vSec.z);
+        // segments: an engraved line every 1/60 of the way round, two hairlines either side of it
+        float u = vPat.x * 60.0;
+        float fu = abs(fract(u) - 0.5);
+        float aa = fwidth(u);
+        float cut = 1.0 - smoothstep(0.0, 0.015 + aa, abs(fu - 0.5 + 0.02));
+        float hair = (1.0 - smoothstep(0.0, 0.01 + aa, abs(fu - 0.36))) * 0.5;
+        // pearl: pale, with a sheen that runs through the palette as the band turns from the eye
+        float f = 1.0 - ndv;
+        vec3 irid = 0.5 + 0.5 * cos(6.2831853 * (vec3(0.0, 0.33, 0.67) + f * 1.3 + vPat.x * 2.0 + 0.15));
+        irid = mix(vec3(1.0, 0.62, 0.66), vec3(0.45, 1.0, 0.82), irid.g) * mix(vec3(1.0), vec3(1.0, 0.85, 0.7), irid.b);
+        vec3 pearl = vec3(0.9, 0.6, 0.66) * (0.36 + 0.42 * ndv) + irid * (0.2 + 0.55 * f * f);
+        // the outer edge is a raised lip, the inner one looks into the daylight
+        pearl *= 0.92 + 0.12 * smoothstep(0.3, 0.9, vSec.x);
+        pearl += vec3(1.0, 0.82, 0.6) * smoothstep(-0.3, -0.9, vSec.x) * 0.35;
+        pearl *= 1.0 - 0.45 * cut - 0.2 * hair;
+        // a soft glint of the lantern
+        pearl += vec3(1.0, 0.86, 0.84) * pow(ndv, 24.0) * 0.35;
+        // the channel: plum enamel, lit from below by its beads
+        vec3 enamel = vec3(0.2, 0.03, 0.17) * (0.5 + 0.5 * ndv) + vec3(0.1, 0.55, 0.42) * 0.35 * (0.6 + 0.4 * sin(u * 6.2831853));
+        vec3 col = mix(pearl, enamel, chan);
+        col = mix(col, uFog, fogAmount(dist));
+        gl_FragColor = vec4(col, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+    side: DoubleSide,
+  });
+}
+
+/** lit enamel for the gimbals: a coral-gold band with a dark seam, glinting in the lantern */
+export function createEnamelMaterial(shared: Shared, base: Vector3, sheen: Vector3) {
+  return new ShaderMaterial({
+    uniforms: { ...shared, uBase: { value: base }, uSheen: { value: sheen } },
+    vertexShader: /* glsl */ `
+      varying vec3 vW;
+      varying vec3 vN;
+      varying vec2 vUv;
+      void main() {
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vW = w.xyz;
+        vN = mat3(modelMatrix) * normal;
+        vUv = uv;
+        gl_Position = projectionMatrix * viewMatrix * w;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uBase;
+      uniform vec3 uSheen;
+      ${FOG_GLSL}
+      varying vec3 vW;
+      varying vec3 vN;
+      varying vec2 vUv;
+      void main() {
+        vec3 V = cameraPosition - vW;
+        float dist = length(V);
+        V /= dist;
+        float ndv = abs(dot(normalize(vN), V));
+        // knurled every so often round the ring
+        float k = abs(fract(vUv.x * 72.0) - 0.5);
+        float knurl = smoothstep(0.42, 0.5, k);
+        vec3 col = uBase * (0.3 + 0.7 * ndv) * (1.0 - 0.35 * knurl);
+        col += uSheen * (pow(ndv, 12.0) * 0.6 + pow(1.0 - ndv, 3.0) * 0.5);
+        col = mix(col, uFog, fogAmount(dist));
+        gl_FragColor = vec4(col, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
   });
 }
