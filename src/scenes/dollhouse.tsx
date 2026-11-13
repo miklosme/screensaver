@@ -163,29 +163,6 @@ function frameGeometry(a: number, hs: number, band: number, depth: number, y0 = 
   return g;
 }
 
-/**
- * The same band as a flat strip in the plane z = 0, from the ground up, cut into short pieces along
- * its length: each piece of its shadow can then lie on the dune it falls on.
- */
-function bandGeometry(a: number, hs: number, band: number) {
-  const pos: number[] = [];
-  const idx: number[] = [];
-  const ring = (x: number, y: number, nx: number, ny: number) => pos.push(x, y, 0, x + nx * band, y + ny * band, 0);
-  const JAMB = 10;
-  const ARC = 40;
-  for (let i = 0; i <= JAMB; i++) ring(-a, (hs * i) / JAMB, -1, 0);
-  for (let i = 1; i <= ARC; i++) {
-    const t = Math.PI - (Math.PI * i) / ARC;
-    ring(Math.cos(t) * a, hs + Math.sin(t) * a, Math.cos(t), Math.sin(t));
-  }
-  for (let i = 1; i <= JAMB; i++) ring(a, hs - (hs * i) / JAMB, 1, 0);
-  for (let i = 0; i + 1 < pos.length / 6; i++) idx.push(i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 1, i * 2 + 3, i * 2 + 2);
-  const g = new BufferGeometry();
-  g.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
-  g.setIndex(idx);
-  return g;
-}
-
 // ───────────────────────────── the rail ─────────────────────────────
 /**
  * The camera is the rail's (rail.ts). The dollhouse is third in the playing order and rides fall,
@@ -684,13 +661,58 @@ const BEDS = (
     [19, 6.5, [[-23, 6, 3.2, 1.8], [23, 6, 3.2, 1.8], [-12, 9.5, 3.0, 1.5], [12, 9.5, 3.0, 1.5], [-33, 10.5, 2.8, 1.6], [32, 10.5, 2.8, 1.6], [-20, 14, 2.8, 1.4], [20, 14, 2.8, 1.4], [-9, 17, 2.6, 1.2], [9, 17, 2.6, 1.2]]],
   ] as const
 ).flatMap(([t, density, beds]) =>
-  beds.map(([deg, dist, along, across]) => {
+  beds.map(([deg, dist, along, across]): { x: number; z: number; tx: number; tz: number; along: number; across: number; density: number; hue?: number; size?: number; from?: number } => {
     const at = seen(t, deg, dist);
     const from = eyeAt(t);
     const l = Math.hypot(at.x - from.x, at.z - from.z);
     return { ...at, tx: (at.x - from.x) / l, tz: (at.z - from.z) / l, along, across, density };
   }),
 );
+/**
+ * THE HOLLOW'S DRIFTS. From the crest of the first dune the camera looks down into the hollow, and
+ * dives into it: the sand there is seen from above, where beds a few units apart read as separate
+ * tufts. So the floor of the hollow, between the lens and its two doorways, is planted on purpose
+ * as long drifts: chains of overlapping beds running the way the camera looks, each bed its own
+ * colour, so that neighbours meet and run into one another. They are added after the beds above
+ * (each of which is planted from a generator seeded by its place in the list), and stand only where
+ * neither the opening nor the approach to the stele sees them.
+ *
+ * Each is [forward, right, turn, half length, half width, colour]: where it lies from the camera of
+ * local time 12 (in plan, units ahead of it and to its right), how many degrees its long axis is
+ * turned to the right of the camera's heading, and which of the garden's seven colours it is (0 pink,
+ * 1 yellow, 2 rose, 3 blue, 4 violet, 5 orange, 6 teal).
+ */
+const HOLLOW_FROM = 12;
+/** the hollow lies behind the first dune until the camera is nearly on its crest: its drifts are not drawn before this local time */
+const HOLLOW_SEEN = 8.55;
+const HOLLOW_DRIFTS: readonly (readonly [number, number, number, number, number, number])[] = [
+  // to the right of the dive, near
+  [11.6, 4.6, 8, 2.4, 1.8, 1],
+  [16.2, 4.6, 6, 3.0, 2.0, 5],
+  [21.6, 4.2, 4, 3.0, 2.0, 3],
+  [26.4, 4.6, 0, 2.6, 2.0, 0],
+  // further right, towards the teal forest's doorway
+  [12.3, 8.6, 20, 2.8, 1.8, 4],
+  [19.3, 9.4, 14, 3.0, 1.9, 1],
+  [24.6, 8.4, 5, 2.6, 1.7, 6],
+  [15.2, 12.0, 25, 2.6, 1.6, 0],
+  // straight ahead, where the camera banks away to the left
+  [16.5, 0.6, 0, 2.8, 1.8, 6],
+  [22.4, 0.6, 0, 3.0, 2.0, 5],
+  [28.0, 1.2, 0, 2.8, 2.0, 4],
+  // to the left of the dive
+  [11.4, -4.4, -8, 2.2, 1.7, 0],
+  [20.5, -4.4, -5, 2.8, 1.9, 1],
+  [26.8, -4.6, -3, 2.8, 2.0, 3],
+  // either side of the camera's way as it banks left
+  [12.6, -7.0, -20, 2.4, 1.3, 4],
+  [20.4, -6.8, 0, 2.6, 1.3, 2],
+];
+for (const [forward, right, turn, along, across, hue] of HOLLOW_DRIFTS) {
+  const at = seen(HOLLOW_FROM, Math.atan2(right, forward) / DEG, Math.hypot(forward, right));
+  const v = facing(HOLLOW_FROM).applyAxisAngle(Y_UP, -turn * DEG);
+  BEDS.push({ ...at, tx: v.x, tz: v.z, along, across, density: 9, hue, size: 1.15, from: HOLLOW_SEEN });
+}
 
 /**
  * True where a thing of radius r shows in the middle ground of the picture at local time t: within
@@ -932,6 +954,7 @@ export const PLAN = {
   hoop: HOOP_D,
   clear,
   beds: BEDS,
+  blocked: flowerBlocked,
   hoops: SKYLINE_HOOPS,
   domes: SKYLINE_DOMES,
   pinwheels: SKYLINE_PINWHEELS,
@@ -1137,7 +1160,7 @@ const PAPER = /* glsl */ `
 
 const WHITE = new Color(1, 1, 1);
 const CONTACTS = 640;
-const TINTS = 160;
+const TINTS = 200;
 const FRAME_COLORS = ["#f4ead4", "#f6b598", "#a2dcbf", "#a6cbee"];
 const HUT_COLORS = ["#f3e4c6", "#f4a98e", "#93d6b8", "#9cc3ec"];
 
@@ -1763,22 +1786,34 @@ function makeTerrainMaterial(shadow: DataTexture) {
  * TINT: not a shadow but the same trick: a round stain of the instance's colour, fallen petals and
  * a little shade under a drift of flowers, which is what lets a drift read as a patch of colour
  * from far away.
+ *
+ * A CAST shadow may come with a `cover`: GLSL defining `float cover(vec2 q, float soft)`, how much
+ * of the sun the caster takes at the point q of its own plane (the vertex shader's vQ), its edge
+ * `soft` wide (vSoft). The shadow is then drawn as a sheet over the whole caster and shaped by the
+ * fragment, which is what lets a moving thing's shadow be as soft as the baked ones.
  */
 /** the distance from the eye within which a drift's stain is not drawn (it fades in over the 7 units beyond) */
 const TINT_NEAR = 6.5;
-const SHADOW_FRAG = /* glsl */ `
+const shadowFrag = (cover = "") => /* glsl */ `
   varying vec3 vW;
   varying float vA;
   varying vec2 vQ;
   #ifdef TINT
     varying vec3 vTint;
   #endif
+  #ifdef COVER
+    varying float vSoft;
+  #endif
   ${SUN_GLSL}
+  ${cover}
   void main() {
     vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
     n *= sign(n.y);
     vec3 k = sunLight(n, 0.0) / sunLight(n, 1.0);
     float a = vA;
+    #ifdef COVER
+      a *= cover(vQ, vSoft);
+    #endif
     #ifdef CONTACT
       float r = length(vQ) * 2.0;
       a *= pow(1.0 - smoothstep(0.0, 1.0, r), 1.5);
@@ -1796,9 +1831,9 @@ const SHADOW_FRAG = /* glsl */ `
   }
 `;
 
-function makeShadowMaterial(kind: "CAST" | "FLAT" | "CONTACT" | "TINT", vertexShader?: string) {
+function makeShadowMaterial(kind: "CAST" | "FLAT" | "CONTACT" | "TINT", vertexShader?: string, cover?: string) {
   return new ShaderMaterial({
-    defines: { [kind]: "" },
+    defines: cover ? { [kind]: "", COVER: "" } : { [kind]: "" },
     uniforms: { uT: { value: 0 } },
     transparent: true,
     depthWrite: false,
@@ -1846,43 +1881,8 @@ function makeShadowMaterial(kind: "CAST" | "FLAT" | "CONTACT" | "TINT", vertexSh
         gl_Position = projectionMatrix * viewMatrix * w;
       }
     `,
-    fragmentShader: SHADOW_FRAG,
+    fragmentShader: shadowFrag(cover),
   });
-}
-
-/**
- * The navy hall's shadow. It turns, so its shadow cannot be baked with the still things': the
- * doorway's band is drawn again as a flat strip (bandGeometry), turned as it is turned and slid along
- * the sun onto the dunes.
- */
-function makeHeroShadowMaterial() {
-  const m = makeShadowMaterial(
-    "CAST",
-    /* glsl */ `
-    uniform float uYaw;
-    varying vec3 vW;
-    varying float vA;
-    varying vec2 vQ;
-    const vec3 SUN = ${glv(SUN_DIR)};
-    ${GROUND_GLSL}
-    void main() {
-      float c = cos(uYaw), s = sin(uYaw);
-      vec3 p = position * ${HERO_SCALE.toFixed(3)};
-      vec3 foot = vec3(${HERO.x.toFixed(3)}, ${ground(HERO.x, HERO.z).toFixed(3)}, ${HERO.z.toFixed(3)});
-      vec3 w0 = foot + vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
-      // slid along the sun onto the dune it falls on
-      float k = max(0.0, (w0.y - foot.y) / SUN.y);
-      for (int i = 0; i < 4; i++) k = max(0.0, (w0.y - groundAt(w0.xz - SUN.xz * k) - 0.04) / SUN.y);
-      vec3 w = w0 - SUN * k;
-      vW = w;
-      vA = 1.0;
-      vQ = vec2(0.0);
-      gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
-    }`,
-  );
-  m.uniforms.uYaw = { value: 0 };
-  m.side = DoubleSide;
-  return m;
 }
 
 // ───────────────────────────── baked shadows ─────────────────────────────
@@ -2097,6 +2097,136 @@ function bakeShadows(casters: Caster[], out: Uint8Array) {
     }
   }
   for (let k = 0; k < N * N; k++) out[k] = Math.round((1 - vis[k]!) * 255);
+}
+
+/**
+ * The navy hall's shadow. It turns, so its shadow cannot be baked with the still things'; it is
+ * worked out for each pixel of the sand it can reach instead, the same way the bake does it: a ray
+ * from the sand towards the sun, and how near it passes to the doorway's band, with the same
+ * penumbra widening with the distance to the caster. The band is taken as a tube along its middle
+ * line (two jambs and a half ring), as wide as the band across and as thick as the card through,
+ * so that edge-on to the sun the doorway still throws the shadow of its thickness: a soft stripe,
+ * never a hairline.
+ *
+ * It is drawn over the sand's own triangles (heroShadowGeometry) and multiplies what is there by
+ * exactly what the sun's share of the light would have lost: the sand's light with the doorway in
+ * the way over its light without, baked shadows and ripples included. So it joins the baked
+ * shadows it crosses without darkening them twice.
+ */
+const HERO_REACH = 27;
+const HERO_PAD = 1.6;
+/** in plan, how far (x, z) is from the line the doorway's shadow can lie along: from its foot, away from the sun */
+const heroShadowDistance = (x: number, z: number) => {
+  const l = Math.hypot(SUN_DIR.x, SUN_DIR.z);
+  return segmentDistance(x, z, HERO, { x: HERO.x - (SUN_DIR.x / l) * HERO_REACH, z: HERO.z - (SUN_DIR.z / l) * HERO_REACH });
+};
+/** the sand's triangles that the navy hall's shadow can fall on, at any angle of its turn */
+function heroShadowGeometry(terrain: BufferGeometry) {
+  const pos = terrain.getAttribute("position");
+  const index = terrain.getIndex()!;
+  const reach = (D_A + 0.42) * HERO_SCALE + HERO_PAD;
+  const near = new Uint8Array(pos.count);
+  for (let i = 0; i < pos.count; i++) near[i] = heroShadowDistance(pos.getX(i), pos.getZ(i)) < reach ? 1 : 0;
+  const idx: number[] = [];
+  for (let i = 0; i < index.count; i += 3) {
+    const [a, b, c] = [index.getX(i), index.getX(i + 1), index.getX(i + 2)];
+    if (near[a] || near[b] || near[c]) idx.push(a, b, c);
+  }
+  const g = new BufferGeometry();
+  g.setAttribute("position", pos);
+  g.setAttribute("normal", terrain.getAttribute("normal"));
+  g.setIndex(idx);
+  return g;
+}
+function makeHeroShadowMaterial(shadow: DataTexture) {
+  /** half the band's width, and half the card's thickness */
+  const HW = 0.21 * HERO_SCALE;
+  const HD = 0.13 * HERO_SCALE;
+  /** the band's middle line: jambs at +-R from the foot up to the springline H, then a half ring */
+  const R = (D_A + 0.21) * HERO_SCALE;
+  const H = D_HS * HERO_SCALE;
+  const ARC = 10;
+  // the ring as a polygon lying as much outside the circle as inside it
+  const RP = R / Math.sqrt(Math.cos(Math.PI / ARC / 2));
+  const pts = Array.from({ length: ARC + 1 }, (_, i) => `vec2(${(Math.cos((Math.PI * i) / ARC) * RP).toFixed(4)}, ${(H + Math.sin((Math.PI * i) / ARC) * RP).toFixed(4)})`);
+  return new ShaderMaterial({
+    uniforms: { uShadow: { value: shadow }, uTurn: { value: new Vector2(1, 0) } },
+    transparent: true,
+    depthWrite: false,
+    blending: CustomBlending,
+    blendSrc: DstColorFactor,
+    blendDst: ZeroFactor,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -4,
+    vertexShader: /* glsl */ `
+      varying vec3 vW;
+      varying vec3 vN;
+      varying float vD;
+      void main() {
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vW = w.xyz;
+        vN = normal;
+        vec4 mv = viewMatrix * w;
+        vD = length(mv.xyz);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying vec3 vW;
+      varying vec3 vN;
+      varying float vD;
+      uniform sampler2D uShadow;
+      /** cosine and sine of the doorway's turn about the vertical */
+      uniform vec2 uTurn;
+      ${SUN_GLSL}
+      ${SAND_GLSL}
+      ${SHADOW_MAP_GLSL}
+      const vec3 FOOT = vec3(${HERO.x.toFixed(3)}, ${ground(HERO.x, HERO.z).toFixed(3)}, ${HERO.z.toFixed(3)});
+      /** the card is thinner than the band is wide: its own space is stretched through the card until the band's section is round */
+      const float THROUGH = ${(HW / HD).toFixed(4)};
+      const vec2 RING[${ARC + 1}] = vec2[${ARC + 1}](${pts.join(", ")});
+      /** (squared distance, distance along the ray) where the ray o + d t, t >= 0, passes nearest the segment a..b */
+      vec2 raySegment(vec3 o, vec3 d, vec3 a, vec3 b) {
+        vec3 e = b - a;
+        vec3 w = o - a;
+        float A = dot(d, d), B = dot(d, e), C = dot(e, e), D = dot(d, w), E = dot(e, w);
+        float den = A * C - B * B;
+        float s = clamp(den > 1e-7 ? (A * E - B * D) / den : 0.0, 0.0, 1.0);
+        float t = (B * s - D) / A;
+        if (t < 0.0) {
+          t = 0.0;
+          s = clamp(E / C, 0.0, 1.0);
+        }
+        vec3 q = o + d * t - (a + e * s);
+        return vec2(dot(q, q), t);
+      }
+      /** how much of the sun the doorway takes from w: 0 .. 1 */
+      float doorShade(vec3 w) {
+        vec3 o = w - FOOT;
+        o = vec3(uTurn.x * o.x - uTurn.y * o.z, o.y + 0.02, (uTurn.y * o.x + uTurn.x * o.z) * THROUGH);
+        vec3 d = vec3(uTurn.x * SUN.x - uTurn.y * SUN.z, SUN.y, (uTurn.y * SUN.x + uTurn.x * SUN.z) * THROUGH);
+        vec2 best = raySegment(o, d, vec3(${(-R).toFixed(4)}, 0.0, 0.0), vec3(${(-R).toFixed(4)}, ${H.toFixed(4)}, 0.0));
+        vec2 r = raySegment(o, d, vec3(${R.toFixed(4)}, 0.0, 0.0), vec3(${R.toFixed(4)}, ${H.toFixed(4)}, 0.0));
+        if (r.x < best.x) best = r;
+        for (int i = 0; i < ${ARC}; i++) {
+          r = raySegment(o, d, vec3(RING[i], 0.0), vec3(RING[i + 1], 0.0));
+          if (r.x < best.x) best = r;
+        }
+        // the bake's penumbra (see penumbra(), with the mask's texel in the garden)
+        float pen = ${PEN0.toFixed(3)} + ${PEN1.toFixed(3)} * best.y + 0.045;
+        return 1.0 - smoothstep(-pen, pen, sqrt(best.x) - ${HW.toFixed(4)});
+      }
+      void main() {
+        float shade = doorShade(vW);
+        if (shade <= 0.0) discard;
+        vec3 n = rippleNormal(normalize(vN), vW, vD);
+        float lit = 1.0 - castShade(vW);
+        gl_FragColor = vec4(sunLight(n, lit * (1.0 - shade)) / sunLight(n, lit), 1.0);
+        #include <colorspace_fragment>
+      }
+    `,
+  });
 }
 
 // ───────────────────────────── the exit door ─────────────────────────────
@@ -2865,7 +2995,6 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
     // thin doorway
     const frame = frameGeometry(D_A, D_HS, 0.42, 0.26);
-    const band = bandGeometry(D_A, D_HS, 0.42);
     const opening = new ShapeGeometry(archPath(new Shape(), D_A + 0.02, D_HS, -0.6), 28);
     const hutShell = new SphereGeometry(1, 36, 14, 0, Math.PI * 2, 0, Math.PI * 0.62);
     const hutCap = new SphereGeometry(1, 16, 10);
@@ -2914,7 +3043,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     return {
       terrain,
       frame,
-      band,
+      heroShadow: heroShadowGeometry(terrain),
       opening,
       hutShell,
       hutCap,
@@ -2978,7 +3107,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       stone: lambert("#ffffff", "stone", PATTERNS.stone),
       // the turntable: one great lollipop, dark along the foot of the doorway that stands across it
       table: lambert("#a2dcbf", "table", PATTERNS.stone, `mix(1.0, smoothstep(0.0, ${(0.9 / TABLE_R).toFixed(3)}, abs(vOb.z)), step(0.5, vOb.y) * step(abs(vOb.x), ${(((D_A + 0.5) * HERO_SCALE) / TABLE_R).toFixed(3)}))`),
-      heroShadow: makeHeroShadowMaterial(),
+      heroShadow: makeHeroShadowMaterial(shadowMap),
       trunk: lambert("#b98a94", "trunk", "", "smoothstep(0.0, 0.3, vOb.y)"),
       contact: makeShadowMaterial("CONTACT"),
       tint: makeShadowMaterial("TINT"),
@@ -3001,7 +3130,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       fogGlsl: FOG_GLSL,
       sun: SUN_DIR,
       groundGlsl: GROUND_GLSL,
-      shadowMaterial: (vs) => makeShadowMaterial("CAST", vs),
+      shadowMaterial: (vs, cover) => makeShadowMaterial("CAST", vs, cover),
       contactMaterial: (vs) => makeShadowMaterial("CONTACT", vs),
     });
   }, []);
@@ -3202,7 +3331,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     // the table turns the navy hall round, and its shadow with it
     const heroYaw = HERO_YAW + heroTurn(t);
     if (hero.current) hero.current.rotation.y = heroYaw;
-    mat.heroShadow.uniforms.uYaw!.value = heroYaw;
+    (mat.heroShadow.uniforms.uTurn!.value as Vector2).set(Math.cos(heroYaw), Math.sin(heroYaw));
     // a room is drawn only from in front of its doorway: from behind there is nothing there
     for (let i = 0; i < DOORS.length; i++) {
       const d = DOORS[i]!;
@@ -3264,7 +3393,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
 
       {/* the navy hall's shadow, turning with it */}
-      <mesh geometry={geo.band} material={mat.heroShadow} frustumCulled={false} />
+      <mesh geometry={geo.heroShadow} material={mat.heroShadow} />
 
       {/* the stele: the real way out */}
       <group position={[0, HERO_Y, 0]}>
