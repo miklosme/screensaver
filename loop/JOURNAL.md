@@ -121,7 +121,7 @@ Slices:
   reported the opening as a regression, two the cramped climb.
 - O2 orbit · The moon-gate hut (opus) reverted: astra and sol reported the overhead town merging
   into the sky, caused by the rim rider, not by the hut.
-Gate: frame cost worst 3.06 ms (orbit), loop worst 12 ms, seams 0.00–0.33% RMSE, bundle 265 kB
+Gate: frame cost worst 3.06 ms (orbit), loop worst 12 ms, seams 0.00–0.33% RMSE, bundle 269 kB (corrected in pass 004: the entry first said 265)
 Panel: astra, sol, fable
 Scores (mean of the panel): helix 7.0, burrow 6.0, dollhouse 6.3, orbit 7.0. The helix and orbit
 scores were given to the reverted versions (`loop/out/pass-003/reviewed/`); on `loop` those two
