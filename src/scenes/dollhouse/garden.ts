@@ -170,7 +170,11 @@ class Sheet {
   nor: number[] = [];
   part: number[] = [];
   uv: number[] = [];
+  /** for a petal, the point at its root (it is varied in length about it) and its index; -1 elsewhere */
+  petal: number[] = [];
   idx: number[] = [];
+  /** the petal the next grid belongs to, if any */
+  root: [number, number, number, number] = [0, 0, 0, -1];
   /** `up` says which way the part's front faces (and its normals) should point at a sample point */
   grid(f: (u: number, v: number) => V3, nu: number, nv: number, part: number, up: (q: V3, n: V3) => number) {
     const base = this.pos.length / 3;
@@ -198,6 +202,7 @@ class Sheet {
         this.nor.push(n[0] * flip, n[1] * flip, n[2] * flip);
         this.part.push(part);
         this.uv.push(u, v);
+        this.petal.push(...this.root);
       }
     }
     for (let i = 0; i < nu; i++) {
@@ -215,6 +220,7 @@ class Sheet {
     g.setAttribute("normal", new BufferAttribute(new Float32Array(this.nor), 3));
     g.setAttribute("aPart", new BufferAttribute(new Float32Array(this.part), 1));
     g.setAttribute("aUV", new BufferAttribute(new Float32Array(this.uv), 2));
+    g.setAttribute("aPetal", new BufferAttribute(new Float32Array(this.petal), 4));
     g.setIndex(this.idx);
     return g;
   }
@@ -331,6 +337,9 @@ function flowerGeometry(k: FlowerKind, far = false) {
   for (let j = 0; j < k.petals; j++) {
     const a = (j / k.petals) * TAU + (j % 2) * 0.04;
     const lift = (j % 2) * 0.012;
+    const r0 = k.eye * 0.55;
+    const [bx, by] = [HEAD_X + r0 * Math.cos(a) * ct + lift * st, HEAD_Y - r0 * Math.cos(a) * st + lift * ct];
+    s.root = [bx, by, r0 * Math.sin(a), j];
     s.grid(
       head((u, v) => {
         const vv = v * 2 - 1;
@@ -341,20 +350,22 @@ function flowerGeometry(k: FlowerKind, far = false) {
         const y = lift + k.cup * k.len * 0.6 * u ** 1.6 + k.roll * vv * vv * w - k.curl * k.len * Math.max(0, u - 0.6) ** 2 * 3;
         return [Math.cos(a) * r - Math.sin(a) * vv * w, y, Math.sin(a) * r + Math.cos(a) * vv * w];
       }),
-      far ? 1 : 3,
-      1,
+      // near the eye a petal is a smooth curved sheet: its cup along, its rolled rims across
+      far ? 1 : 7,
+      far ? 1 : 4,
       1,
       upward,
     );
   }
+  s.root = [0, 0, 0, -1];
   // the eye: a low dome
   s.grid(
     head((u, v) => {
       const r = k.eye * u;
       return [r * Math.cos(v * TAU), 0.02 + 0.045 * (1 - u * u), r * Math.sin(v * TAU)];
     }),
-    1,
-    far ? 4 : 6,
+    far ? 1 : 2,
+    far ? 4 : 10,
     2,
     upward,
   );
@@ -529,6 +540,7 @@ export function createGarden(o: GardenOptions): Garden {
       vertexShader: /* glsl */ `
         attribute float aPart;
         attribute vec2 aUV;
+        attribute vec4 aPetal; // a petal's root, and its index (-1 off the petals)
         attribute vec4 aPlace; // foot, size
         attribute vec4 aLook;  // colour, phase
         uniform float uT;
@@ -560,6 +572,24 @@ export function createGarden(o: GardenOptions): Garden {
           mat2 R = mat2(cos(yaw), sin(yaw), -sin(yaw), cos(yaw));
           vec3 p = position;
           vec3 n = normal;
+          // no two heads alike: each petal a little longer or shorter than the next, now and then
+          // one missing, and the head tipped a little its own way (both versions of a flower alike)
+          if (aPetal.w > -0.5) {
+            float h = fract(sin(aLook.w * 91.7 + aPetal.w * 12.9898) * 43758.5453);
+            float len = h < 0.06 ? 0.0 : 0.84 + 0.3 * fract(h * 7.31);
+            p = aPetal.xyz + (p - aPetal.xyz) * len;
+          }
+          if (aPart > 0.5 && aPart < 3.5) {
+            float tip = 0.12 + 0.2 * fract(aLook.w * 3.71);
+            float dir = aLook.w * 2.3;
+            vec3 ax = vec3(cos(dir), 0.0, sin(dir));
+            vec3 c = vec3(${HEAD_X.toFixed(3)}, ${(HEAD_Y - 0.07).toFixed(3)}, 0.0);
+            // Rodrigues' rotation by tip round ax, about the top of the stem
+            float ct = cos(tip), st = sin(tip);
+            vec3 q = p - c;
+            p = c + q * ct + cross(ax, q) * st + ax * dot(ax, q) * (1.0 - ct);
+            n = n * ct + cross(ax, n) * st + ax * dot(ax, n) * (1.0 - ct);
+          }
           p.xz = R * p.xz;
           n.xz = R * n.xz;
           // a breeze crosses the garden in slow waves; the stem bends, and the head nods with it
