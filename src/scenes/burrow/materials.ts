@@ -85,7 +85,8 @@ const SKIN_GLSL = /* glsl */ `
     float r2 = fract(rnd * 7.13 + 0.37);
     float x = gx - id - 0.5 + (rnd - 0.5) * 0.14;
     float u = t - 0.72 - 0.12 * r2;
-    float e = x * x * 2.9 + u * u * 1.2;
+    // no two scales quite the same size
+    float e = (x * x * 2.9 + u * u * 1.2) * (0.86 + 0.28 * fract(rnd * 3.71 + 0.11));
     about = vec4(e, rnd, x, u);
     return TILT * t + 1.0 - e * (0.3 + 0.7 * e) + 0.22 * (r2 - 0.5);
   }
@@ -166,6 +167,8 @@ const WALL_FRAG = /* glsl */ `
     float q = fract(vPat.x) - 0.5;
     float ridge = max(exp(-q * q / 0.022), uRidgeAll);
     float groove = smoothstep(0.5, 0.2, abs(q));
+    // the broad crest of a rib, where it catches the light (trims are all ridge, and keep their own)
+    float crest = exp(-q * q / 0.045) * (1.0 - step(0.001, uRidgeAll));
 
     // albedo: plum floor, coral flanks, magenta vault
     float h = clamp(vH / uHTop, 0.0, 1.0);
@@ -209,8 +212,8 @@ const WALL_FRAG = /* glsl */ `
         float fine = 1.0 - smoothstep(0.03, 0.1, fw);
         float grow = 13.0 * e + 6.2831853 * about.y;
         g += (0.045 * 13.0 * fine * cos(grow)) * de;
-        // scales lie down on the rib crests, and stand out more or less from place to place
-        float amp = detail * vSkin.z * (1.0 - 0.45 * ridge);
+        // scales lie down flat on the rib crests, and stand out more or less from place to place
+        float amp = detail * vSkin.z * (1.0 - 0.72 * crest);
         vec2 dH = amp * (g.x * da + g.y * dr);
 
         // the gap between scales is in shade: a line round a free edge, a soft shadow on the scale
@@ -218,11 +221,14 @@ const WALL_FRAG = /* glsl */ `
         float under = 1.0 - top;
         float crease = 1.0 - smoothstep(0.0, 0.2 + 0.7 * under + 2.5 * fw, abs(hA - hB));
         float body = 1.0 - smoothstep(0.3, 1.3, e);
-        wet = body * detail;
+        // some scales are wetter than others
+        wet = body * detail * (0.45 + 0.8 * fract(about.y * 5.3 + 0.2));
         tone = (1.0 - (0.2 + 0.3 * under) * crease) * (0.8 + 0.2 * body) * (0.9 + 0.2 * about.y) * (1.0 + 0.05 * fine * sin(grow));
         tone = mix(0.9, tone, amp);
-        // one scale in a few is flushed a deeper red
+        // one scale in a few is flushed a deeper red, and every one leans a little warmer or cooler
         albedo = mix(albedo, albedo * vec3(0.92, 0.6, 1.25), amp * smoothstep(0.72, 0.9, about.y) * 0.6);
+        float hue = fract(about.y * 11.7 + 0.5) - 0.5;
+        albedo *= 1.0 + amp * hue * vec3(0.12, -0.10, -0.22);
 
         // bend the normal by the slope of the skin
         vec3 r1 = cross(dpy, n), r2 = cross(n, dpx);
@@ -254,9 +260,19 @@ const WALL_FRAG = /* glsl */ `
     graze *= graze * graze;
     col = mix(col, vec3(0.08, 0.72, 0.5) * tone * open * (0.12 + 0.34 * ndl + 0.25 * graze), 0.62 * smoothstep(0.2, 1.1, vGround.y));
 
-    // wet: a tight glint of the lantern on whatever faces the eye, and a broad coral one under it
+    // the ribs carry the light: a broad, soft, pale sheen along every crest, from the shape of the
+    // rib alone (not the scales on it), coral leaning to mint, fading down the tunnel. This is what
+    // draws the nested arches when the tunnel is a thumbnail.
+    float ndg = max(dot(n, V), 0.0);
+    vec3 crestCol = mix(vec3(0.95, 0.46, 0.38), vec3(0.42, 0.78, 0.62), 0.22 + 0.2 * (1.0 - ndg));
+    col += crestCol * crest * crest * open * (0.07 + 0.11 * ndg) * (0.4 + 0.6 * smoothstep(1.0, 6.0, dist)) * (0.35 + 0.65 / (1.0 + dist * dist / 160.0));
+
+    // wet: a tight glint of the lantern on whatever faces the eye, and a broad coral one under it.
+    // Tinted coral-pink and held down beside the lens, so the wall there never bleaches to chalk.
     float s2 = ndl * ndl, s4 = s2 * s2, s8 = s4 * s4, s16 = s8 * s8, s32 = s16 * s16, s64 = s32 * s32;
-    col += (vec3(1.0, 0.74, 0.64) * s64 * s64 * 0.45 + vec3(0.9, 0.2, 0.18) * s8 * 0.05) * wet * lantern * open;
+    float near = 0.35 + 0.65 * smoothstep(0.6, 3.5, dist);
+    vec3 glint = (vec3(1.0, 0.62, 0.56) * s64 * s64 * 0.4 * near + vec3(0.9, 0.2, 0.18) * s8 * 0.05) * wet * lantern * open;
+    col += min(glint, vec3(0.22));
 
     // and a film that carries the haze at a grazing angle. Right at the lens there is no haze to
     // carry, so a wall beside the camera keeps its red.
