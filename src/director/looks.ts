@@ -60,6 +60,8 @@ export const looks: Record<string, Look> = {
   dollhouse: { ...neutral, bloom: 0.25, threshold: 2.6, knee: 0.3, spread: 0.6, vignette: 0.2 },
   // lamps at 1.6, the moon at 0.9, windows at 0.55, against towers at 0.1
   orbit: { ...neutral, bloom: 1.8, threshold: 0.45, knee: 0.2, spread: 0.75, vignette: 0.32 },
+  // white glaze is held under 0.9; the gold seam (3 to 5.5), the lamp (about 2) and the gilt (1.5 to 2.5) are above
+  roost: { ...neutral, bloom: 1.2, threshold: 1.15, knee: 0.3, spread: 0.7, vignette: 0.28 },
 };
 
 const lookOf = (id: string) => looks[id] ?? neutral;

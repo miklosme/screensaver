@@ -3,6 +3,7 @@ import Helix from "./helix";
 import Burrow from "./burrow";
 import Dollhouse from "./dollhouse";
 import Orbit from "./orbit";
+import Roost from "./roost";
 
 /**
  * Played in this order, looping forever. A scene's place in this list is the `index` it is
@@ -14,4 +15,5 @@ export const scenes: SceneDef[] = [
   { id: "burrow", Component: Burrow },
   { id: "dollhouse", Component: Dollhouse },
   { id: "orbit", Component: Orbit },
+  { id: "roost", Component: Roost },
 ];
