@@ -1,21 +1,25 @@
 import {
   BufferAttribute,
   BufferGeometry,
+  CustomBlending,
   DataTexture,
   FloatType,
   Group,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
+  InstancedInterleavedBuffer,
+  InterleavedBufferAttribute,
   Mesh,
   NearestFilter,
+  OneFactor,
+  OneMinusSrcAlphaFactor,
   RGBAFormat,
   ShaderMaterial,
-  SphereGeometry,
   Vector2,
   Vector3,
   Vector4,
 } from "three";
-import { HOOP, PROFILE, floorY, footRadius, troughY, wallRelief, type Chamber, type Station } from "./build";
+import { HOOP, PROFILE, SCALE_PITCH, SCALE_W, floorY, footRadius, troughY, wallRelief, type Chamber, type Station } from "./build";
 import { SHROOM_SLOTS, type Shared, type ShroomLight } from "./materials";
 
 /**
@@ -60,6 +64,9 @@ export interface CreatureInput {
   hoopPos: Vector3;
   /** unit vector in plan from the hoop towards the arriving camera */
   arrive: Vector3;
+  /** the walls, which the eyes are set into: their shape and light round each eye are read at mount */
+  corridors: BufferGeometry[];
+  shells: BufferGeometry[];
 }
 
 export function buildCreatures(world: CreatureInput, shared: Shared) {
@@ -154,88 +161,478 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
     }
   }
 
+  // --- each eye's place in the wall -------------------------------------------------------------
+  // An eye is not a ball stuck on the wall: it is a fold of the wall's own skin, its lids, with an
+  // eyeball under them. So every eye learns, at mount, the wall it sits in: the shape of the wall
+  // round it (a quadric fitted to the wall's vertices, so the collar of lid can settle on to it
+  // and sink under it) and the wall's colour and light there (the same albedo and baked light the
+  // wall's shader works from, averaged over the collar), and the lids are shaded with those.
+  const nEye = eyePos.length / 4;
+  const eyeUp = new Float32Array(nEye * 4); // the way the lids close (up, in the wall's plane) + when a dome eye wakes
+  const eyeQuad = new Float32Array(nEye * 8); // the wall round the eye: z = q0 + q1 x + q2 y + q3 x² + q4 xy + q5 y², in eye radii
+  const eyeSkin = new Float32Array(nEye * 8); // the wall's albedo, how open to light; its baked glow, its mint pool
+  {
+    type Src = { pos: ArrayLike<number>; nrm: ArrayLike<number>; pat: ArrayLike<number>; hgt: ArrayLike<number>; glow: ArrayLike<number>; ground: ArrayLike<number>; hTop: number; corridor: boolean };
+    const srcs: Src[] = [];
+    const take = (g: BufferGeometry, hTop: number, corridor: boolean) => {
+      const a = (n: string) => (g.getAttribute(n) as BufferAttribute | undefined)?.array;
+      const pos = a("position"), nrm = a("normal"), pat = a("pat"), hgt = a("hgt"), glow = a("glow"), ground = a("ground");
+      if (pos && nrm && pat && hgt && glow && ground) srcs.push({ pos, nrm, pat, hgt, glow, ground, hTop, corridor });
+    };
+    for (const g of world.corridors) take(g, 4.6, true);
+    world.shells.forEach((g, i) => take(g, chambers[i]!.yc + chambers[i]!.H, false));
+    // the wall's vertices binned in a grid of one-unit cells
+    const CELL = 1;
+    const grid = new Map<string, number[]>();
+    const v = new Vector3();
+    srcs.forEach((s, si) => {
+      for (let i = 0; i < s.pos.length / 3; i++) {
+        v.set(s.pos[i * 3]!, s.pos[i * 3 + 1]!, s.pos[i * 3 + 2]!);
+        // a corridor's wall is cut away inside a chamber
+        if (s.corridor && inChamber(chambers, v, 0.1)) continue;
+        const key = `${Math.floor(v.x / CELL)},${Math.floor(v.y / CELL)},${Math.floor(v.z / CELL)}`;
+        let list = grid.get(key);
+        if (!list) grid.set(key, (list = []));
+        list.push(si, i);
+      }
+    });
+    const ss = (a: number, b: number, x: number) => {
+      const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
+      return t * t * (3 - 2 * t);
+    };
+    const PLUM = [0.09, 0.02, 0.11], CORAL = [0.8, 0.15, 0.13], MAGENTA = [0.42, 0.03, 0.27], SHELL = [1.0, 0.3, 0.22], GROOVE = [0.32, 0.25, 0.52];
+    const c = new Vector3(), ax = new Vector3(), up = new Vector3(), sd = new Vector3(), w0 = new Vector3();
+    const last = chambers[chambers.length - 1]!;
+    for (let e = 0; e < nEye; e++) {
+      const r = eyePos[e * 4 + 3]!;
+      c.set(eyePos[e * 4]!, eyePos[e * 4 + 1]!, eyePos[e * 4 + 2]!);
+      ax.set(eyeAxis[e * 4]!, eyeAxis[e * 4 + 1]!, eyeAxis[e * 4 + 2]!);
+      up.set(0, 1, 0).addScaledVector(ax, -ax.y);
+      if (up.lengthSq() < 1e-4) up.set(1, 0, 0).addScaledVector(ax, -ax.x);
+      up.normalize();
+      sd.crossVectors(up, ax);
+      w0.copy(c).addScaledVector(ax, r * 0.3); // where the eye meets the wall
+      // a dome eye in the last chamber wakes as the camera comes in to the hoop: those beside the
+      // way in, which the camera passes closest, first, and then on round to the far wall behind
+      // the hoop, so the waking runs ahead of the camera to where it is going
+      let wake = 0;
+      if (inChamber([last], c, 0.5)) {
+        const hx = c.x - world.hoopPos.x, hz = c.z - world.hoopPos.z;
+        const ang = Math.acos(Math.max(-1, Math.min(1, (hx * world.arrive.x + hz * world.arrive.z) / Math.hypot(hx, hz))));
+        wake = 19.6 + 1.8 * (ang / Math.PI) + 0.3 * eyeAxis[e * 4 + 3]!;
+      }
+      eyeUp.set([up.x, up.y, up.z, wake], e * 4);
+
+      // the wall round it
+      const RF = Math.max(2.1 * r, 0.45); // the fit's reach
+      const RC = 1.7 * r; // the colour's
+      const M = new Float64Array(36), B = new Float64Array(6);
+      const col = new Float64Array(8);
+      let wc = 0, nFit = 0;
+      for (let gx = Math.floor((w0.x - RF) / CELL); gx <= Math.floor((w0.x + RF) / CELL); gx++)
+        for (let gy = Math.floor((w0.y - RF) / CELL); gy <= Math.floor((w0.y + RF) / CELL); gy++)
+          for (let gz = Math.floor((w0.z - RF) / CELL); gz <= Math.floor((w0.z + RF) / CELL); gz++) {
+            const list = grid.get(`${gx},${gy},${gz}`);
+            if (!list) continue;
+            for (let k = 0; k < list.length; k += 2) {
+              const s = srcs[list[k]!]!;
+              const i = list[k + 1]!;
+              v.set(s.pos[i * 3]! - w0.x, s.pos[i * 3 + 1]! - w0.y, s.pos[i * 3 + 2]! - w0.z);
+              const d2 = v.lengthSq();
+              if (d2 > RF * RF) continue;
+              const nd = Math.abs(s.nrm[i * 3]! * ax.x + s.nrm[i * 3 + 1]! * ax.y + s.nrm[i * 3 + 2]! * ax.z);
+              if (nd < 0.35) continue;
+              const x = v.dot(sd) / r, y = v.dot(up) / r, z = v.dot(ax) / r;
+              if (Math.abs(z) > 1.5) continue;
+              const w = Math.exp((-1.5 * d2) / (RF * RF)) * nd;
+              const f = [1, x, y, x * x, x * y, y * y];
+              for (let a = 0; a < 6; a++) {
+                B[a] = B[a]! + w * f[a]! * z;
+                for (let b = 0; b < 6; b++) M[a * 6 + b] = M[a * 6 + b]! + w * f[a]! * f[b]!;
+              }
+              nFit++;
+              if (d2 < RC * RC || d2 < 0.09) {
+                const wcol = Math.exp((-2 * d2) / Math.max(RC * RC, 0.09));
+                const h = Math.min(Math.max(s.hgt[i]! / s.hTop, 0), 1);
+                const q = s.pat[i * 2]! - Math.floor(s.pat[i * 2]!) - 0.5;
+                const ridge = Math.exp((-q * q) / 0.022) * 0.7;
+                const groove = ss(0.5, 0.2, Math.abs(q));
+                const t1 = ss(0.02, 0.33, h), t2 = ss(0.42, 1, h);
+                for (let ch = 0; ch < 3; ch++) {
+                  let al = PLUM[ch]! + (CORAL[ch]! - PLUM[ch]!) * t1;
+                  al += (MAGENTA[ch]! - al) * t2;
+                  al += (SHELL[ch]! - al) * ridge;
+                  al *= GROOVE[ch]! + (1 - GROOVE[ch]!) * groove;
+                  col[ch] = col[ch]! + wcol * al;
+                  col[4 + ch] = col[4 + ch]! + wcol * s.glow[i * 3 + ch]!;
+                }
+                col[3] = col[3]! + wcol * s.ground[i * 2]!;
+                col[7] = col[7]! + wcol * s.ground[i * 2 + 1]!;
+                wc += wcol;
+              }
+            }
+          }
+      // solve the weighted least squares (Gaussian elimination, a little ridge to keep it sane)
+      const q = [0, 0, 0, 0, 0, 0];
+      if (nFit >= 12) {
+        for (let a = 0; a < 6; a++) M[a * 6 + a] = M[a * 6 + a]! + 1e-4 * (M[0] || 1);
+        const A: number[][] = Array.from({ length: 6 }, (_, a) => [...M.slice(a * 6, a * 6 + 6), B[a]!]);
+        let ok = true;
+        for (let p = 0; p < 6 && ok; p++) {
+          let best = p;
+          for (let a = p + 1; a < 6; a++) if (Math.abs(A[a]![p]!) > Math.abs(A[best]![p]!)) best = a;
+          [A[p], A[best]] = [A[best]!, A[p]!];
+          if (Math.abs(A[p]![p]!) < 1e-12) ok = false;
+          for (let a = 0; a < 6 && ok; a++) {
+            if (a === p) continue;
+            const f = A[a]![p]! / A[p]![p]!;
+            {
+              const Ra = A[a]!, Rp = A[p]!;
+              for (let b = p; b < 7; b++) Ra[b] = Ra[b]! - f * Rp[b]!;
+            }
+          }
+        }
+        if (ok) for (let a = 0; a < 6; a++) q[a] = A[a]![6]! / A[a]![a]!;
+        // a wall that bends away faster than this is a fit gone wrong: fall back to a plane
+        if (!ok || Math.abs(q[3]!) + Math.abs(q[4]!) + Math.abs(q[5]!) > 0.6 || Math.abs(q[0]!) > 0.5) q.fill(0);
+      }
+      eyeQuad.set([q[0]!, q[1]!, q[2]!, q[3]!, q[4]!, q[5]!, 0, 0], e * 8);
+      if (wc > 0) for (let k = 0; k < 8; k++) col[k] = col[k]! / wc;
+      else col.set([0.6, 0.12, 0.12, 1, 0, 0, 0, 0]);
+      eyeSkin.set(col, e * 8);
+    }
+  }
+
+  // The eye's mesh: a disc of rings round the eye's axis, out to RIM radii. Its height is the lid,
+  // hugging the eyeball, rolled into a collar that settles on to the wall and sinks under it.
+  const RIM = 1.55;
+  const eyeBase = new BufferGeometry();
+  {
+    const RINGS = [0, 0.2, 0.37, 0.5, 0.6, 0.68, 0.75, 0.81, 0.86, 0.9, 0.94, 0.98, 1.03, 1.09, 1.17, 1.27, 1.4, RIM];
+    const SEG = 40;
+    const pos: number[] = [];
+    const idx: number[] = [];
+    for (const rho of RINGS)
+      for (let j = 0; j <= SEG; j++) {
+        const th = (j / SEG) * Math.PI * 2;
+        pos.push(rho * Math.cos(th), rho * Math.sin(th), 0);
+      }
+    for (let i = 0; i < RINGS.length - 1; i++)
+      for (let j = 0; j < SEG; j++) {
+        const a = i * (SEG + 1) + j;
+        const b = a + SEG + 1;
+        idx.push(a, b, a + 1, a + 1, b, b + 1);
+      }
+    eyeBase.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
+    eyeBase.setIndex(idx);
+  }
   const eyeGeo = new InstancedBufferGeometry();
   {
-    const base = new SphereGeometry(1, 20, 14);
-    eyeGeo.index = base.index;
-    eyeGeo.setAttribute("position", base.getAttribute("position"));
+    eyeGeo.index = eyeBase.index;
+    eyeGeo.setAttribute("position", eyeBase.getAttribute("position"));
     eyeGeo.setAttribute("aPos", new InstancedBufferAttribute(new Float32Array(eyePos), 4));
     eyeGeo.setAttribute("aAxis", new InstancedBufferAttribute(new Float32Array(eyeAxis), 4));
-    eyeGeo.instanceCount = eyePos.length / 4;
+    eyeGeo.setAttribute("aUp", new InstancedBufferAttribute(eyeUp, 4));
+    const quad = new InstancedInterleavedBuffer(eyeQuad, 8);
+    const skin = new InstancedInterleavedBuffer(eyeSkin, 8);
+    eyeGeo.setAttribute("aQuadA", new InterleavedBufferAttribute(quad, 4, 0));
+    eyeGeo.setAttribute("aQuadB", new InterleavedBufferAttribute(quad, 4, 4));
+    eyeGeo.setAttribute("aAlb", new InterleavedBufferAttribute(skin, 4, 0));
+    eyeGeo.setAttribute("aGlow", new InterleavedBufferAttribute(skin, 4, 4));
+    eyeGeo.instanceCount = nEye;
   }
+  const NS = (x: number) => x.toFixed(4);
   const eyeMat = new ShaderMaterial({
-    uniforms: { ...shared },
+    uniforms: { ...shared, uHoop: { value: world.hoopPos.clone() } },
+    transparent: true,
+    blending: CustomBlending,
+    blendSrc: OneFactor,
+    blendDst: OneMinusSrcAlphaFactor,
     vertexShader: /* glsl */ `
       attribute vec4 aPos;
       attribute vec4 aAxis;
-      varying vec3 vN;
+      attribute vec4 aUp;
+      attribute vec4 aQuadA;
+      attribute vec4 aQuadB;
+      attribute vec4 aAlb;
+      attribute vec4 aGlow;
+      uniform float uTime;
+      uniform vec3 uHoop;
       varying vec3 vW;
+      varying vec3 vN;
+      varying vec2 vXY;
+      varying vec4 vC;
       varying vec3 vAxis;
+      varying vec3 vUp;
       varying vec3 vGaze;
-      varying float vSeed;
-      varying float vAwake;
+      varying vec3 vSeedOpen;   // seed, how open, how bright the eyeball
+      varying vec4 vAlb;
+      varying vec4 vGlow;
+      varying vec4 vWallN;   // the wall's own normal under this point; w: 1 for a dome eye
+
+      float gFlat = 1.0;   // a shut eye lies flatter in the wall than an open one
+      float smax(float a, float b, float k) {
+        float h = clamp(0.5 + 0.5 * (a - b) / k, 0.0, 1.0);
+        return mix(b, a, h) + k * h * (1.0 - h);
+      }
+      // the height of the eye's surface over its centre, in eye radii, at (x, y) in the wall's plane
+      float surf(vec2 p) {
+        float rho = length(p);
+        float lid = rho < 0.995 ? 0.3 + (sqrt(1.0 - rho * rho) - 0.25) * gFlat : -1.0;
+        vec2 p2 = p * p;
+        float wall = 0.3 + aQuadA.x + aQuadA.y * p.x + aQuadA.z * p.y + aQuadA.w * p2.x + aQuadB.x * p.x * p.y + aQuadB.y * p2.y;
+        // a fleshy shoulder round the lids that settles on to the wall and goes under it
+        float dr = (rho - 1.0) / 0.32;
+        float collar = wall + 0.13 * exp(-dr * dr) - 0.05 * smoothstep(1.3, ${NS(RIM)}, rho);
+        return smax(lid, collar, 0.14);
+      }
       void main() {
-        vN = position;
-        vW = aPos.xyz + position * aPos.w;
-        vAxis = aAxis.xyz;
-        vSeed = aAxis.w;
+        vec3 axis = aAxis.xyz;
+        vec3 up = aUp.xyz;
+        vec3 side = cross(up, axis);
+        float r = aPos.w;
+        float seed = aAxis.w;
         vec3 to = cameraPosition - aPos.xyz;
         float dist = length(to);
-        // an eye can only swivel so far out of its socket
-        vGaze = normalize(mix(aAxis.xyz, to / dist, 0.72));
-        // asleep until the lantern is close
-        vAwake = smoothstep(17.0, 9.0, dist + 5.0 * (aAxis.w - 0.5) - 14.0 * max(aPos.w - 0.3, 0.0));
+        float blink = smoothstep(0.985, 1.0, sin(uTime * (0.55 + seed * 0.5) + seed * 50.0));
+        float open, bright = 1.0;
+        if (aUp.w > 0.0) {
+          // a dome eye: wakes in its turn as the camera comes in, softly, and looks at the hoop
+          float awake = smoothstep(aUp.w, aUp.w + 1.6, uTime);
+          vec3 th = normalize(uHoop - aPos.xyz);
+          vGaze = normalize(mix(axis, th, 0.8));
+          open = awake * (1.0 - blink) * (0.42 + 0.14 * fract(seed * 7.3));
+          bright = 0.75;
+        } else {
+          // an eye can only swivel so far out of its socket
+          vGaze = normalize(mix(axis, to / dist, 0.72));
+          // asleep until the lantern is close
+          float awake = smoothstep(17.0, 9.0, dist + 5.0 * (seed - 0.5) - 14.0 * max(r - 0.3, 0.0));
+          open = awake * (1.0 - blink) * (0.5 + 0.3 * fract(seed * 7.3));
+        }
+        vSeedOpen = vec3(seed, open, bright);
+        gFlat = mix(aUp.w > 0.0 ? 0.5 : 0.72, 1.0, smoothstep(0.0, 0.5, open));
+        vec2 p = position.xy;
+        float z = surf(p);
+        const float E = 0.01;
+        float zx = (surf(p + vec2(E, 0.0)) - surf(p - vec2(E, 0.0))) / (2.0 * E);
+        float zy = (surf(p + vec2(0.0, E)) - surf(p - vec2(0.0, E))) / (2.0 * E);
+        vN = normalize(axis - zx * side - zy * up);
+        float wx = aQuadA.y + 2.0 * aQuadA.w * p.x + aQuadB.x * p.y;
+        float wy = aQuadA.z + aQuadB.x * p.x + 2.0 * aQuadB.y * p.y;
+        vWallN = vec4(normalize(axis - wx * side - wy * up), aUp.w > 0.0 ? 1.0 : 0.0);
+        vW = aPos.xyz + r * (p.x * side + p.y * up + z * axis);
+        vXY = p;
+        vC = aPos;
+        vAxis = axis;
+        vUp = up;
+        vAlb = aAlb;
+        vGlow = aGlow;
+
         gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
       }`,
     fragmentShader: /* glsl */ `
       uniform float uTime;
       ${FOG_GLSL}
-      varying vec3 vN;
       varying vec3 vW;
+      varying vec3 vN;
+      varying vec2 vXY;
+      varying vec4 vC;
       varying vec3 vAxis;
+      varying vec3 vUp;
       varying vec3 vGaze;
-      varying float vSeed;
-      varying float vAwake;
+      varying vec3 vSeedOpen;
+      varying vec4 vAlb;
+      varying vec4 vGlow;
+      varying vec4 vWallN;
+
+      float hash12(vec2 p) {
+        vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.x + p3.y) * p3.z);
+      }
+      const float TILT = 0.85;
+      // a scale of the wall's skin (as SKIN_GLSL in materials.ts), here in rings round the eye
+      float scale(float a, float N, float row, float t, out vec4 about) {
+        float gx = a * N + 0.5 * row;
+        float id = floor(gx);
+        float rnd = hash12(vec2(mod(id, N), row));
+        float r2 = fract(rnd * 7.13 + 0.37);
+        float x = gx - id - 0.5 + (rnd - 0.5) * 0.14;
+        float u = t - 0.72 - 0.12 * r2;
+        float e = x * x * 2.9 + u * u * 1.2;
+        about = vec4(e, rnd, x, u);
+        return TILT * t + 1.0 - e * (0.3 + 0.7 * e) + 0.22 * (r2 - 0.5);
+      }
+
       void main() {
-        vec3 n = normalize(vN);
+        float seed = vSeedOpen.x;
+        // barely parted is shut: no sliver of eyeball, just the lids' crease
+        float o = vSeedOpen.y * smoothstep(0.03, 0.14, vSeedOpen.y);
+        float r = vC.w;
         vec3 axis = normalize(vAxis);
-        vec3 g = normalize(vGaze);
+        vec3 up = normalize(vUp);
+        vec3 side = cross(up, axis);
         vec3 V = cameraPosition - vW;
         float dist = length(V);
         V /= dist;
+        vec2 p = vXY;
+        float rho = length(p);
+        vec3 dpx = dFdx(vW), dpy = dFdy(vW);
+        float aa = max(fwidth(p.y), 1e-4);
 
-        // lids close over the eye from above and below
-        vec3 lidUp = normalize(vec3(0.0, 1.0, 0.0) - axis * axis.y + vec3(1e-3, 0.0, 0.0));
-        float blink = smoothstep(0.985, 1.0, sin(uTime * (0.55 + vSeed * 0.5) + vSeed * 50.0));
-        float open = vAwake * (1.0 - blink) * (0.5 + 0.3 * fract(vSeed * 7.3));
-        float lid = smoothstep(open - 0.03, open + 0.03, abs(dot(n, lidUp)) + 0.25 * (1.0 - dot(n, axis)));
+        // --- the lids: an almond opening, upper over lower, opened by how awake it is ---------
+        const float W = 0.9;
+        float xs = p.x / W;
+        float s = max(1.0 - xs * xs, 0.0);
+        float sp = pow(s, 0.85);
+        float meet = -mix(0.3, 0.1, clamp(o / 0.6, 0.0, 1.0)) * s;                  // where they close: a soft curve, low in the middle
+        float yu = meet + 1.0 * o * sp;
+        float yl = meet - 0.62 * o * sp;
+        float du = yu - p.y;                     // > 0 below the upper lid's edge
+        float dl = p.y - yl;                     // > 0 above the lower lid's edge
+        float d = min(du, dl);
+        float apert = smoothstep(-aa, aa, d) * step(0.0, s - 1e-3);
 
-        // iris and pupil around the gaze
-        float c = dot(n, g);
-        vec3 b1 = normalize(cross(g, vec3(0.0, 1.0, 0.1)));
-        vec3 b2 = cross(g, b1);
-        float around = atan(dot(n, b1), dot(n, b2));
-        float r = acos(clamp(c, -1.0, 1.0));
-        float wide = 0.2 + 0.07 * sin(uTime * 0.7 + vSeed * 20.0);
-        vec3 hue = vSeed < 0.4 ? vec3(0.1, 0.95, 0.7) : vSeed < 0.7 ? vec3(1.0, 0.62, 0.15) : vSeed < 0.9 ? vec3(1.0, 0.3, 0.6) : vec3(0.55, 0.5, 1.0);
-        vec3 iris = hue * (0.55 + 0.45 * sin(around * 22.0 + sin(r * 30.0))) * mix(1.25, 0.5, smoothstep(0.2, 0.6, r));
-        vec3 white = vec3(1.0, 0.9, 0.86) * (0.72 + 0.28 * c);
-        white = mix(white, vec3(0.95, 0.35, 0.35), 0.35 * smoothstep(0.75, 1.4, r));
-        vec3 col = mix(white, iris, smoothstep(0.62, 0.58, r));
-        col *= 1.0 - 0.6 * smoothstep(0.03, 0.0, abs(r - 0.6));
-        col = mix(col, vec3(0.02, 0.0, 0.03), smoothstep(wide + 0.02, wide - 0.02, r));
-        // wet highlight
-        col += vec3(1.0) * smoothstep(0.975, 0.99, dot(n, normalize(g + 0.42 * lidUp + 0.3 * b1)));
+        // --- the eyeball, seen through the opening -----------------------------------------
+        vec3 eyeCol = vec3(0.0);
+        if (apert > 0.0) {
+          vec3 rd = -V;
+          vec3 oc = cameraPosition - vC.xyz;
+          float b = dot(oc, rd);
+          float cc = dot(oc, oc) - r * r;
+          float disc = b * b - cc;
+          float tt = disc > 0.0 ? -b - sqrt(disc) : -b;
+          vec3 n = normalize(cameraPosition + rd * tt - vC.xyz);
+          vec3 g = normalize(vGaze);
+          float c = dot(n, g);
+          vec3 b1 = normalize(cross(g, vec3(0.0, 1.0, 0.1)));
+          vec3 b2 = cross(g, b1);
+          float around = atan(dot(n, b1), dot(n, b2));
+          float rr = acos(clamp(c, -1.0, 1.0));
+          float wide = 0.2 + 0.07 * sin(uTime * 0.7 + seed * 20.0);
+          vec3 hue = seed < 0.4 ? vec3(0.1, 0.95, 0.7) : seed < 0.7 ? vec3(1.0, 0.62, 0.15) : seed < 0.9 ? vec3(1.0, 0.3, 0.6) : vec3(0.55, 0.5, 1.0);
+          vec3 iris = hue * (0.55 + 0.45 * sin(around * 22.0 + sin(rr * 30.0))) * mix(1.25, 0.5, smoothstep(0.2, 0.6, rr));
+          vec3 white = vec3(1.0, 0.9, 0.86) * (0.72 + 0.28 * c);
+          white = mix(white, vec3(0.95, 0.35, 0.35), 0.35 * smoothstep(0.75, 1.4, rr));
+          vec3 col = mix(white, iris, smoothstep(0.62, 0.58, rr));
+          col *= 1.0 - 0.6 * smoothstep(0.03, 0.0, abs(rr - 0.6));
+          col = mix(col, vec3(0.02, 0.0, 0.03), smoothstep(wide + 0.02, wide - 0.02, rr));
+          // wet highlight
+          col += vec3(1.0) * smoothstep(0.975, 0.99, dot(n, normalize(g + 0.42 * up + 0.3 * b1)));
+          float ndv = max(dot(n, V), 0.0);
+          float lamp = (0.25 + 0.75 * ndv) / (1.0 + dist * dist / 40.0);
+          col *= (0.28 + 1.1 * lamp) * vSeedOpen.z;
+          // the lids shade the eyeball where it goes in under them, the upper one most
+          col *= mix(0.3, 1.0, smoothstep(0.0, 0.2, du)) * mix(0.6, 1.0, smoothstep(0.0, 0.1, dl));
+          eyeCol = col;
+        }
 
-        // lit like the walls, by the traveller's lantern, and glowing a little of its own accord
-        float ndv = max(dot(n, V), 0.0);
-        float lamp = (0.25 + 0.75 * ndv) / (1.0 + dist * dist / 40.0);
-        col *= 0.28 + 1.1 * lamp;
-        vec3 skin = vec3(0.55, 0.1, 0.16) * (0.2 + 1.2 * lamp) * (0.7 + 0.3 * dot(n, axis));
-        col = mix(col, skin, lid);
+        // --- the lids and the collar: the wall's own skin --------------------------------------
+        vec3 n = normalize(vN);
+        // the lids' edges roll in towards the opening: the upper one over, the lower one under
+        float eu = max(-du, 0.0), el = max(-dl, 0.0);
+        float lidSide = step(du, dl);            // 1 on the upper lid's side of the opening
+        float roll = exp(-(lidSide > 0.5 ? eu : el) / 0.13) * step(0.0, s - 1e-3);
+        n = normalize(n - up * (lidSide > 0.5 ? 0.9 : -0.5) * roll);
+        // the fold above the upper lid and a lighter one under the lower
+        float sf = pow(max(1.0 - p.x * p.x / 1.05, 0.0), 0.8);
+        float yf = meet + (0.72 + 0.28 * o) * sf + 0.06;
+        float fold = exp(-pow((p.y - yf) / 0.06, 2.0)) * sf * step(0.0, p.y - meet);
+        float yf2 = meet - (0.5 + 0.2 * o) * sf - 0.05;
+        float fold2 = exp(-pow((p.y - yf2) / 0.06, 2.0)) * sf * step(p.y, meet);
+        n = normalize(n + up * 0.45 * (fold * sign(p.y - yf) * step(abs(p.y - yf), 0.12)));
 
-        col = mix(col, uFog, fogAmount(dist));
-        gl_FragColor = vec4(col, 1.0);
+        // the scales of the wall carry on to the collar, in rings round the eye, smaller as they
+        // near it, and are gone on the lids
+        float a = atan(p.y, p.x) / 6.2831853;
+        float N = max(8.0, floor(6.2831853 * ${NS(RIM)} * r / ${NS(SCALE_W)} + 0.5));
+        float step_ = 6.2831853 / N * ${NS(SCALE_PITCH / SCALE_W)};
+        float ring = (log(${NS(RIM)}) - log(max(rho, 1e-3))) / step_;
+        vec2 da = vec2(dFdx(a), dFdy(a));
+        da -= floor(da + 0.5);
+        vec2 dr = vec2(dFdx(ring), dFdy(ring));
+        float fw = max(N * max(abs(da.x), abs(da.y)), max(abs(dr.x), abs(dr.y)));
+        float detail = (1.0 - smoothstep(0.13, 0.4, fw)) * smoothstep(1.0, 1.4, rho);
+        float tone = 0.9;
+        float wet = 0.6 * (1.0 - smoothstep(1.0, 1.4, rho));   // the lids are smooth and wet
+        vec3 albedo = vAlb.rgb;
+        if (detail > 0.0) {
+          float row = floor(ring);
+          float t = ring - row;
+          vec4 aboutA, aboutB;
+          float hA = scale(a, N, row - 1.0, t + 1.0, aboutA);
+          float hB = scale(a, N, row, t, aboutB);
+          float top = step(hB, hA);
+          vec4 about = mix(aboutB, aboutA, top);
+          float e = about.x;
+          vec2 de = vec2(5.8 * about.z * N, 2.4 * about.w);
+          vec2 g = vec2(0.0, TILT) - (0.3 + 1.4 * e) * de;
+          float amp = detail * rho / ${NS(RIM)};
+          vec2 dH = amp * (g.x * da + g.y * dr);
+          float under = 1.0 - top;
+          float crease = 1.0 - smoothstep(0.0, 0.2 + 0.7 * under + 2.5 * fw, abs(hA - hB));
+          float body = 1.0 - smoothstep(0.3, 1.3, e);
+          wet = max(wet, body * detail);
+          float tn = (1.0 - (0.2 + 0.3 * under) * crease) * (0.8 + 0.2 * body) * (0.9 + 0.2 * about.y);
+          tone = mix(0.9, tn, detail);
+          albedo = mix(albedo, albedo * vec3(0.92, 0.6, 1.25), detail * smoothstep(0.72, 0.9, about.y) * 0.6);
+          vec3 r1 = cross(dpy, n), r2 = cross(n, dpx);
+          float det = dot(dpx, r1);
+          n = normalize((abs(det) + 1e-9) * n - 0.03 * sign(det) * (dH.x * r1 + dH.y * r2));
+        }
+        // the socket: soft shade in the crease where the lids go in under the collar, in the
+        // folds, where the lids meet, and under the upper lid's edge on the lower one
+        float ao = 1.0 - 0.18 * exp(-pow((rho - 0.95) / 0.13, 2.0)) * (1.0 - apert);
+        ao *= 1.0 - 0.35 * fold - 0.25 * fold2;
+        float meetLine = exp(-d * d / (0.004 + aa * aa)) * step(0.0, s - 1e-3) * sqrt(s);
+        ao *= 1.0 - 0.55 * meetLine * (1.0 - apert);
+        ao *= 1.0 - 0.4 * exp(-el / 0.14) * step(0.0, -dl) * (1.0 - lidSide) * sqrt(s);
+        // a dome eye that is still shut is a gentle fold in the dome's skin: its socket shade is
+        // half as deep, and it takes the wall's light (below), so it is no darker than the wall
+        float sh = vWallN.w * (1.0 - smoothstep(0.05, 0.35, o));
+        ao = mix(ao, 1.0 - 0.4 * (1.0 - ao), sh);
+        albedo *= tone * ao;
+
+        // lit as the wall is lit (WALL_FRAG in materials.ts), from the wall's own light here
+        float open = vAlb.w;
+        float ndl = max(dot(n, V), 0.0);
+        // lit, and hazed at a grazing angle, as the wall under it is, keeping a little of its relief
+        float ndlW = max(dot(normalize(vWallN.xyz), V), 0.0);
+        ndl = mix(ndl, clamp(ndlW + 0.35 * (ndl - max(dot(normalize(vN), V), 0.0)), 0.0, 1.0), sh);
+        float lantern = (0.66 + 0.34 * smoothstep(0.5, 4.5, dist)) / (1.0 + dist * dist / 36.0);
+        vec3 light = vec3(0.05, 0.018, 0.07) * (0.7 + 0.3 * n.y);
+        light += vec3(0.62, 0.34, 0.27) * (0.2 + 0.8 * ndl) * lantern;
+        light *= open;
+        light += vGlow.rgb * (0.5 * (0.5 + 0.5 * open));
+        vec3 col = albedo * light;
+        col /= 1.0 + 1.3 * max(max(col.r, col.g) - 0.4, 0.0);
+        // the dome's wall carries more light than its averaged colour says (the bands down its
+        // ribs): a shut lid there is lifted to match the skin round it, measured from the frame
+        col *= 1.0 + 0.25 * sh;
+        float graze = 1.0 - ndl;
+        graze *= graze * graze;
+        col = mix(col, vec3(0.08, 0.72, 0.5) * tone * open * (0.12 + 0.34 * ndl + 0.25 * graze), 0.62 * smoothstep(0.2, 1.1, vGlow.w));
+        float s2 = ndl * ndl, s4 = s2 * s2, s8 = s4 * s4, s16 = s8 * s8, s32 = s16 * s16, s64 = s32 * s32;
+        col += (vec3(1.0, 0.74, 0.64) * s64 * s64 * 0.45 + vec3(0.9, 0.2, 0.18) * s8 * 0.05) * wet * lantern * open;
+        float far = dist * dist / (dist * dist + 12.0);
+        col += vec3(0.42, 0.05, 0.30) * graze * (0.05 + 0.16 * length(vGlow.rgb) + 0.2 * far / (1.0 + dist * dist / 60.0));
+
+        // the wet rim along each lid's edge: a thin line of the lantern
+        float rimFade = 1.0 - smoothstep(0.015, 0.05, aa);
+        float rim = exp(-pow((-d - 0.03) / 0.018, 2.0)) * step(0.0, s - 1e-3) * rimFade * (1.0 - apert);
+        rim *= mix(0.5 * lidSide, 1.0, smoothstep(0.05, 0.3, o));
+        col += vec3(1.0, 0.78, 0.72) * rim * (0.08 + 0.5 * pow(ndl, 3.0)) * lantern * open;
+
+        col = mix(col, eyeCol, apert);
+
+        // the collar fades into the wall, and shades it a little where it goes under
+        float fogA = fogAmount(dist);
+        col = mix(col, uFog, fogA);
+        float cover = 1.0 - smoothstep(1.0, 1.45, rho);
+        float shade = 0.07 * exp(-pow((rho - 1.3) / 0.15, 2.0)) * (1.0 - fogA) * (1.0 - sh);
+        float alpha = cover + shade * (1.0 - cover);
+        gl_FragColor = vec4(col * cover, alpha);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }`,
@@ -628,6 +1025,7 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
     shroomLight,
     dispose() {
       eyeGeo.dispose();
+      eyeBase.dispose();
       eyeMat.dispose();
       for (const g of shroomGeos) g.dispose();
       shroomMat.dispose();
