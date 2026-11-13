@@ -259,28 +259,32 @@ function whaleMaterial(o: SkyOptions) {
 
 /**
  * The pair's flight, in the town's unrolled coordinates: [t, s (arc length at the ground), z, height].
- * Laid out against the camera track so that she is in view where the ride looks:
- *  - 8 to 12.5: she comes out of the far end towards the camera, upper right;
- *  - 13 to 14: she sweeps low over the camera;
- *  - 14.5 to 17: she holds the open sky down the -z end of the town, ahead of the camera, and banks;
- *  - 18 to 20: she turns back over the plaza;
- *  - 20.5 to 24.5: she swims for the moon and crosses its disc, behind the hut's finial.
- * Before 7 she is far off in the glare at the moon end, out of the opening frames.
+ * The camera turns about 300 degrees between t = 12 and 22, so she is placed against its track:
+ *  - until 12.5 she waits down the -z end, behind a camera that looks along +z;
+ *  - 13.5 to 16.5: as it turns to face -z she comes up out of the far end and crosses its view
+ *    from left to right, in profile against the open sky;
+ *  - 16.5 to 18.5: out of sight above and behind it she sweeps round and up the axis, fast;
+ *  - 19 to 24.5: she has slowed to a drift across the moon, heading -s, so that from t = 19 (the
+ *    moon at the top left of the turning view) to the portal she and her calf are a silhouette on
+ *    its disc. Here she is all but still in the world: the moon is so far off that staying on it
+ *    while the camera moves needs no more than that.
  */
 const FLIGHT: [number, number, number, number][] = [
-  [3, 70, 185, 40],
-  [6, 60, 175, 38],
-  [9, 45, 140, 32],
-  [12, 39, 88, 23],
-  [13.5, 46, 30, 23],
-  [14.8, 46, -15, 25],
-  [15.8, 33, -36, 26.5],
-  [16.8, 14, -44, 27],
-  [18, -12, -30, 27],
-  [20.5, 20, 62, 31],
-  [22, 2, 88, 33],
-  [24, -25, 108, 33],
-  [26, -50, 125, 33],
+  [0, -60, -150, 34],
+  [10, -60, -125, 34],
+  [12.5, -50, -96, 32],
+  [14.5, 18, -54, 25],
+  [15.5, 50, -42, 22],
+  [16.5, 74, -22, 24],
+  [17.4, 74, 30, 29],
+  [18.2, 38, 84, 34],
+  [19, -2, 95, 36],
+  [20, -5, 95, 37],
+  [21, -6, 95, 37],
+  [22, -10, 96, 37],
+  [23, -14, 97, 36],
+  [24.5, -20, 98, 35],
+  [26, -26, 99, 34],
 ];
 
 /** Catmull-Rom through the keys, with tangents from the actual key spacing in time */
@@ -523,9 +527,10 @@ export function createSky(o: SkyOptions, pointsMat: THREE.Material): Sky {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The moon on the cylinder's +z end cap (a disc of radius R + 2 in its own xy). A pearl disc lit
- * from its upper left, kept just over the director's bloom threshold so it glows without
- * clipping, inside a wide, dim halo that fades into the fog colour of the sky.
+ * The moon on the cylinder's +z end cap (a disc of radius R + 2 in its own xy). A full pearl moon,
+ * 0.6 to 0.85 in linear light: well over the director's bloom threshold (0.45), so it glows, but
+ * short of the old 1.15 that clipped to a white patch and swallowed the hut's finial. Around it a
+ * bright rim of glow and a wide, low halo fade into the fog colour of the sky.
  */
 export function moonMaterial(o: { R: number; fogColor: THREE.Color }) {
   return new THREE.ShaderMaterial({
@@ -551,22 +556,21 @@ export function moonMaterial(o: { R: number; fogColor: THREE.Color }) {
         const float RD = 0.335;
         float r = length(vP);
         float disc = smoothstep(RD + 0.004, RD - 0.004, r);
-        // a sphere seen face on: its normal, lit from the upper left, darkening to the limb
+        // a full moon: nearly flat, a little brighter towards its upper left, its limb only just
+        // dimmed, with soft grey-blue seas
         vec2 q = vP / RD;
-        vec3 n = vec3(q, sqrt(max(1.0 - dot(q, q), 0.0)));
-        float lam = max(dot(n, normalize(vec3(-0.45, 0.5, 0.75))), 0.0);
-        float limb = pow(n.z, 0.35);
-        // soft grey seas
+        float nz = sqrt(max(1.0 - dot(q, q), 0.0));
+        float lean = smoothstep(-1.2, 1.0, dot(q, vec2(-0.6, 0.8)));
         float seas = mNoise(q * 2.3 + 4.0) * 0.6 + mNoise(q * 5.1 - 2.0) * 0.4;
-        float sea = smoothstep(0.48, 0.7, seas);
-        vec3 face = mix(vec3(0.84, 0.92, 1.0), vec3(0.6, 0.72, 0.9), sea * 0.7);
-        vec3 col = face * (0.3 + 0.58 * lam) * limb;
+        float sea = smoothstep(0.46, 0.72, seas);
+        vec3 face = mix(vec3(0.86, 0.92, 1.0), vec3(0.62, 0.72, 0.9), sea * 0.45);
+        vec3 col = face * mix(0.7, 0.86, lean) * mix(0.84, 1.0, pow(nz, 0.4));
 
-        // the sky around it: faint rings of light, and a wide, low halo
+        // the sky around it: faint rings of light, a bright rim of glow and a wide, low halo
         float rings = 0.5 + 0.5 * cos(r * 60.0);
         vec3 sky = uFog * (1.0 + 0.2 * rings * smoothstep(0.34, 0.5, r) * smoothstep(1.1, 0.6, r));
         float d = max(r - RD, 0.0);
-        sky += vec3(0.1, 0.24, 0.42) * (0.55 * exp(-d * 9.0) + 0.45 * exp(-d * 2.6));
+        sky += vec3(0.2, 0.36, 0.6) * (0.55 * exp(-d * 14.0) + 0.4 * exp(-d * 4.5) + 0.2 * exp(-d * 1.6));
         gl_FragColor = vec4(mix(sky, col, disc), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
