@@ -736,6 +736,8 @@ const DETAIL_GLSL: Record<Detail, string> = {
         float jw = max(0.012, wpx * 0.7);
         float joint = 1.0 - smoothstep(jw * 0.5, jw + wpx, jd);
         m *= (0.88 + 0.18 * hxHash(vec2(floor(bx), row))) * (1.0 - 0.45 * joint * fade) * (1.0 - 0.12 * pillow * fade);
+        hxCaJ = joint * fade;
+        hxCaP = pillow * fade;
       }
       diffuseColor.rgb *= m * hxStairAO(vHxW);
     }`,
@@ -924,55 +926,109 @@ const RAIL_SHEEN_GLSL = /* glsl */ `
 
 /**
  * Light off the void: slow caustic ripples, as on the floor of a pool, over the stone that faces
- * the void. Two gyroid networks in world space, warped and drifting with uHxT alone, whose zero
- * lines are sharpened into soft ridges; their thickness is set in pixels (fwidth) so they neither
- * shimmer far off nor smear by the lens, and fade away once a cell shrinks to a few pixels.
+ * the void. Two webs of animated Voronoi cells in world space, domain-warped and drifting with uHxT
+ * alone; each web is a soft band along its cell walls (F2 - F1), widened by fwidth so it never
+ * thins to a hairline and fading once a cell shrinks to a few pixels. The second web's walls brighten
+ * where they cross the first's, the way pool light knots.
  */
 const CAUSTIC_FN_GLSL = /* glsl */ `
         float hxPoolAcc = 0.0;   // the lamps' pool at this fragment, which the ripples fade inside
         float hxCaM = 1.0;       // 0 where a detail is not stone (the runner)
-        float hxGyrRidge(vec3 p) {
-          float g = dot(sin(p), cos(p.yzx));
-          float fw = fwidth(g) + 1e-4;
-          float w = 0.42 + fw;                                       // broad and soft: no bright thread
-          return exp(-g * g / (w * w * 2.0)) * (1.0 - smoothstep(0.12, 0.4, fw));
+        float hxCaJ = 0.0;       // the newel's masonry: 1 in a joint
+        float hxCaP = 0.0;       // and 1 at the foot of a block's pillowed edge
+        vec3 hxPcg3(ivec3 c) {
+          uvec3 v = uvec3(c) * 1664525u + 1013904223u;
+          v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+          v ^= v >> 16u;
+          v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+          return vec3(v) * 2.3283064e-10;
         }
-        /** two ridge networks, .x teal-white and .y the amber one */
+        /** a soft band along the walls of moving Voronoi cells, 0..1 */
+        float hxCell(vec3 p, float t, float soft) {
+          vec3 fl = floor(p);
+          vec3 f = p - fl;
+          ivec3 i = ivec3(fl) + ivec3(step(0.5, f)) - 1;      // the 2x2x2 cells nearest p
+          f += vec3(1.0) - step(0.5, f);
+          float d1 = 8.0, d2 = 8.0;
+          for (int z = 0; z <= 1; z++)
+          for (int y = 0; y <= 1; y++)
+          for (int x = 0; x <= 1; x++) {
+            ivec3 o = ivec3(x, y, z);
+            vec3 h = hxPcg3(i + o);
+            // a point near its cell's middle, swaying along its own axis
+            vec3 r = vec3(o) + 0.3 + 0.4 * h + 0.24 * sin(t * (0.35 + 0.25 * h.z) + 6.2832 * h.x) * (h.yzx - 0.5) - f;
+            float d = dot(r, r);
+            if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;
+          }
+          float e = sqrt(d2) - sqrt(d1);                          // ~ twice the distance to a cell wall
+          float fw = fwidth(e) + 1e-4;
+          float w = 0.075 + 0.7 * fw + soft;                      // soft: a band, never a thread
+          float core = exp(-e * e / (w * w * 2.0));
+          float halo = 1.0 / (1.0 + e * e / (w * w * 3.0));        // the light spills softly into the cell
+          return (0.7 * core + 0.3 * halo) * (1.0 - smoothstep(0.1, 0.26, fw));
+        }
+        float hxCell(vec3 p, float t) { return hxCell(p, t, 0.0); }
+        /** .x the teal-white web, .y the amber knots where the two webs cross */
         vec2 hxCaustic(vec3 w, float t) {
-          vec3 q = w + vec3(0.08, 0.035, -0.055) * t;            // the slow drift up the slanted axis
-          q += 0.22 * sin(q.zxy * 0.9 + vec3(0.0, 2.1, 4.2) + t * 0.08);
-          float a = hxGyrRidge(q * 2.6 + vec3(0.0, t * 0.05, 0.0));
-          float b = hxGyrRidge(q.zyx * 2.1 - vec3(t * 0.04, 0.0, t * 0.03) + 1.7);
-          return vec2(max(a, b) + 0.6 * a * b, b);
+          vec3 q = w + vec3(0.06, 0.03, -0.045) * t;              // the slow drift up the slanted axis
+          q += 0.2 * sin(q.zxy * 2.9 + vec3(0.0, 2.1, 4.2) + t * 0.23);   // wavy walls, never straight
+          float a = hxCell(q * 2.1, t);
+          float b = hxCell(q.zyx * 1.55 + vec3(-0.03, 0.02, 0.025) * t + 3.7, t * 0.8 + 11.0);
+          return vec2(a + 0.45 * b, a * b);
+        }
+        /**
+         * The newel's ripples: the same two webs, but uneven, so the light reads as falling on the
+         * masonry rather than printed on it. A broad warp swells and shrinks the cells, a slow patchy
+         * field hands the light between the fine web and the coarse one and dims it in places, and
+         * soft (0..1) blurs and dims the web where the column turns away.
+         */
+        vec2 hxCausticNewel(vec3 w, float t, float soft) {
+          vec3 q = w + vec3(0.06, 0.03, -0.045) * t;
+          q += 0.2 * sin(q.zxy * 2.9 + vec3(0.0, 2.1, 4.2) + t * 0.23);
+          q += 0.32 * sin(q.yzx * 0.75 + vec3(1.3, 4.0, 2.2) + t * 0.05);      // cells of uneven size
+          float v = 0.5 + 0.5 * sin(dot(q, vec3(0.7, 0.9, -0.5)) + 1.6 * sin(dot(q, vec3(-0.6, 0.45, 0.8)) + t * 0.07));
+          float sw = 0.06 * soft;
+          float a = hxCell(q * 2.1, t, sw);
+          float b = hxCell(q.zyx * 1.55 + vec3(-0.03, 0.02, 0.025) * t + 3.7, t * 0.8 + 11.0, sw);
+          float x = a * mix(0.15, 1.1, v) + b * mix(0.7, 0.3, v);
+          return vec2(x * (1.0 - 0.4 * soft), a * b * v);
         }`;
 /** how much each detail catches the ripples: facing the void (outward, down), near the lens */
 const causticGlsl = (detail: Detail) => {
   const face: Partial<Record<Detail, string>> = {
     stair: "0.75 * max(-nw.y, 0.0) + 0.8 * max(dot(nw.xz, rad), 0.0)",
-    column: "0.25 + 0.75 * max(dot(nw.xz, rad), 0.0)",
+    column: "0.2 + 0.8 * max(dot(nw.xz, rad), 0.0)",
     wall: "0.6 * max(-dot(nw.xz, rad), 0.0)",
     keyhole: "0.3",
   };
   const near: Partial<Record<Detail, string>> = {
-    stair: "1.0 - smoothstep(4.0, 15.0, dist)",
-    column: "1.0 - smoothstep(3.0, 12.0, dist)",
-    wall: "1.0 - smoothstep(8.0, 22.0, dist)",
+    stair: "1.0 - smoothstep(5.0, 16.0, dist)",
+    column: "1.0 - smoothstep(4.0, 13.0, dist)",
+    wall: "1.0 - smoothstep(6.0, 15.0, dist)",
     keyhole: "1.0 - smoothstep(10.0, 30.0, dist)",
   };
-  /** the newel is close and lit flat, so it needs more than the soffit to show the same soft lift */
-  const gain: Partial<Record<Detail, string>> = { stair: "0.2", column: "0.3", wall: "0.18", keyhole: "0.18" };
+  /** the newel is close and lit flat, so it needs more than the soffit to show the same light */
+  const gain: Partial<Record<Detail, string>> = { stair: "0.34", column: "0.42", wall: "0.22", keyhole: "0.14" };
   if (!face[detail]) return "";
   return /* glsl */ `
           {
             vec3 nw = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
             vec2 rad = normalize(vHxW.xz + 1e-4);
             float dist = length(vHxW - cameraPosition);
-            float k = clamp(${face[detail]}, 0.0, 1.0) * (${near[detail]}) * hxCaM;
+            float f = clamp(${face[detail]}, 0.0, 1.0);
+            float k = f * f * (${near[detail]}) * hxCaM;           // squared: the carving's own facets modulate it
             k *= 1.0 - smoothstep(0.02, 0.25, hxPoolAcc);         // gone inside a lamp's pool
-            if (k > 0.004) {
-              vec2 c = hxCaustic(vHxW, uHxT);
-              vec3 tint = vec3(0.55, 0.95, 0.9) * c.x + vec3(0.95, 0.62, 0.3) * 0.45 * c.y;
-              hxGlow += diffuseColor.rgb * tint * ${gain[detail]} * k;          // a soft lift of the stone, read second
+            k *= smoothstep(5.0, 7.5, uHxT);                       // none in the opening thumbnail: the tower reads plain
+            if (k > 0.03) {                                       // below this the light is under 1%
+              ${detail === "column" ? `
+              // the masonry leads: the joints stay dark lines through the light, and the light
+              // slackens down a block's pillowed edge, so each block face reads as a lit face
+              float facing = abs(dot(nw, normalize(cameraPosition - vHxW)));
+              float soft = 1.0 - smoothstep(0.25, 0.75, facing);
+              k *= (1.0 - 0.9 * hxCaJ) * (1.0 - 0.5 * hxCaP);
+              vec2 c = hxCausticNewel(vHxW, uHxT, soft);` : "vec2 c = hxCaustic(vHxW, uHxT);"}
+              vec3 tint = vec3(0.62, 1.0, 0.92) * c.x + vec3(1.0, 0.66, 0.32) * 0.6 * c.y;
+              hxGlow += diffuseColor.rgb * tint * ${gain[detail]} * k;          // light falling on the stone
             }
           }`;
 };
@@ -1017,7 +1073,6 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
         uniform vec4 uHxPool[${POOL_N}];
         vec3 hxGlow = vec3(0.0);
         float hxH = 0.0; // carved height (metres) the bumped details write; the normal follows it
-        ${CAUSTIC_FN_GLSL}
         float hxHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         /** integer lattice hash: exact, so the two sides of a cell wall always agree */
         float hxH3(ivec3 c) {
@@ -1039,6 +1094,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             mix(mix(hxH3(i + o.yyx), hxH3(i + o.xyx), f.x), mix(hxH3(i + o.yxx), hxH3(i + o.xxx), f.x), f.y),
             f.z);
         }
+        ${CAUSTIC_FN_GLSL}
         /** the grain's base octave, kept for hxTint so the bedding costs no second noise */
         float hxBed = 0.5;
         /** sandstone grain, about -1..1; the finer octaves dissolve once a pixel covers them */
