@@ -513,14 +513,13 @@ export function sweepTube(pts: Vector3[], closed: boolean, radius: number, radia
  * it. Its lower run is sunk under the floor, so the two feet rise out of the ground like roots and
  * there is no end to cap.
  */
-function doorLoop(ch: Chamber, door: Door): Vector3[] {
+function doorLoop(ch: Chamber, door: Door, phis = DOOR_PHIS): Vector3[] {
   const pts: Vector3[] = [];
   const K = 0.95 * door.k;
-  const n = 84;
   const { t } = door;
   const perp = new Vector3(t.z, 0, -t.x);
-  for (let i = 0; i < n; i++) {
-    const [x, y] = profilePoint((Math.PI * 2 * i) / n, K);
+  for (const phi of phis) {
+    const [x, y] = profilePoint(phi, K);
     const e = (y - ch.yc) / ch.H;
     const rho = ch.R * Math.sqrt(Math.max(0.05, 1 - e * e));
     // where the corridor's outline, carried along the corridor, leaves the spheroid
@@ -534,9 +533,49 @@ function doorLoop(ch: Chamber, door: Door): Vector3[] {
   return pts;
 }
 
+/** the angles round the corridor's outline at which a doorway's loop is laid out */
+const DOOR_PHIS = Array.from({ length: 84 }, (_, i) => (Math.PI * 2 * i) / 84);
+
+/** sides of the bead's tube, and the most its centreline may turn at one joint above ground, in radians */
+const BEAD_SIDES = 32;
+const BEAD_TURN = 4 * (Math.PI / 180);
+
+/**
+ * The bead is round, and has to look it with the camera's nose against it: enough sides that its
+ * outline is a curve, and a centreline cut finer wherever it turns. The corridor's vault comes to a
+ * soft point, where a loop laid out at an even step turns 16 degrees at one joint: corners on the
+ * crown. So the loop's stretches are halved round any joint that turns too far, until none does.
+ * sweepTube's normals are the tube's own radii, so they run on unbroken round it and round the loop.
+ */
 function buildDoorFrame(ch: Chamber, door: Door): BufferGeometry {
-  const geo = sweepTube(doorLoop(ch, door), true, 0.27 * Math.sqrt(door.k), 10, door.t.clone().negate());
+  let phis = DOOR_PHIS;
+  for (let pass = 0; pass < 8; pass++) {
+    const pts = doorLoop(ch, door, phis);
+    const n = pts.length;
+    const split = new Set<number>(); // i: the stretch from joint i to the next is to be halved
+    const a = new Vector3();
+    const b = new Vector3();
+    for (let i = 0; i < n; i++) {
+      const p = pts[i]!;
+      if (p.y < ch.c.y - 0.4) continue; // under the floor
+      a.copy(p).sub(pts[(i + n - 1) % n]!);
+      b.copy(pts[(i + 1) % n]!).sub(p);
+      if (a.angleTo(b) > BEAD_TURN) split.add((i + n - 1) % n).add(i);
+    }
+    if (!split.size) break;
+    const finer: number[] = [];
+    phis.forEach((phi, i) => {
+      finer.push(phi);
+      if (split.has(i)) finer.push((phi + (phis[i + 1] ?? Math.PI * 2)) / 2);
+    });
+    phis = finer;
+  }
+  const geo = sweepTube(doorLoop(ch, door, phis), true, 0.27 * Math.sqrt(door.k), BEAD_SIDES, door.t.clone().negate());
   const pos = geo.getAttribute("position") as BufferAttribute;
+  // the pattern runs round the loop by angle, as it does at an even step
+  const pat = geo.getAttribute("pat") as BufferAttribute;
+  const ring = BEAD_SIDES + 1;
+  for (let i = 0; i < pos.count; i++) pat.setY(i, (phis[Math.floor(i / ring)] ?? Math.PI * 2) / (Math.PI * 2));
   const hgt = new Float32Array(pos.count);
   for (let i = 0; i < pos.count; i++) hgt[i] = pos.getY(i) - ch.c.y;
   geo.setAttribute("hgt", new BufferAttribute(hgt, 1));
