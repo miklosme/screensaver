@@ -295,11 +295,76 @@ const ROOM_GLSL = /* glsl */ `
 uniform float uWinT;
 uniform float uWinRes;
 varying vec3 vRay;
+varying vec3 vRc;
 varying float vSeed;
+const float RW = 0.62, Y0 = -0.5, Y1 = 1.42, D = 1.0;
 float wHash(float s, float k) { return fract(sin(s * 91.37 + k * 17.173) * 43758.5453); }
 float wBox(vec2 p, vec2 c, vec2 h) { vec2 q = abs(p - c) - h; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0); }
-vec3 wRoom(vec2 Q, vec3 d, vec3 lit, float sd, float t, float aa) {
-  const float RW = 0.62, Y0 = -0.5, Y1 = 1.42, D = 1.0;
+// warm plaster, some rooms creamier, some rosier
+vec3 wWall(vec3 lit, float sd) {
+  vec3 cream = vec3(dot(lit, vec3(0.45, 0.4, 0.15))) * vec3(1.0, 0.82, 0.62);
+  return mix(lit, cream, 0.15 + 0.35 * wHash(sd, 1.0)) * mix(vec3(1.0), vec3(1.0, 0.85, 0.9), wHash(sd, 2.0) * 0.6);
+}
+// the lamp: a pendant under the ceiling, or a table lamp in a back corner
+vec3 wLamp(float sd) {
+  float side = wHash(sd, 3.0) < 0.5 ? -1.0 : 1.0;
+  return wHash(sd, 4.0) < 0.5 ? vec3((wHash(sd, 5.0) - 0.5) * 0.5, Y1 - 0.3, -D * 0.5) : vec3(side * (RW - 0.22), 0.05, -D + 0.2);
+}
+/**
+ * A room at a glance, for windows of about 12 to 30 px: only the back wall is traced, and what
+ * lies off it reads as one darker plane (side wall, floor or ceiling), with the floor's line, the
+ * lamp's pool shifting with the view and the corners in dusk. The full room shades the same.
+ */
+vec3 wHint(vec2 Q, vec3 d, vec3 lit, float sd, float aa) {
+  d.z = min(d.z, -1e-3 * length(d));
+  vec2 B = Q + d.xy * (D / -d.z);
+  vec3 wall = wWall(lit, sd);
+  float ex = RW - abs(B.x);
+  float e = min(ex, min(B.y - Y0, Y1 - B.y));
+  vec3 c = mix(wall * 0.9, lit * 0.12, 1.0 - smoothstep(-aa, aa, B.y - Y0 - 0.07));
+  vec3 off = B.y < Y0 && ex > 0.0 ? lit * vec3(0.5, 0.34, 0.24) : wall * 0.42;
+  c = mix(off, c, smoothstep(-aa, aa, e));
+  vec3 lv = vec3(B, -D) - wLamp(sd);
+  float pool = 1.0 / (1.0 + 9.0 * dot(lv, lv));
+  // a little brighter than the room it stands for: at this size it is still mostly a light
+  return c * (0.7 + 1.2 * pool) * (0.5 + 0.5 * smoothstep(0.0, 0.3, abs(e)));
+}
+/**
+ * Someone comes to the window now and then, stands a while in one light and goes again: placed
+ * from the camera's side so the head and shoulders sit in that light, clear of mullion and
+ * transom, and drawn over room, hint and pane alike so it reads at any size a room shows at.
+ * Returns how much of the pixel the figure covers.
+ */
+float wWalker(vec2 Q, vec3 d, vec2 sc, float sd, float t, float aa) {
+  float r2 = wHash(sd, 2.0), r3 = wHash(sd, 3.0), r5 = wHash(sd, 5.0), r6 = wHash(sd, 6.0), r7 = wHash(sd, 7.0), r8 = wHash(sd, 8.0);
+  if (r8 >= 0.42) return 0.0;
+  float per = 10.0 + 8.0 * r7;
+  float u = fract(t / per + r5) / 0.55;
+  if (u >= 1.0) return 0.0;
+  d.z = min(d.z, -1e-3 * length(d));
+  d = normalize(d);
+  // hidden where the ray meets a wall, the floor or the ceiling before the figure's plane
+  float th = min(min(((d.x > 0.0 ? RW : -RW) - Q.x) / d.x, ((d.y > 0.0 ? Y1 : Y0) - Q.y) / d.y), -D / d.z);
+  float zp = -D * (0.22 + 0.2 * r6);
+  float tp = zp / d.z;
+  if (tp >= th) return 0.0;
+  vec2 S = Q + d.xy * tp;
+  float side = r3 < 0.5 ? -1.0 : 1.0;
+  // to the light the curtain leaves open, if there is one
+  float dir = r3 > 0.3 && r3 < 0.7 ? -side : r2 < 0.5 ? -1.0 : 1.0;
+  float w = smoothstep(0.16, 0.0, u) + smoothstep(0.84, 1.0, u);
+  float x = dir * mix(0.116, 0.52, w) + 0.006 * sin(u * 9.0 + wHash(sd, 1.0) * 6.0) * (1.0 - w);
+  vec2 at = clamp(vec2(x, 0.0) + sc * -zp, vec2(-RW + 0.08, -0.6), vec2(RW - 0.08, 0.6));
+  vec2 sp = S - at;
+  float bob = 0.01 * sin(u * 60.0) * smoothstep(0.0, 0.3, w);
+  // a head, a neck, and shoulders falling away from it into arms hanging close
+  float sh = length((sp - vec2(0.0, 0.5 + bob)) / vec2(0.05, 0.06)) - 1.0;
+  sh = min(sh, wBox(sp, vec2(0.0, 0.43 + bob), vec2(0.017, 0.03)) / 0.05);
+  float sy = clamp((0.415 + bob - sp.y) / 0.07, 0.0, 1.0);
+  sh = min(sh, (wBox(sp, vec2(0.0, 0.1 + bob), vec2(0.022 + 0.048 * sqrt(sy), 0.3)) - 0.012) / 0.05);
+  return 1.0 - smoothstep(-aa, aa, sh * 0.05);
+}
+vec3 wRoom(vec2 Q, vec3 d, vec2 sc, vec3 lit, float sd, float t, float aa) {
   // the ray arrives as camera-to-pane in wall units; measured along a unit ray, every t below is a
   // true distance from the pane, so the lamp's closest approach dot(L - P, d) means what it says
   d.z = min(d.z, -1e-3 * length(d));
@@ -312,12 +377,13 @@ vec3 wRoom(vec2 Q, vec3 d, vec3 lit, float sd, float t, float aa) {
   vec3 H = P + d * th;
   float r1 = wHash(sd, 1.0), r2 = wHash(sd, 2.0), r3 = wHash(sd, 3.0), r4 = wHash(sd, 4.0);
   float r5 = wHash(sd, 5.0), r6 = wHash(sd, 6.0), r7 = wHash(sd, 7.0), r8 = wHash(sd, 8.0);
-  // warm plaster, some rooms creamier, some rosier
-  vec3 cream = vec3(dot(lit, vec3(0.45, 0.4, 0.15))) * vec3(1.0, 0.82, 0.62);
-  vec3 wall = mix(lit, cream, 0.15 + 0.35 * r1) * mix(vec3(1.0), vec3(1.0, 0.85, 0.9), r2 * 0.6);
-  // the lamp: a pendant under the ceiling, or a table lamp in a back corner
+  vec3 wall = wWall(lit, sd);
   float side = r3 < 0.5 ? -1.0 : 1.0;
-  vec3 L = r4 < 0.5 ? vec3((r5 - 0.5) * 0.5, Y1 - 0.3, -D * 0.5) : vec3(side * (RW - 0.22), 0.05, -D + 0.2);
+  vec3 L = wLamp(sd);
+  // where the pane's centre looks onto the back wall: the hung thing moves most of the way
+  // towards it, so it is in view from wherever the window is seen
+  vec2 fo = clamp(sc * D, vec2(-0.4, -0.45), vec2(0.4, 0.4)) * 0.7;
+  vec2 F = H.xy - fo;
   vec3 c;
   float edge;
   if (th == tz) {
@@ -328,29 +394,29 @@ vec3 wRoom(vec2 Q, vec3 d, vec3 lit, float sd, float t, float aa) {
     if (r6 < 0.34) {
       // a framed picture: a cyan night with a moon
       float px = (k - 0.5) * 0.5;
-      float f = wBox(H.xy, vec2(px, 0.78), vec2(0.17, 0.13));
-      vec3 pic = mix(vec3(0.05, 0.16, 0.3), vec3(0.2, 0.5, 0.6), smoothstep(0.9, 0.66, H.y)) * (0.4 + 0.6 * dot(lit, vec3(0.33)));
-      pic = mix(pic, lit * 1.1, 1.0 - smoothstep(0.03, 0.03 + aa, length(H.xy - vec2(px + 0.06, 0.83))));
+      float f = wBox(F, vec2(px, 0.78), vec2(0.17, 0.13));
+      vec3 pic = mix(vec3(0.05, 0.16, 0.3), vec3(0.2, 0.5, 0.6), smoothstep(0.9, 0.66, F.y)) * (0.4 + 0.6 * dot(lit, vec3(0.33)));
+      pic = mix(pic, lit * 1.1, 1.0 - smoothstep(0.03, 0.03 + aa, length(F - vec2(px + 0.06, 0.83))));
       c = mix(c, pic, 1.0 - smoothstep(-aa, aa, f + 0.025));
       c = mix(c, lit * 0.18, (1.0 - smoothstep(-aa, aa, f)) * smoothstep(-aa, aa, f + 0.025));
     } else if (r6 < 0.67) {
       // a shelf of books
       float y0 = 0.45 + k * 0.3;
-      float inShelf = step(abs(H.x - (k - 0.5) * 0.3), 0.36);
-      float plank = 1.0 - smoothstep(0.012, 0.012 + aa, abs(H.y - y0));
-      float bi = floor(H.x * 26.0 + sd * 7.0);
+      float inShelf = step(abs(F.x - (k - 0.5) * 0.3), 0.36);
+      float plank = 1.0 - smoothstep(0.012, 0.012 + aa, abs(F.y - y0));
+      float bi = floor(F.x * 26.0 + sd * 7.0);
       float bh = 0.1 + 0.08 * wHash(bi, sd);
-      float book = step(y0, H.y) * step(H.y, y0 + bh) * step(0.12, fract(H.x * 26.0 + sd * 7.0)) * step(0.2, wHash(bi, 9.0 + sd));
+      float book = step(y0, F.y) * step(F.y, y0 + bh) * step(0.12, fract(F.x * 26.0 + sd * 7.0)) * step(0.2, wHash(bi, 9.0 + sd));
       vec3 bc = mix(vec3(0.5, 0.12, 0.1), vec3(0.08, 0.3, 0.35), wHash(bi, 3.0)) * (0.5 + dot(lit, vec3(0.3)));
       c = mix(c, bc, book * inShelf);
       c = mix(c, lit * 0.22, plank * inShelf);
     } else {
       // a round mirror, catching the lamp
       vec2 mc = vec2((k - 0.5) * 0.45, 0.78);
-      float m = length(H.xy - mc) - 0.12;
+      float m = length(F - mc) - 0.12;
       c = mix(c, lit * 0.25 + vec3(0.04, 0.06, 0.1), 1.0 - smoothstep(-aa, aa, m));
       c = mix(c, lit * 0.15, (1.0 - smoothstep(-aa, aa, abs(m) - 0.012)));
-      c += lit * 0.5 * (1.0 - smoothstep(0.0, 0.08, length(H.xy - mc - vec2(-0.04, 0.04)))) * step(m, 0.0);
+      c += lit * 0.5 * (1.0 - smoothstep(0.0, 0.08, length(F - mc - vec2(-0.04, 0.04)))) * step(m, 0.0);
     }
     // a tall dark cupboard against the wall, on the side away from the lamp
     if (r7 > 0.45) {
@@ -389,28 +455,7 @@ vec3 wRoom(vec2 Q, vec3 d, vec3 lit, float sd, float t, float aa) {
   float tl = max(dot(L - P, d), 0.0);
   float lr = length(P + d * min(tl, th) - L);
   c += lit * 1.6 * (1.0 - smoothstep(0.035, 0.08, lr));
-  // someone crossing the room, now and then
-  if (r8 < 0.42) {
-    float per = 10.0 + 8.0 * r7;
-    float u = fract(t / per + r5) / 0.55;
-    if (u < 1.0) {
-      float zp = -D * (0.22 + 0.2 * r6);
-      float tp = zp / d.z;
-      if (tp < th) {
-        vec2 S = P.xy + d.xy * tp;
-        float dir = r2 < 0.5 ? -1.0 : 1.0;
-        float x = dir * mix(-0.48, 0.48, u) + 0.01 * sin(u * 28.0);
-        vec2 sp = S - vec2(x, 0.0);
-        float bob = 0.012 * sin(u * 28.0 + 1.0);
-        // head, neck and sloping shoulders, a little smaller than the pane so the room shows round them
-        float sh = length((sp - vec2(0.0, 0.8 + bob)) / vec2(0.052, 0.064)) - 1.0;
-        sh = min(sh, (wBox(sp, vec2(0.0, 0.7 + bob), vec2(0.018, 0.04))) / 0.055);
-        sh = min(sh, (wBox(sp, vec2(0.0, 0.32 + bob), vec2(0.045 + 0.05 * smoothstep(0.66, 0.5, sp.y), 0.3)) - 0.035) / 0.055);
-        sh *= 0.055;
-        c = mix(c, lit * 0.05 + vec3(0.03, 0.02, 0.05), 1.0 - smoothstep(-aa, aa, sh));
-      }
-    }
-  } else if (r8 > 0.88) {
+  if (r8 > 0.88) {
     // a cat on the sill, its tail swinging
     float tp = -0.05 / d.z;
     vec2 S = P.xy + d.xy * tp;
@@ -450,7 +495,7 @@ function windowAir(mat: THREE.Material) {
     sh.uniforms.uWinT = WINDOW_TIME;
     sh.uniforms.uWinRes = WINDOW_RES;
     sh.vertexShader = sh.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;\nvarying vec3 vRay;\nvarying float vSeed;")
+      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;\nvarying vec3 vRay;\nvarying vec3 vRc;\nvarying float vSeed;")
       .replace(
         "#include <begin_vertex>",
         `#include <begin_vertex>
@@ -465,6 +510,9 @@ function windowAir(mat: THREE.Material) {
           mat4 wm = modelMatrix * instanceMatrix;
           vec3 wv = (wm * vec4(transformed, 1.0)).xyz - cameraPosition;
           vRay = vec3(dot(wv, normalize(wm[0].xyz)), dot(wv, normalize(wm[1].xyz)), dot(wv, normalize(wm[2].xyz)));
+          // and the ray to the pane's centre, the same for the whole window
+          vec3 wcv = wc - cameraPosition;
+          vRc = vec3(dot(wcv, normalize(wm[0].xyz)), dot(wcv, normalize(wm[1].xyz)), dot(wcv, normalize(wm[2].xyz)));
           vec3 ip = instanceMatrix[3].xyz;
           vSeed = floor(fract(dot(floor(ip * 7.0), vec3(0.1031, 0.1173, 0.0973))) * 4096.0);
         }`,
@@ -489,11 +537,20 @@ function windowAir(mat: THREE.Material) {
         float bars = max(1.0 - smoothstep(0.016, 0.016 + pxw, abs(Q.x)), 1.0 - smoothstep(0.016, 0.016 + pxw, abs(Q.y - yc)));
         vec3 frameCol = lit * 0.06 + vec3(0.025, 0.02, 0.05);
         vec3 c = lit * mix(1.0, glow, detail);
-        // near windows look into a lit room; a window under ~30 px stays a flat gold pane, as do doors
-        float inner = (1.0 - smoothstep(0.012, 0.026, pxw * uWinRes)) * step(vWq.w, 1.5);
-        if (inner > 0.0 && dw < 0.01) {
-          vec3 room = wRoom(Q, vRay, lit, floor(vSeed + 0.5) / 4096.0, uWinT, pxw * 2.5);
-          c = mix(c, room * 1.45 + lit * 0.06 * glow, inner);
+        // near windows look into a lit room; from ~30 px down to ~12 px only its back wall, its
+        // floor line and its lamp's pool show; under that a window is a flat gold pane, as are doors
+        float wpx = pxw * uWinRes;
+        float hint = (1.0 - smoothstep(0.033, 0.047, wpx)) * step(vWq.w, 1.5);
+        if (hint > 0.0 && dw < 0.01) {
+          float full = 1.0 - smoothstep(0.013, 0.021, wpx);
+          float sd = floor(vSeed + 0.5) / 4096.0;
+          vec3 room = full < 1.0 ? wHint(Q, vRay, lit, sd, pxw * 1.5) : vec3(0.0);
+          if (full > 0.0) room = mix(room, wRoom(Q, vRay, vRc.xy / max(-vRc.z, 0.05), lit, sd, uWinT, pxw * 2.5), full);
+          // the gold pane keeps the share of the light it had over the room before, at most 40%
+          c = mix(c, room * 1.45 + lit * 0.06 * glow, hint * (1.0 - min(smoothstep(0.012, 0.026, wpx), 0.4)));
+          // whoever is at the window, dark against the lit room, from ~20 px up
+          float who = wWalker(Q, vRay, vRc.xy / max(-vRc.z, 0.05), sd, uWinT, pxw * 1.5) * (1.0 - smoothstep(0.022, 0.034, wpx));
+          c = mix(c, lit * 0.035 + vec3(0.025, 0.018, 0.045), who);
         }
         c = mix(c, frameCol, detail * max(reveal * 0.85, bars * step(dw, 0.0)));
         diffuseColor.rgb = c;
