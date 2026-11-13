@@ -162,6 +162,29 @@ other work in the meantime.
    If you do not choose, pass 011 will have three readers on other models rank the four
    blind, and I will build the one they put first. It rides spring as the rail is today.
 
+   **Blind ranking (pass 011).** Three readers on other models ranked shuffled copies (A to D)
+   without seeing my view or each other's; their answers are in
+   `loop/designs/pass-010/ranking/`.
+
+   | Reader | 1st | 2nd | 3rd | 4th |
+   |---|---|---|---|---|
+   | GPT-6 Astra | roost | slurp | wick | earshot |
+   | GPT-6.1 Sol | roost | slurp | wick | earshot |
+   | Claude Opus 5.5 | wick | roost | slurp | earshot |
+
+   **roost** is first for two and second for the third. All three put earshot last: its law
+   about loudness cannot be shown without sound. Against **wick**, my own favourite, Astra and
+   Sol make a point I had missed: its joke is at floor level (shoes under a legless candle),
+   and the spring curve lifts the camera 14 units above that floor for most of the ride, so
+   the joke is far away just when it has to read; they score its legibility 6 of 10 against 8
+   or 9 for roost. For roost they agree on its strength (the climb is a discovery: the lamp
+   you flew under is the nest of the hen you find above) and its risk (the hen has to be
+   charming, and the under-place must not read as a cave). Both suggest borrowing slurp's
+   shared breathing: the hen's breath pulsing the lamp's glow from the first frame, so the
+   lamp and the hen are tied together before the reveal.
+   So unless you say otherwise here, pass 012 adds roost's column to `DESIGN.md` and starts
+   building it (Opus 5.5, index 4, riding spring as the rail is today), with that borrowing.
+
 ## Handled
 
 Notes the director has acted on, each with the pass number.
