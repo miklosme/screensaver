@@ -82,9 +82,7 @@ export const CORRIDOR_SCALES = Math.round(PROFILE_ARC.total / SCALE_W);
 export const chamberSkin = (ch: Chamber) => {
   const psi0 = Math.asin(-ch.yc / ch.H);
   const psi1 = Math.acos(ch.oculus / ch.R);
-  // the big dome is seen from across the room: its scales are sized to it, or they are only a grain
-  const k = ch.R > 9 ? 2.6 : 1;
-  return { round: (Math.PI * 2 * ch.R) / (SCALE_W * k), rings: Math.round(((psi1 - psi0) * (ch.R + ch.H)) / 2 / (SCALE_PITCH * k)), psi0, psi1 };
+  return { round: (Math.PI * 2 * ch.R) / SCALE_W, rings: Math.round(((psi1 - psi0) * (ch.R + ch.H)) / 2 / SCALE_PITCH), psi0, psi1 };
 };
 
 /**
@@ -832,34 +830,6 @@ export function buildWorld(stretch: Stretch) {
   // --- baked light ------------------------------------------------------------------------------
   const hoopPos = stretch.frame(stretch.exit).position.clone();
   hoopPos.y += HOOP_LIFT;
-
-  // the dome's foreground: big mushrooms to either side of the lens at t = 22, framing the hoop. Each
-  // stands well clear of every point the camera passes through from there to the hoop.
-  const foreground: { p: Vector3; h: number; lean: Vector3 }[] = [];
-  {
-    const d22 = stretch.distance(22);
-    const flight: Vector3[] = [];
-    for (let d = d22 - 1; d <= stretch.exit + 0.5; d += 0.25) flight.push(stretch.frame(d, f).position.clone());
-    for (const [ahead, right, h] of [
-      [2.6, 2.05, 1.95],
-      [3.6, -2.35, 1.6],
-      [1.3, 2.9, 1.3],
-    ] as const) {
-      stretch.frame(d22 + ahead, f);
-      const side = f.right.clone().setY(0).normalize();
-      const p = f.position.clone().addScaledVector(side, right);
-      // keep the cap (a third of the height across) clear of the line of flight, and off the fairy ring
-      const clear = 1.05 + 0.34 * h;
-      for (let i = 0; i < 40; i++) {
-        const near = Math.min(...flight.map((q) => planDist(p, q)));
-        if (near >= clear && planDist(p, hoopPos) > HOOP.rx + 2.3) break;
-        p.addScaledVector(side, Math.sign(right) * 0.1);
-      }
-      p.y = floorY(ch3, planDist(p, ch3.c)) - 0.03;
-      foreground.push({ p, h, lean: side.clone().multiplyScalar(Math.sign(right)) });
-    }
-  }
-
   const sights = [knotAt, orreryAt];
   const lights: GlowLight[] = [
     { p: knotAt, c: [2.6, 1.15, 1.0], r: 3.6 },
@@ -867,9 +837,6 @@ export function buildWorld(stretch: Stretch) {
     { p: orreryAt, c: [2.4, 1.3, 0.75], r: 3.6 },
     { p: above(ch2, ch2.yc + ch2.H - 0.6), c: [1.3, 0.8, 1.4], r: 3.4 },
     { p: hoopPos, c: [1.0, 2.2, 1.9], r: 4.2 },
-    // what the hoop gives the dome: the far wall is never just dark
-    { p: hoopPos, c: [1.15, 0.62, 0.7], r: 7.5, home: { corridor: -99, chamber: ch3 } },
-    ...foreground.map((g): GlowLight => ({ p: new Vector3(g.p.x, g.p.y + g.h * 0.85, g.p.z), c: [0.45, 1.7, 1.3], r: 1.3 * g.h, mint: 0.7 })),
     { p: above(ch3, ch3.yc + ch3.H - 0.8), c: [1.9, 1.0, 1.5], r: 6.5 },
     ...lures,
     ...groves.map((g): GlowLight => ({ p: new Vector3(g.p.x, g.p.y + 0.9, g.p.z).addScaledVector(g.lean, 0.3), c: [0.5, 2.0, 1.5], r: 1.7, mint: 1 })),
@@ -897,7 +864,6 @@ export function buildWorld(stretch: Stretch) {
     const p = g.p.clone().addScaledVector(g.lean, -0.1);
     occluders.push({ p, r: 1.05, s: 0.5 }, { p, r: 0.5, s: 0.4 });
   }
-  for (const g of foreground) occluders.push({ p: g.p, r: 0.5 * g.h, s: 0.5 });
   for (const ch of chambers)
     for (const door of ch.doors) {
       const loop = doorLoop(ch, door);
@@ -914,9 +880,13 @@ export function buildWorld(stretch: Stretch) {
   floors.forEach((g, i) => bake(g, lights, occluders, -1, chambers[i]));
   frames.forEach((g, i) => bake(g, lights, occluders, -1, frameOf[i]));
 
-  // hoop: a thin elliptical band, far too thin to hold anything, with mint beads set in its channels
-  const hoop = buildHoopRing();
-  const hoopBeads = buildHoopBeads();
+  // hoop: a thin elliptical band, far too thin to hold anything
+  const hoopPts: Vector3[] = [];
+  for (let i = 0; i < 96; i++) {
+    const ang = (i / 96) * Math.PI * 2;
+    hoopPts.push(new Vector3(Math.cos(ang) * (HOOP.rx + 0.09), Math.sin(ang) * (HOOP.ry + 0.09), 0));
+  }
+  const hoop = sweepTube(hoopPts, true, 0.1, 10, new Vector3(0, 0, 1));
 
   // --- drifting motes ---------------------------------------------------------------------------
   const rnd = mulberry32(7);
@@ -964,10 +934,7 @@ export function buildWorld(stretch: Stretch) {
     sights,
     groves,
     hoop,
-    hoopBeads,
     hoopPos,
-    /** big mushrooms that frame the hoop from beside the lens */
-    foreground,
     hoopYaw,
     /** unit vector in plan from the hoop towards the arriving camera */
     arrive,
@@ -976,123 +943,3 @@ export function buildWorld(stretch: Stretch) {
 }
 
 export type World = ReturnType<typeof buildWorld>;
-
-// ---------------------------------------------------------------------------------------------
-// the hoop
-// ---------------------------------------------------------------------------------------------
-
-/** the hoop's cross-section: half its width across the band, half its depth, and its channels */
-const RING = { w: 0.1, d: 0.066, groove: 0.026, gw: 0.03 } as const;
-const RING_A = HOOP.rx + 0.09;
-const RING_B = HOOP.ry + 0.09;
-
-/** a point of the band's surface: u round the hoop (0..1), th round the cross-section */
-function ringPoint(u: number, th: number, out: Vector3, chan?: { v: number }) {
-  const a = u * Math.PI * 2;
-  const c = Math.cos(a);
-  const s = Math.sin(a);
-  const nx = RING_B * c;
-  const ny = RING_A * s;
-  const nl = Math.hypot(nx, ny);
-  // a rounded box, rounder on the outside edge than the inside
-  const ct = Math.cos(th);
-  const st = Math.sin(th);
-  const p = 0.5;
-  const x = RING.w * Math.sign(ct) * Math.abs(ct) ** (ct > 0 ? 0.75 : p);
-  let z = RING.d * Math.sign(st) * Math.abs(st) ** p;
-  // a channel down the middle of each face
-  const g = Math.exp(-((x / RING.gw) ** 2)) * smoothstep(0.55, 0.85, Math.abs(st));
-  z -= Math.sign(st) * RING.groove * g;
-  if (chan) chan.v = g;
-  return out.set(RING_A * c + (nx / nl) * x, RING_B * s + (ny / nl) * x, z);
-}
-
-function buildHoopRing(): BufferGeometry {
-  const cols = 240;
-  const rows = 44;
-  const n = (cols + 1) * (rows + 1);
-  const position = new Float32Array(n * 3);
-  const normal = new Float32Array(n * 3);
-  const pat = new Float32Array(n * 2);
-  const sec = new Float32Array(n * 3);
-  const p = new Vector3();
-  const pu = new Vector3();
-  const pt = new Vector3();
-  const chan = { v: 0 };
-  const e = 1e-4;
-  let o = 0;
-  for (let i = 0; i <= cols; i++) {
-    const u = i / cols;
-    for (let j = 0; j <= rows; j++) {
-      const th = (j / rows) * Math.PI * 2;
-      ringPoint(u, th, p, chan);
-      ringPoint(u + e, th, pu).sub(p);
-      ringPoint(u, th + e, pt).sub(p);
-      const nn = new Vector3().crossVectors(pu, pt).normalize();
-      position.set([p.x, p.y, p.z], o * 3);
-      normal.set([nn.x, nn.y, nn.z], o * 3);
-      pat.set([u, j / rows], o * 2);
-      sec.set([Math.cos(th), Math.sin(th), chan.v], o * 3);
-      o++;
-    }
-  }
-  const index: number[] = [];
-  for (let i = 0; i < cols; i++)
-    for (let j = 0; j < rows; j++) {
-      const a = i * (rows + 1) + j;
-      const b = a + rows + 1;
-      index.push(a, b, a + 1, b, b + 1, a + 1);
-    }
-  const geo = new BufferGeometry();
-  geo.setAttribute("position", new BufferAttribute(position, 3));
-  geo.setAttribute("normal", new BufferAttribute(normal, 3));
-  geo.setAttribute("pat", new BufferAttribute(pat, 2));
-  geo.setAttribute("sec", new BufferAttribute(sec, 3));
-  geo.setIndex(index);
-  return geo;
-}
-
-/** beads of light down both channels: little lens-shaped studs, one per segment of the band */
-function buildHoopBeads(): BufferGeometry {
-  const count = 60;
-  const lat = 6;
-  const lon = 10;
-  const r = 0.021;
-  const position: number[] = [];
-  const normal: number[] = [];
-  const pat: number[] = [];
-  const index: number[] = [];
-  const c = new Vector3();
-  for (const face of [1, -1])
-    for (let k = 0; k < count; k++) {
-      const u = (k + 0.5) / count;
-      ringPoint(u, (face * Math.PI) / 2, c);
-      c.z += face * 0.004;
-      const base = position.length / 3;
-      for (let i = 0; i <= lat; i++) {
-        const v = (i / lat) * Math.PI;
-        for (let j = 0; j <= lon; j++) {
-          const w = (j / lon) * Math.PI * 2;
-          const nx = Math.sin(v) * Math.cos(w);
-          const ny = Math.sin(v) * Math.sin(w);
-          const nz = Math.cos(v);
-          // flattened into the channel: a cabochon, not a ball
-          position.push(c.x + nx * r, c.y + ny * r, c.z + nz * r * 0.6);
-          normal.push(nx, ny, nz);
-          pat.push(k, u);
-        }
-      }
-      for (let i = 0; i < lat; i++)
-        for (let j = 0; j < lon; j++) {
-          const a = base + i * (lon + 1) + j;
-          const b = a + lon + 1;
-          index.push(a, b, a + 1, b, b + 1, a + 1);
-        }
-    }
-  const geo = new BufferGeometry();
-  geo.setAttribute("position", new BufferAttribute(new Float32Array(position), 3));
-  geo.setAttribute("normal", new BufferAttribute(new Float32Array(normal), 3));
-  geo.setAttribute("pat", new BufferAttribute(new Float32Array(pat), 2));
-  geo.setIndex(index);
-  return geo;
-}

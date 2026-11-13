@@ -10,8 +10,6 @@ import {
   FOG_COLOR,
   createChamberMaterial,
   createCorridorMaterial,
-  createEnamelMaterial,
-  createHoopMaterial,
   createGlowMaterial,
   createHaloMaterial,
   createMoteMaterial,
@@ -47,16 +45,14 @@ export default function Burrow({ index, clock, camera, portalMaterial }: ScenePr
       shared,
       corridor: createCorridorMaterial(shared, world.chambers),
       shells: world.chambers.map((ch) => createChamberMaterial(shared, ch)),
-      floor: createTrimMaterial(shared, { patScale: [1.6, 40], spotK: 36, hTop: 4.6, spotGain: 0.5, ridgeAmt: 0.22, pool: world.hoopPos }),
+      floor: createTrimMaterial(shared, { patScale: [1.6, 40], spotK: 36, hTop: 4.6, spotGain: 0.5, ridgeAmt: 0.22 }),
       frame: createTrimMaterial(shared, { patScale: [1.7, 11], spotK: 12, hTop: 4.6, ridgeAll: 0.85 }),
       thread: createGlowMaterial(shared, new Vector3(0.1, 0.95, 0.66), new Vector3(0.3, 1.2, 0.95), 75),
       knot: createGlowMaterial(shared, new Vector3(0.95, 0.16, 0.2), new Vector3(1.5, 0.95, 0.7)),
       moon: createGlowMaterial(shared, new Vector3(1.0, 0.36, 0.1), new Vector3(1.5, 1.05, 0.6)),
       oculus: createGlowMaterial(shared, new Vector3(1.9, 1.3, 1.6), new Vector3(1.9, 1.3, 1.6)),
-      hoop: createHoopMaterial(shared),
-      beads: createGlowMaterial(shared, new Vector3(0.12, 2.6, 1.7), new Vector3(0.5, 1.9, 1.5), 40),
+      hoop: createGlowMaterial(shared, new Vector3(0.95, 0.5, 0.42), new Vector3(0.6, 2.0, 1.7), 60),
       gimbal: createGlowMaterial(shared, new Vector3(1.2, 0.4, 0.5), new Vector3(1.6, 1.2, 1.1)),
-      enamel: createEnamelMaterial(shared, new Vector3(0.7, 0.24, 0.3), new Vector3(1.0, 0.6, 0.62)),
       haloWarm: createHaloMaterial(shared, new Vector3(0.75, 0.2, 0.22)),
       haloAmber: createHaloMaterial(shared, new Vector3(0.7, 0.3, 0.12)),
       haloPale: createHaloMaterial(shared, new Vector3(0.5, 0.25, 0.42)),
@@ -71,7 +67,6 @@ export default function Burrow({ index, clock, camera, portalMaterial }: ScenePr
       for (const g of [...world.corridors, ...world.shells, ...world.floors, ...world.frames]) g.dispose();
       world.thread.dispose();
       world.hoop.dispose();
-      world.hoopBeads.dispose();
       world.motes.dispose();
       const { shared, shells, ...rest } = mats;
       for (const m of [...shells, ...Object.values(rest)]) m.dispose();
@@ -82,8 +77,8 @@ export default function Burrow({ index, clock, camera, portalMaterial }: ScenePr
   const knot = useRef<Mesh>(null);
   const moons = useRef<Group>(null);
   const hoop = useRef<Group>(null);
-  const gimbalA = useRef<Group>(null);
-  const gimbalB = useRef<Group>(null);
+  const gimbalA = useRef<Mesh>(null);
+  const gimbalB = useRef<Mesh>(null);
 
   const tmp = useMemo(() => ({ pose: createFrame(), size: new Vector2() }), []);
 
@@ -115,9 +110,8 @@ export default function Burrow({ index, clock, camera, portalMaterial }: ScenePr
       hoop.current.rotation.y = world.hoopYaw + e * Math.PI * 1.1;
     }
     const left = TIMING.total - t;
-    // the gimbals turn against each other, and come to rest in the hoop's plane as the camera arrives
-    if (gimbalA.current) gimbalA.current.rotation.set(0, left * 0.42, left * 0.11);
-    if (gimbalB.current) gimbalB.current.rotation.set(left * 0.3, -left * 0.33, 0);
+    if (gimbalA.current) gimbalA.current.rotation.y = left * 0.42;
+    if (gimbalB.current) gimbalB.current.rotation.x = left * 0.3;
   });
 
   const topOf = (ch: (typeof world.chambers)[number]) => ch.c.y + ch.yc + ch.H * Math.sin(Math.acos(ch.oculus / ch.R));
@@ -196,26 +190,14 @@ export default function Burrow({ index, clock, camera, portalMaterial }: ScenePr
           <circleGeometry args={[1, 96]} />
         </mesh>
         <mesh geometry={world.hoop} material={mats.hoop} />
-        <mesh geometry={world.hoopBeads} material={mats.beads} />
       </group>
       <group position={world.hoopPos} rotation-y={world.hoopYaw}>
-        {/* two gimbals: an enamel band with a thread of light let into its inner edge */}
-        <group ref={gimbalA}>
-          <mesh material={mats.enamel}>
-            <torusGeometry args={[2.36, 0.045, 12, 192]} />
-          </mesh>
-          <mesh material={mats.gimbal}>
-            <torusGeometry args={[2.36 - 0.05, 0.013, 6, 192]} />
-          </mesh>
-        </group>
-        <group ref={gimbalB}>
-          <mesh material={mats.enamel}>
-            <torusGeometry args={[2.52, 0.045, 12, 192]} />
-          </mesh>
-          <mesh material={mats.gimbal}>
-            <torusGeometry args={[2.52 - 0.05, 0.013, 6, 192]} />
-          </mesh>
-        </group>
+        <mesh ref={gimbalA} material={mats.gimbal}>
+          <torusGeometry args={[2.36, 0.028, 8, 128]} />
+        </mesh>
+        <mesh ref={gimbalB} material={mats.gimbal}>
+          <torusGeometry args={[2.5, 0.028, 8, 128]} />
+        </mesh>
       </group>
     </>
   );

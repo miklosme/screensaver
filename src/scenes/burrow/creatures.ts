@@ -9,7 +9,6 @@ import {
   SphereGeometry,
   Vector2,
   Vector3,
-  Vector4,
 } from "three";
 import { HOOP, PROFILE, floorY, footRadius, troughY, wallRelief, type Chamber, type Station } from "./build";
 import type { Shared } from "./materials";
@@ -56,8 +55,6 @@ export interface CreatureInput {
   hoopPos: Vector3;
   /** unit vector in plan from the hoop towards the arriving camera */
   arrive: Vector3;
-  /** big mushrooms beside the lens in the dome */
-  foreground: { p: Vector3; h: number; lean: Vector3 }[];
 }
 
 export function buildCreatures(world: CreatureInput, shared: Shared) {
@@ -161,10 +158,8 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
     eyeGeo.setAttribute("aAxis", new InstancedBufferAttribute(new Float32Array(eyeAxis), 4));
     eyeGeo.instanceCount = eyePos.length / 4;
   }
-  // the dead end's dome: its eyes open wide on the traveller as the hoop is reached
-  const last = chambers[chambers.length - 1]!;
   const eyeMat = new ShaderMaterial({
-    uniforms: { ...shared, uDome: { value: new Vector4(last.c.x, last.c.y, last.c.z, last.R) } },
+    uniforms: { ...shared },
     vertexShader: /* glsl */ `
       attribute vec4 aPos;
       attribute vec4 aAxis;
@@ -174,9 +169,6 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       varying vec3 vGaze;
       varying float vSeed;
       varying float vAwake;
-      varying float vWide;
-      uniform vec4 uDome;
-      uniform float uTime;
       void main() {
         vN = position;
         vW = aPos.xyz + position * aPos.w;
@@ -185,10 +177,7 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
         vec3 to = cameraPosition - aPos.xyz;
         float dist = length(to);
         // an eye can only swivel so far out of its socket
-        // in the dome they wake one after another over t = 19 .. 23
-        float inDome = step(length(aPos.xz - uDome.xz), uDome.w * 1.1) * step(uDome.y - 1.0, aPos.y);
-        vWide = inDome * smoothstep(19.0 + 2.2 * aAxis.w, 20.8 + 2.2 * aAxis.w, uTime);
-        vGaze = normalize(mix(aAxis.xyz, to / dist, 0.72 + 0.18 * vWide));
+        vGaze = normalize(mix(aAxis.xyz, to / dist, 0.72));
         // asleep until the lantern is close
         vAwake = smoothstep(17.0, 9.0, dist + 5.0 * (aAxis.w - 0.5) - 14.0 * max(aPos.w - 0.3, 0.0));
         gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
@@ -202,7 +191,6 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       varying vec3 vGaze;
       varying float vSeed;
       varying float vAwake;
-      varying float vWide;
       void main() {
         vec3 n = normalize(vN);
         vec3 axis = normalize(vAxis);
@@ -214,7 +202,7 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
         // lids close over the eye from above and below
         vec3 lidUp = normalize(vec3(0.0, 1.0, 0.0) - axis * axis.y + vec3(1e-3, 0.0, 0.0));
         float blink = smoothstep(0.985, 1.0, sin(uTime * (0.55 + vSeed * 0.5) + vSeed * 50.0));
-        float open = max(vAwake * (0.5 + 0.3 * fract(vSeed * 7.3)), 0.97 * vWide) * (1.0 - blink);
+        float open = vAwake * (1.0 - blink) * (0.5 + 0.3 * fract(vSeed * 7.3));
         float lid = smoothstep(open - 0.03, open + 0.03, abs(dot(n, lidUp)) + 0.25 * (1.0 - dot(n, axis)));
 
         // iris and pupil around the gaze
@@ -237,7 +225,7 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
         // lit like the walls, by the traveller's lantern, and glowing a little of its own accord
         float ndv = max(dot(n, V), 0.0);
         float lamp = (0.25 + 0.75 * ndv) / (1.0 + dist * dist / 40.0);
-        col *= 0.28 + 1.1 * lamp + 0.55 * vWide;
+        col *= 0.28 + 1.1 * lamp;
         vec3 skin = vec3(0.55, 0.1, 0.16) * (0.2 + 1.2 * lamp) * (0.7 + 0.3 * dot(n, axis));
         col = mix(col, skin, lid);
 
@@ -323,16 +311,6 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
     }
   }
 
-  // the dome's foreground, framing the hoop: one tall mushroom each, with a little family at its foot
-  for (const g of world.foreground) {
-    addShroom(g.p.x, g.p.y, g.p.z, g.h, g.lean.x * 0.1, g.lean.z * 0.1);
-    for (let i = 0; i < 3; i++) {
-      const a = rnd() * 6.283;
-      const d = 0.35 + rnd() * 0.3;
-      addShroom(g.p.x + Math.cos(a) * d, g.p.y, g.p.z + Math.sin(a) * d, g.h * (0.22 + 0.2 * rnd()), g.lean.x * 0.12, g.lean.z * 0.12);
-    }
-  }
-
   const shroomGeo = new InstancedBufferGeometry();
   {
     const base: BufferGeometry = new LatheGeometry(
@@ -358,7 +336,7 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
     shroomGeo.instanceCount = shroomPos.length / 4;
   }
   const shroomMat = new ShaderMaterial({
-    uniforms: { ...shared, uHoop: { value: world.hoopPos } },
+    uniforms: { ...shared },
     vertexShader: /* glsl */ `
       attribute vec4 aPos;
       attribute vec4 aLean;
@@ -385,7 +363,6 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       }`,
     fragmentShader: /* glsl */ `
       uniform float uTime;
-      uniform vec3 uHoop;
       ${FOG_GLSL}
       varying vec3 vW;
       varying vec3 vN;
@@ -415,12 +392,6 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
         vec3 capCol = glow * (0.42 + 0.75 * pow(1.0 - ndv, 1.5)) * breathe;
         capCol = mix(capCol, vec3(1.0, 0.97, 0.9) * (0.6 + 0.4 * breathe), spot * 0.85);
         col = mix(col, capCol, cap);
-        // the hoop's light: a rim of mint and daylight on the side of a cap that faces it
-        vec3 L = uHoop - vW;
-        float dl = length(L);
-        float facing = max(dot(n, L / dl), 0.0);
-        float rim = facing * (0.35 + 0.65 * pow(1.0 - ndv, 1.5)) / (1.0 + dl * dl / 5.0);
-        col += mix(vec3(0.2, 1.0, 0.75), vec3(1.0, 0.75, 0.5), 0.4 + 0.3 * facing) * rim * (0.4 + 0.8 * cap);
         col = mix(col, uFog, fogAmount(dist));
         gl_FragColor = vec4(col, 1.0);
         #include <tonemapping_fragment>
