@@ -458,7 +458,10 @@ function turned(pieces: Piece[], seg: number, fine = 1): BufferGeometry {
 const POOL_N = 10;
 /** stair lamps drawn with the fine post and globe; the rest use coarse ones */
 const LAMP_NEAR = 6;
-const RAIL_R = 0.095;
+/** the hand rail: a slim dark-bronze tube, carried low so it stays under the line of sight */
+const RAIL_R = 0.048;
+const RAIL_Y = 1.24;
+const BRONZE: V3 = [0.27, 0.16, 0.075];
 const hxPool = { value: Array.from({ length: POOL_N }, () => new Vector4()) };
 
 // ---------------------------------------------------------------------------------------------
@@ -851,7 +854,7 @@ const DETAIL_GLSL: Record<Detail, string> = {
 };
 
 /** the stair lamps' warm pools: inverse-square with a soft wrap, after the carved normal is known */
-const POOL_GLSL = /* glsl */ `
+const poolGlsl = (detail: Detail) => /* glsl */ `
           {
             vec3 nw = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
             float acc = 0.0;
@@ -859,12 +862,13 @@ const POOL_GLSL = /* glsl */ `
               vec4 L = uHxPool[i];
               if (L.w <= 0.0) break;
               vec3 l = L.xyz - vHxW;
+              ${detail === "post" ? "if (dot(l.xz, l.xz) < 0.06) continue; // a lamp's own post stays in its glass's shade" : ""}
               float d2 = dot(l, l);
               float wrap = clamp((dot(nw, l * inversesqrt(d2)) + 0.35) / 1.35, 0.0, 1.0);
-              float win = clamp(1.0 - d2 / 150.0, 0.0, 1.0);
-              acc += L.w * wrap * win * win / (5.0 + d2);
+              float win = clamp(1.0 - d2 / 18.0, 0.0, 1.0);   // gone within a couple of treads
+              acc += L.w * wrap * win * win / (1.0 + d2);
             }
-            hxGlow += diffuseColor.rgb * vec3(1.0, 0.56, 0.24) * 6.0 * acc;
+            hxGlow += diffuseColor.rgb * vec3(1.0, 0.56, 0.24) * 9.0 * acc;
           }`;
 
 /** the door lamps' warm wash on the arch, after the carved normal is known; fog still dims it */
@@ -971,8 +975,8 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             float det = dot(sx, r1);
             vec3 grad = sign(det) * (dFdx(hxH) * r1 + dFdy(hxH) * r2);
             normal = normalize(abs(det) * normal - grad);
-          }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (POOLED.includes(detail) ? POOL_GLSL : "")
-          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? POOL_GLSL : ""),
+          }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (POOLED.includes(detail) ? poolGlsl(detail) : "")
+          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : ""),
       )
       .replace(
         "#include <tonemapping_fragment>",
@@ -1133,7 +1137,7 @@ function getAssets(): Assets {
     if (i === nSteps) continue;
     const sm = s0 + TREAD / 2;
     const post = i % 6 === (main ? 3 : 0) && sm < END - 6;
-    pushBaluster(edge(sm, 1, top, 0.22), 1.4 + (heightAt(sm) - top));
+    pushBaluster(edge(sm, 1, top, 0.22), RAIL_Y - 0.05 + (heightAt(sm) - top));
     if (post) {
       // the lamp stands on a console beyond the slab's end, outside the rail
       const e = edge(sm, 1, top, -LAMP_OUT);
@@ -1141,7 +1145,7 @@ function getAssets(): Assets {
       lanternPos.push(e[0], e[1] + LAMP_Y, e[2]);
       haloSize.push(1.5);
     }
-    if (pathFlare(path, sm) > 0.3) pushBaluster(edge(sm, -1, top, 0.22), 1.4 + (heightAt(sm) - top));
+    if (pathFlare(path, sm) > 0.3) pushBaluster(edge(sm, -1, top, 0.22), RAIL_Y - 0.05 + (heightAt(sm) - top));
   }
   // two lanterns flank the door
   if (main) {
@@ -1165,14 +1169,14 @@ function getAssets(): Assets {
     const steps = Math.ceil((to - from) / 0.3);
     for (let k = 0; k <= steps; k++) {
       const s = from + ((to - from) * k) / steps;
-      const c = edge(s, side, heightAt(s) + 1.45, 0.22);
+      const c = edge(s, side, heightAt(s) + RAIL_Y, 0.22);
       pathTangent(path, s, T);
       for (let q = 0; q < RING; q++) {
         const a = (q / RING) * TAU;
         const cx = Math.cos(a), cy = Math.sin(a);
         rp.push(c[0] + T.z * cx * RAIL_R, c[1] + cy * RAIL_R, c[2] - T.x * cx * RAIL_R);
         rn.push(T.z * cx, cy, -T.x * cx);
-        rc.push(AMBER[0] * 0.82, AMBER[1] * 0.78, AMBER[2] * 0.7);
+        rc.push(BRONZE[0], BRONZE[1], BRONZE[2]);
       }
       if (k < steps) {
         for (let q = 0; q < RING; q++) {
