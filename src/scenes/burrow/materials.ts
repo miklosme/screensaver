@@ -66,6 +66,10 @@ const WALL_VERT = /* glsl */ `
     varying vec4 vLead;
     varying float vFoot;
   #endif
+  #ifdef TRIM
+    attribute vec4 rim;     // tube radius signed by the side the opening is on, how far along its loop, how far out through the wall, height over the floor (build.ts)
+    varying vec4 vRim;
+  #endif
   void main() {
     vec4 w = modelMatrix * vec4(position, 1.0);
     vW = w.xyz;
@@ -80,6 +84,9 @@ const WALL_VERT = /* glsl */ `
     #if FLOOR
       vLead = lead;
       vFoot = foot;
+    #endif
+    #ifdef TRIM
+      vRim = rim;
     #endif
     gl_Position = projectionMatrix * viewMatrix * w;
   }
@@ -315,8 +322,11 @@ const WALL_FRAG = /* glsl */ `
   #if SKIN
     varying vec3 vSkin;
   #endif
-  #if SKIN || FLOOR
+  #if SKIN || FLOOR || defined(TRIM)
     ${SKIN_GLSL}
+  #endif
+  #ifdef TRIM
+    varying vec4 vRim;
   #endif
   #if FLOOR
     varying vec4 vLead;
@@ -434,6 +444,75 @@ const WALL_FRAG = /* glsl */ `
       float tone = 1.0;
     #endif
 
+    // --- a doorway's trim is grown, not moulded (see TRIM_NOTE) -----------------------------------
+    #ifdef TRIM
+      // u: round the tube from its crest (0), towards the opening (+) or down onto the wall (-)
+      float u = 6.2831853 * q * sign(vRim.x);
+      float rho = abs(vRim.x);
+      float S = vRim.y;
+      // only what stands in the chamber, in front of its wall: the back of the tube, seen from the
+      // corridor coming in, is left as it was
+      float front = 1.0 - smoothstep(0.02, 0.12, vRim.z);
+      // the shoulder: from where it leaves the wall up to just short of the crest
+      float shoulder = (1.0 - smoothstep(-0.7, 0.75, u)) * front;
+      // the lip: the crest and the inside of it
+      float lip = smoothstep(-0.6, 0.45, u) * (1.0 - smoothstep(2.3, 2.8, u)) * front;
+      vec3 dpx = dFdx(vW), dpy = dFdy(vW);
+      vec2 dH = vec2(0.0);            // slope of the surface's height, in world units, per pixel
+      float trimTone = 1.0;
+      // the wall's own scales, laid in rings along the loop, their tips towards the crest
+      {
+        float aN = S / 0.27;          // scales along the loop
+        float rr = (u + 2.7) * rho / 0.16 + 20.0;  // rings, counted from the wall up
+        vec2 daN = vec2(dFdx(aN), dFdy(aN));
+        vec2 drr = vec2(dFdx(rr), dFdy(rr));
+        float fw = max(max(abs(daN.x), abs(daN.y)), max(abs(drr.x), abs(drr.y)));
+        float detail = (1.0 - smoothstep(0.13, 0.4, fw)) * shoulder;
+        if (detail > 0.0) {
+          float row = floor(rr);
+          float t = rr - row;
+          vec4 aboutA, aboutB;
+          float hA = scale(aN / 1000.0, 1000.0, row - 1.0, t + 1.0, aboutA);
+          float hB = scale(aN / 1000.0, 1000.0, row, t, aboutB);
+          float top = step(hB, hA);
+          vec4 about = mix(aboutB, aboutA, top);
+          float e = about.x;
+          vec2 de = vec2(5.8 * about.z, 2.4 * about.w);
+          vec2 g = vec2(0.0, TILT) - (0.3 + 1.4 * e) * de;
+          // they flatten as they climb: the crest is bare membrane
+          float amp = detail * (0.35 + 0.65 * shoulder);
+          dH += 0.045 * amp * (g.x * daN + g.y * drr);
+          float under = 1.0 - top;
+          float crease = 1.0 - smoothstep(0.0, 0.2 + 0.7 * under + 2.5 * fw, abs(hA - hB));
+          float body = 1.0 - smoothstep(0.3, 1.3, e);
+          float tn = (1.0 - (0.2 + 0.3 * under) * crease) * (0.8 + 0.2 * body) * (0.9 + 0.2 * about.y);
+          trimTone = mix(1.0, tn, amp);
+          albedo = mix(albedo, albedo * vec3(0.92, 0.6, 1.25), amp * smoothstep(0.72, 0.9, about.y) * 0.6);
+        }
+      }
+      // fine ridges running along the lip, wandering a little, and a few deeper veins among them
+      float rph = 22.0 * u + 0.9 * sin(S * 1.7 + 2.0 * u) + 0.5 * sin(S * 4.3 - u);
+      vec2 dph = vec2(dFdx(rph), dFdy(rph));
+      float rfw = max(abs(dph.x), abs(dph.y));
+      float rFade = lip * (1.0 - smoothstep(0.8, 2.2, rfw));
+      dH += 0.012 * rho * rFade * cos(rph) * dph;
+      float vph = 7.0 * u + 1.4 * sin(S * 0.9 + 1.3) + 0.6 * sin(S * 2.3);
+      float vein = exp(-pow(sin(0.5 * vph), 2.0) / 0.012) * lip * (1.0 - smoothstep(0.4, 1.2, 7.0 / 22.0 * rfw));
+      float grooveR = 0.5 + 0.5 * cos(rph);
+      trimTone *= 1.0 - 0.1 * rFade * (1.0 - grooveR);
+      // bend the normal by the slope of it all
+      if (front > 0.0) {
+        vec3 r1 = cross(dpy, n), r2 = cross(n, dpx);
+        float det = dot(dpx, r1);
+        nb = normalize((abs(det) + 1e-9) * n - sign(det) * (dH.x * r1 + dH.y * r2));
+      }
+      tone *= trimTone;
+      // the skin of the wall carries on up the shoulder in the wall's own colour; the lip is pale coral
+      ridge = mix(ridge, 0.35, shoulder);
+      // the membrane is wetter in some places than others
+      wet = mix(wet, (0.35 + 0.4 * lip) * (0.75 + 0.25 * sin(S * 2.9 + 1.7 * sin(S * 1.1))), front);
+    #endif
+
     // --- a chamber's floor is skin too (see FLOOR_GLSL) ------------------------------------------
     #if FLOOR
       vec3 threadGlow;
@@ -469,6 +548,23 @@ const WALL_FRAG = /* glsl */ `
     // carry, so a wall beside the camera keeps its red.
     float far = dist * dist / (dist * dist + 12.0);
     col += vec3(0.42, 0.05, 0.30) * graze * (0.05 + 0.16 * length(vGlow) + 0.2 * far / (1.0 + dist * dist / 60.0));
+
+    #ifdef TRIM
+      {
+        // veins under the membrane, a deeper red
+        col *= 1.0 - 0.25 * vein * vec3(0.2, 0.7, 0.5);
+        // a membrane sheen that slides with the view, coral-pink and never pale
+        float fres = graze * (0.4 + 0.6 * grooveR * rFade + 0.4 * (1.0 - rFade));
+        col += min(vec3(1.0, 0.36, 0.34) * fres * 0.16 * (0.4 + 0.6 * lantern) * open, vec3(0.16)) * front;
+        // light through the thin inner edge: warm, strongest where it is seen edge-on
+        float thin = smoothstep(0.9, 2.1, u) * (1.0 - smoothstep(2.5, 2.9, u)) * front;
+        col += vec3(0.75, 0.13, 0.08) * thin * (0.12 + 0.3 * graze) * (0.5 + 0.5 * lantern + 0.6 * length(vGlow)) * (0.6 + 0.4 * open);
+        // the creases: where the tube goes into the wall, and where its feet go into the floor
+        float seat = smoothstep(-0.8, -1.4, u) * smoothstep(-0.14, 0.0, vRim.z) * (1.0 - smoothstep(0.03, 0.1, vRim.z));
+        float foot = 1.0 - smoothstep(0.0, 0.45 * rho / 0.27, vRim.w);
+        col *= 1.0 - 0.75 * clamp(seat + foot * foot * (3.0 - 2.0 * foot), 0.0, 1.0) * front;
+      }
+    #endif
 
     #if FLOOR
       // the wet floor gives back the coral of the walls round it, low and only where it is turned to
@@ -605,7 +701,8 @@ function wallUniforms(shared: Shared, o: WallOptions) {
 export function createTrimMaterial(shared: Shared, o: WallOptions) {
   return new ShaderMaterial({
     // the trim that the hoop's pool falls on is the chambers' floor, which is skin of its own (FLOOR_GLSL)
-    defines: { MODE: 0, SKIN: 0, FLOOR: o.pool ? 1 : 0, POOL: o.pool ? 1 : 0, SHROOM: o.shrooms ? 1 : 0 },
+    // and without one it is a doorway's trim, which needs build.ts's `rim` attribute (TRIM in WALL_FRAG)
+    defines: { MODE: 0, SKIN: 0, FLOOR: o.pool ? 1 : 0, POOL: o.pool ? 1 : 0, SHROOM: o.shrooms ? 1 : 0, ...(o.pool ? {} : { TRIM: 1 }) },
     uniforms: {
       ...wallUniforms(shared, o),
       ...(o.pool ? { uPool: { value: o.pool.clone() }, uPoolN: { value: new Vector2(0, 1) } } : {}),
