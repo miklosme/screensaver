@@ -1,5 +1,5 @@
 import { AdditiveBlending, Color, DoubleSide, ShaderMaterial, Vector2, Vector3, Vector4, type DataTexture } from "three";
-import { CORRIDOR_SCALES, PROFILE, chamberSkin, type Chamber } from "./build";
+import { CORRIDOR_SCALES, PROFILE, SCALE_PITCH, SCALE_W, chamberSkin, type Chamber } from "./build";
 
 export const FOG_COLOR = new Color(0.085, 0.012, 0.075);
 export const FOG_DENSITY = 0.03;
@@ -60,6 +60,12 @@ const WALL_VERT = /* glsl */ `
     attribute vec3 skin;    // where the scales lie: fraction round the ring, ring number, strength
     varying vec3 vSkin;
   #endif
+  #if FLOOR
+    attribute vec4 lead;    // to the thread's nearest point in plan, how far along it that is, 1 short of its end (build.ts)
+    attribute float foot;   // radius at which the wall meets this floor
+    varying vec4 vLead;
+    varying float vFoot;
+  #endif
   void main() {
     vec4 w = modelMatrix * vec4(position, 1.0);
     vW = w.xyz;
@@ -70,6 +76,10 @@ const WALL_VERT = /* glsl */ `
     vH = hgt;
     #if SKIN
       vSkin = skin;
+    #endif
+    #if FLOOR
+      vLead = lead;
+      vFoot = foot;
     #endif
     gl_Position = projectionMatrix * viewMatrix * w;
   }
@@ -116,6 +126,156 @@ const SKIN_GLSL = /* glsl */ `
   }
 `;
 
+/**
+ * THE FLOOR. A chamber's floor is the same creature's belly: under the light that pools on it, it is
+ * a wet membrane. In plan, all of it a slope of a height that is never drawn, only lit:
+ *  - the concentric swells it is laid in, low enough to walk on;
+ *  - membrane wrinkles at two sizes, long folds and fine crinkle;
+ *  - pores, each a small pit with a soft lip;
+ *  - the wall's scales carried on down across it, ring after ring towards the middle, flatter and
+ *    darker than on the wall and gone well before the middle;
+ *  - runnels of wet draining to the thread, which lights the floor beside it.
+ * Each term fades by how many of it fall in a pixel, so none shimmers far off; all are exact slopes,
+ * so none blurs at the lens. Roughness varies with the wrinkles: the folds' crests are wetter.
+ */
+const FLOOR_GLSL = /* glsl */ `
+  // value noise and its slope
+  vec3 noised(vec2 x) {
+    vec2 i = floor(x);
+    vec2 f = x - i;
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+    float a = hash12(i), b = hash12(i + vec2(1.0, 0.0)), c = hash12(i + vec2(0.0, 1.0)), d = hash12(i + vec2(1.0, 1.0));
+    float k1 = b - a, k2 = c - a, k4 = a - b - c + d;
+    return vec3(a + k1 * u.x + k2 * u.y + k4 * u.x * u.y, du * (vec2(k1, k2) + k4 * u.yx));
+  }
+
+  // a fold: ridged noise in a stretched, turned frame M. Returns the height (0..1) and its slope in plan.
+  vec3 fold(vec2 P, mat2 M) {
+    vec3 nz = noised(M * P);
+    float v = 2.0 * nz.x - 1.0;
+    float s = v / sqrt(v * v + 0.01);   // a rounded crest, not a crease
+    return vec3(1.0 - abs(v), -s * 2.0 * (transpose(M) * nz.yz));
+  }
+
+  void floorSkin(vec3 n, float q, inout vec3 albedo, inout float tone, inout vec3 nb, inout float wet, out vec3 glow) {
+    vec3 dpx = dFdx(vW), dpy = dFdy(vW);
+    float pw = max(length(dpx), length(dpy));    // metres of floor in a pixel, at its longest
+    vec2 P = vW.xz;
+    vec2 grad = vec2(0.0);                        // slope of the height, per metre of plan
+    float shade = 1.0;
+
+    float r = max((vPat.x - 0.5) * 1.6, 1e-3);
+    float th = vPat.y * 6.2831853;
+    vec2 radial = vec2(sin(th), cos(th));
+    vec2 around = vec2(cos(th), -sin(th));
+
+    // the swells the floor is laid in
+    grad += radial * (-0.02 * 6.2831853 / 1.6) * sin(6.2831853 * q) * (1.0 - smoothstep(0.2, 0.6, pw / 1.6));
+
+    // membrane wrinkles: long soft folds, and a fine crinkle over them
+    const mat2 M1 = mat2(1.9, 3.6, -4.4, 2.3);
+    const mat2 M2 = mat2(-9.0, 12.5, -21.0, -15.0);
+    float f1 = 1.0 - smoothstep(0.03, 0.09, pw);
+    float f2 = 1.0 - smoothstep(0.008, 0.025, pw);
+    vec3 w1 = fold(P, M1);
+    vec3 w2 = fold(P + w1.x * 0.05, M2);
+    grad += w1.yz * (0.017 * f1) + w2.yz * (0.0035 * f2);
+    shade *= 1.0 - 0.12 * f1 * (1.0 - w1.x) * (1.0 - w1.x);
+    // the folds' crests are wetter than their troughs
+    float gloss = 0.6 + 0.8 * w1.x * f1 + 0.3 * (w2.x - 0.5) * f2;
+
+    // pores: a small pit with a soft lip, one in about every other cell
+    {
+      const float CELL = 0.07;
+      vec2 pc = P / CELL;
+      vec2 pi = floor(pc);
+      float rnd = hash12(pi + 17.0);
+      vec2 off = vec2(hash12(pi + 3.1), hash12(pi + 7.7)) - 0.5;
+      float prad = 0.0045 + 0.007 * fract(rnd * 9.7);
+      vec2 pd = (pc - pi - 0.5 - off * 0.45) * CELL;
+      float pr = length(pd) / prad;
+      float on = step(0.45, rnd) * smoothstep(1.2, 2.6, prad / pw);
+      float pit = exp(-pr * pr * 2.2);
+      float lip = exp(-(pr - 1.35) * (pr - 1.35) * 4.0);
+      float dh = 0.4 * (0.4 * -8.0 * (pr - 1.35) * lip + 4.4 * pr * pit);
+      grad += (pd / (length(pd) + 1e-6)) * (dh * on);
+      shade *= 1.0 - on * (0.55 * pit - 0.04 * lip);
+      gloss *= 1.0 - 0.6 * on * pit;
+    }
+
+    // the wall's scales, carried on across the floor: rings of them running in to the middle
+    {
+      const float SW = ${SCALE_W.toFixed(4)}, PITCH = ${SCALE_PITCH.toFixed(4)};
+      float fw = pw / PITCH;
+      float amp = (1.0 - smoothstep(0.13, 0.4, fw)) * smoothstep(0.3, 0.85, r / vFoot);
+      if (amp > 0.0) {
+        float ring = (vFoot - r) / PITCH;
+        float row = floor(ring);
+        vec2 N = max(vec2(6.0), floor(6.2831853 * (vFoot - (row + vec2(-0.5, 0.5)) * PITCH) / SW + 0.5));
+        float t = ring - row;
+        vec4 aboutA, aboutB;
+        float hA = scale(vPat.y, N.x, row - 1.0, t + 1.0, aboutA);
+        float hB = scale(vPat.y, N.y, row, t, aboutB);
+        float top = step(hB, hA);
+        vec4 about = mix(aboutB, aboutA, top);
+        float e = about.x;
+        vec2 de = vec2(5.8 * about.z * mix(N.y, N.x, top), 2.4 * about.w);
+        vec2 g = vec2(0.0, TILT) - (0.3 + 1.4 * e) * de;
+        // lying flatter than on the wall: a scale here is a few millimetres proud
+        float HS = 0.0025 * amp;
+        grad += HS * (g.x / (6.2831853 * r) * around - g.y / PITCH * radial);
+        float under = 1.0 - top;
+        float crease = 1.0 - smoothstep(0.0, 0.2 + 0.7 * under + 2.5 * fw, abs(hA - hB));
+        float body = 1.0 - smoothstep(0.3, 1.3, e);
+        float st = (1.0 - (0.25 + 0.3 * under) * crease) * (0.85 + 0.15 * body) * (0.92 + 0.16 * about.y);
+        shade *= mix(1.0, st, 0.55 * amp);
+        gloss *= mix(1.0, 0.7 + 0.5 * body, amp);
+      }
+    }
+
+    // runnels of wet, draining across to the thread
+    vec2 toT = vLead.xy;
+    float d = length(toT);
+    vec2 dirT = toT / max(d, 1e-4);
+    vec2 alongT = vec2(-dirT.y, dirT.x);
+    float runnel = 0.0;
+    {
+      const float GAP = 0.12;
+      float sc = vLead.z / GAP;
+      float si = floor(sc);
+      float r1 = hash12(vec2(si, 41.0));
+      float r2 = hash12(vec2(si, 7.0));
+      float hw = (0.007 + 0.014 * r2) * (1.0 - 0.5 * smoothstep(0.1, 1.2, d));   // half its width, narrowing as it reaches out
+      float len = 0.3 + 1.0 * fract(r1 * 13.7);               // how far out from the thread it starts
+      float wig = 0.006 * sin(d * 11.0 + r1 * 40.0) + 0.004 * sin(d * 27.0 + r2 * 20.0);
+      float off = (sc - si - 0.5 - (r2 - 0.5) * 0.25) * GAP - wig;
+      float x = abs(off) / hw;
+      float prof = 1.0 - smoothstep(0.0, 1.0, x);
+      float sres = max(fwidth(vLead.z), pw);
+      float on = step(0.55, r1) * vLead.w * smoothstep(len, len * 0.35, d) * smoothstep(0.05, 0.13, d) * (1.0 - smoothstep(0.5 * hw, 1.5 * hw, sres));
+      float streak = prof * prof * on;
+      // a shallow channel: its banks tilt in towards its middle
+      grad += alongT * (sign(off) * 0.12 * on * step(x, 1.0) * (1.0 - x));
+      shade *= 1.0 - 0.5 * streak;
+      gloss += 2.0 * streak;
+      runnel = streak;
+    }
+
+    nb = normalize(n - vec3(grad.x, 0.0, grad.y));
+    albedo *= shade;
+    wet = 0.5 * gloss;
+
+    // the thread's light on the floor beside it, on whatever of the skin is turned to it
+    vec3 Lt = normalize(vec3(toT.x, 0.1, toT.y));
+    float lam = max(dot(nb, Lt), 0.0);
+    float near = 1.0 / (1.0 + d * d / 0.04);
+    glow = vec3(0.06, 0.62, 0.44) * (near * (0.25 + 0.75 * lam) * 0.32 * (0.7 + 0.3 * min(gloss, 1.5)));
+    // and runs up the runnels a little way, on their wet film
+    glow += vec3(0.06, 0.62, 0.44) * (runnel * 0.16 / (1.0 + d * d / 0.1));
+  }
+`;
+
 const WALL_FRAG = /* glsl */ `
   uniform float uTime;
   uniform vec2 uPatScale;   // world size of one pattern cell (x: across a ridge, y: whole v range)
@@ -154,7 +314,14 @@ const WALL_FRAG = /* glsl */ `
   varying float vH;
   #if SKIN
     varying vec3 vSkin;
+  #endif
+  #if SKIN || FLOOR
     ${SKIN_GLSL}
+  #endif
+  #if FLOOR
+    varying vec4 vLead;
+    varying float vFoot;
+    ${FLOOR_GLSL}
   #endif
 
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -267,6 +434,12 @@ const WALL_FRAG = /* glsl */ `
       float tone = 1.0;
     #endif
 
+    // --- a chamber's floor is skin too (see FLOOR_GLSL) ------------------------------------------
+    #if FLOOR
+      vec3 threadGlow;
+      floorSkin(n, q, albedo, tone, nb, wet, threadGlow);
+    #endif
+
     // --- the ribs' light, on top: pale crests, and the skin between two ribs falls away to plum ----
     albedo = mix(albedo, shell, ridge * uRidgeAmt) * tone;
     albedo *= mix(vec3(0.32, 0.25, 0.52), vec3(1.0), groove);
@@ -296,6 +469,16 @@ const WALL_FRAG = /* glsl */ `
     // carry, so a wall beside the camera keeps its red.
     float far = dist * dist / (dist * dist + 12.0);
     col += vec3(0.42, 0.05, 0.30) * graze * (0.05 + 0.16 * length(vGlow) + 0.2 * far / (1.0 + dist * dist / 60.0));
+
+    #if FLOOR
+      // the wet floor gives back the coral of the walls round it, low and only where it is turned to
+      // catch them, and the thread lights the floor either side of it
+      vec3 Rf = reflect(-V, nb);
+      float fres = graze * graze;
+      vec3 env = vec3(0.55, 0.13, 0.14) * smoothstep(-0.02, 0.25, Rf.y) * (1.0 - 0.6 * smoothstep(0.25, 0.8, Rf.y));
+      col += env * fres * wet * 0.1 * open * (1.0 - far * 0.6);
+      col += threadGlow * open;
+    #endif
 
     // --- what each mushroom does to the floor it stands on ----------------------------------------
     // Its foot presses a small dark dot into the floor, the cap shades a wider ring round that, and
@@ -421,7 +604,8 @@ function wallUniforms(shared: Shared, o: WallOptions) {
  */
 export function createTrimMaterial(shared: Shared, o: WallOptions) {
   return new ShaderMaterial({
-    defines: { MODE: 0, SKIN: 0, POOL: o.pool ? 1 : 0, SHROOM: o.shrooms ? 1 : 0 },
+    // the trim that the hoop's pool falls on is the chambers' floor, which is skin of its own (FLOOR_GLSL)
+    defines: { MODE: 0, SKIN: 0, FLOOR: o.pool ? 1 : 0, POOL: o.pool ? 1 : 0, SHROOM: o.shrooms ? 1 : 0 },
     uniforms: {
       ...wallUniforms(shared, o),
       ...(o.pool ? { uPool: { value: o.pool.clone() }, uPoolN: { value: new Vector2(0, 1) } } : {}),
@@ -436,7 +620,7 @@ export function createTrimMaterial(shared: Shared, o: WallOptions) {
 /** corridor walls: cut away wherever they reach into a chamber */
 export function createCorridorMaterial(shared: Shared, chambers: Chamber[]) {
   return new ShaderMaterial({
-    defines: { MODE: 1, SKIN: 1, POOL: 0, SHROOM: 1 },
+    defines: { MODE: 1, SKIN: 1, FLOOR: 0, POOL: 0, SHROOM: 1 },
     uniforms: {
       ...shroomUniforms(),
       ...wallUniforms(shared, { patScale: [2.1, 13.6], spotK: 13, hTop: 4.6, ring: [CORRIDOR_SCALES, 0, 0] }),
@@ -457,7 +641,7 @@ export function createChamberMaterial(shared: Shared, ch: Chamber) {
   const meridian = (ch.H * Math.PI) / 2 + ch.yc;
   const skin = chamberSkin(ch);
   return new ShaderMaterial({
-    defines: { MODE: 2, SKIN: 1, POOL: 0, SHROOM: 0 },
+    defines: { MODE: 2, SKIN: 1, FLOOR: 0, POOL: 0, SHROOM: 0 },
     uniforms: {
       ...wallUniforms(shared, {
         patScale: [(Math.PI * 2 * ch.R * 0.8) / ch.ridges, meridian],
