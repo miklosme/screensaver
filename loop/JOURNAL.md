@@ -323,3 +323,31 @@ Learned:
   things that exist (bloom, wet-cobble reflections, interior parallax): question 11.
 - Loop worst frame was 16 ms this pass (budget 20); p99 7.2 ms. Bundle 306 kB of 400.
 
+## Pass 009 (2026-11-13)
+
+Slices:
+- D15 dollhouse · The exit door has relief (fable) kept, no regressions.
+- O7 orbit · Rooms behind the windows (opus) kept, no regressions; sol found an unnormalised
+  ray in its diff (O11).
+- H10 helix · Caustics (opus, sent back once as H10b for hiding the carving) kept, no
+  regressions; fable says the softened ripples cannot be seen (H13).
+- B10 burrow · Doorways grown, not moulded (opus) reverted: astra and sol say the relief
+  exposes the rim's ten-sided tube.
+Gate: frame cost worst 3.26 ms (dollhouse), loop worst 13 ms, seams 0.00–0.31% RMSE, bundle 312 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.0, burrow 7.0, dollhouse 6.7, orbit 7.3. The burrow score was
+given to the reverted rims (`loop/out/pass-009/reviewed/`).
+Learned:
+- Scores have not moved for five passes (6.7 to 8, with a point of noise). Surface slices now
+  trade one complaint for another. The ceiling is elsewhere: the owner's rail and fifth world,
+  and what no still shows (motion, beats, light events). Pass 010 goes there.
+- My send-back of the caustics over-corrected: "the carving reads first, ripples second" came
+  back as ripples nobody sees. When sending back something as too strong, ask for an A/B that
+  shows it is still plainly there.
+- Shader detail on coarse geometry makes the geometry worse (the rims). The worker's backlog
+  note said the tube had ten sides; I merged anyway. Read the worker's backlog notes as
+  risks, not as later work.
+- Reviewers reading the diff found a real fault again (unnormalised ray). Keep giving them the
+  diff.
+- Frame cost 3.26 ms of 4.0; bundle 312 kB of 400, growing about 7 kB a pass.
+

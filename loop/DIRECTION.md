@@ -129,6 +129,17 @@ other work in the meantime.
    and proves little. I applied the rule to the letter this pass (two reports: revert) and will
    keep doing so. B1 from pass 004 stays unless you say otherwise.
 
+**From pass 009:**
+
+14. **I am no longer waiting on question 12 for everything.** Scores have sat between 6.7 and 8
+   for five passes of surface work, and your rail note is the top of the queue. From pass 010:
+   (a) the dollhouse is being moved onto the rail's fall stretch (D3), judged against its
+   present sheet as the burrow was; the helix stays parked for your choice; (b) the fifth
+   world's designs are being drawn up (S1, stage 1), with the entropy kit described in that
+   backlog item; the proposals will be in `loop/out/pass-010/designs/` with a summary here
+   for you to pick from or veto. Nothing of the fifth world is built until you choose or a
+   pass goes by without an answer. Say stop here if you want neither.
+
 ## Handled
 
 Notes the director has acted on, each with the pass number.
