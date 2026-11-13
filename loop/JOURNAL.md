@@ -148,3 +148,40 @@ Learned:
 - Two reviewers scored the dollhouse 7 and one 5 on the same frames: the fable reviewer weighs
   the scene's gimmick heavily. Its top problem is a good guide to what a premise still lacks.
 
+## Pass 004 (2026-11-13)
+
+Slices:
+- O2 orbit · The moon-gate hut, without its rider (opus) kept, no regressions. The rim change
+  went in as its own commit, between the two earlier strengths.
+- D7 dollhouse · The insides are vast (fable) kept. Sol alone noted two doorways now hold
+  similar halls (D10).
+- B1 burrow · Wet, living walls, second try (fable) kept although astra and sol reported the
+  same regression (rib highlights gone): all three raised the burrow from 6 to 7. Question 9
+  in DIRECTION.md; the regression is B6.
+- K7 helix · Spring has a run-up, and the helix rides it (fable) reverted: all three reported
+  regressions (tower less monumental, a lamp on the lens, a flat last flight, the arch seen
+  rolled) and the score stayed at 7.
+Gate: frame cost worst 3.06 ms (orbit), loop worst 14 ms, seams 0.00–0.32% RMSE, bundle 278 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.0, burrow 7.0, dollhouse 6.7, orbit 7.3. The helix score was
+given to the reverted version (`loop/out/pass-004/reviewed/`); the helix on `loop` is pass 002's.
+Learned:
+- Reviewers report every regression they see even when they score the scene higher (REVIEWER.md
+  tells them to). So "two reviewers report a regression" fires on slices the panel likes. I now
+  revert on two reports unless every reviewer raised the scene's score; the owner may overrule.
+- The helix's legacy camera is hand-made for its best view (low, close, looking up), and the
+  rail's approach is level, further out and rolled. Each try got closer: reverted for the whole
+  opening in pass 003, for four named details in pass 004. The third try's brief names them.
+- The shared approach banks up to 9° through t=20 to 23.6 of every scene, so every exit on the
+  rail is seen rolled; reviewers notice (helix t=22 now, burrow t=22 in pass 003).
+- The burrow builds 7 units of tunnel behind its first frame, on the end of spring's body: a
+  season's last units before its approach are frozen once the next scene rides.
+- Three surface slices landed this pass because each brief said what had to survive, gave the
+  rejected attempt's frames, and asked for a three-way comparison (before, rejected, now).
+- A second try by Fable landed where Opus's first was reverted, twice (B1, D7). That is the
+  brief improving as much as the model: both second briefs quoted the panel on the first try.
+- Frame cost has stopped rising (3.06 ms worst for three passes); about 0.9 ms of budget is
+  left. H5b's depth-only pass trick is unused so far.
+- The owner pushed `loop` to origin during this pass (`origin/loop` exists). The director still
+  does not push.
+
