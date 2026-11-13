@@ -64,10 +64,16 @@ export interface GardenOptions {
   ground: (x: number, z: number) => number;
   /** true where nothing else stands within r of (x, z) and the camera does not pass */
   clear: (x: number, z: number, r: number) => boolean;
-  /** points along the camera's track (the drifts the garden first had were placed from these) */
-  path: { x: number; z: number }[];
+  /** the middle of the garden: the pinwheels are scattered round it and the birds circle it */
+  centre: { x: number; z: number };
+  /** pinwheels planted on purpose (the rest are scattered round the centre): where, and how big */
+  pinwheels: { x: number; z: number; s: number }[];
+  /** where on its circle each of the two flocks of birds is when the scene begins (radians; the circles are 82 and 50 across) */
+  flocks: [number, number];
   /** evenly spaced points along the camera's track: the flower beds border it */
   track: { x: number; z: number }[];
+  /** beds planted on purpose, where the camera will be looking: an ellipse `along` by `across`, its long axis along (tx, tz), with `density` flowers to the square unit */
+  beds: { x: number; z: number; tx: number; tz: number; along: number; across: number; density: number }[];
   /** true where no flower may grow: the stele's plinth, the doorways, the stepping stones */
   blocked: (x: number, z: number) => boolean;
   rnd: () => number;
@@ -85,8 +91,8 @@ export interface GardenOptions {
 
 export interface Garden {
   root: Group;
-  /** each flower drift: centre, radius and petal colour (linear light), for the shadow and the fallen petals under it */
-  drifts: { x: number; z: number; r: number; hue: RGB }[];
+  /** each flower drift: centre, half length and half width, the way its length lies, and petal colour (linear light), for the stain of shade and fallen petals under it */
+  drifts: { x: number; z: number; along: number; across: number; tx: number; tz: number; hue: RGB }[];
   /** foot of each pinwheel stalk, and the height of its hub (the stalk's shadow is baked with the scene's) */
   pinwheels: { x: number; z: number; size: number; top: number }[];
   /**
@@ -137,30 +143,6 @@ function seeded(seed: number) {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-/** draws from `rnd` exactly what the garden's first flower drifts drew, so later placements keep their places */
-function skipOldDrifts(rnd: () => number, path: { x: number; z: number }[]) {
-  const COUNT = 3200;
-  let n = 0;
-  while (n < COUNT) {
-    const at = path[Math.floor(rnd() * path.length)]!;
-    const a = rnd() * TAU;
-    const d = 3 + rnd() ** 1.5 * 34;
-    const cx = at.x + Math.cos(a) * d;
-    const cz = at.z + Math.sin(a) * d;
-    rnd();
-    const spread = 1.2 + rnd() * 3.5;
-    rnd();
-    const k = Math.min(COUNT - n, 10 + Math.floor(rnd() * 40));
-    for (let i = 0; i < k; i++) {
-      const b = rnd() * TAU;
-      const r = spread * Math.sqrt(rnd());
-      if (Math.hypot(cx + Math.cos(b) * r, cz + Math.sin(b) * r) > 8.6) rnd();
-      rnd();
-      n++;
-    }
-  }
 }
 
 type V3 = [number, number, number];
@@ -435,10 +417,8 @@ export function createGarden(o: GardenOptions): Garden {
   // border the camera's way, and each stands in a soft shadow of its own (a decal, see below).
   // -------------------------------------------------------------------------------------------
   {
-    // the drifts the scene had before are still drawn from `rnd`, so that everything placed after
-    // them (the pinwheels) stays where it was; the beds have a generator of their own
-    skipOldDrifts(rnd, o.path);
-    const rb = seeded(90731);
+    // the beds have a generator of their own
+    let rb = seeded(90731);
 
     const kinds = FLOWER_KINDS.map((k) => flowerGeometry(k));
     const tuftGeo = tuftGeometry();
@@ -492,7 +472,7 @@ export function createGarden(o: GardenOptions): Garden {
         const z = cz + tz * Math.cos(b) * rr * along + tx * Math.sin(b) * rr * across;
         plant(tufts, x, z, 0.24 + rb() * 0.16, grass[Math.floor(rb() * grass.length)]!, 0.95);
       }
-      if (Math.hypot(cx, cz) > 9.5) drifts.push({ x: cx, z: cz, r: Math.sqrt(along * across), hue });
+      if (Math.hypot(cx, cz) > 9.5) drifts.push({ x: cx, z: cz, along, across, tx, tz, hue });
     };
     const along = (i: number) => {
       const a = P[i]!;
@@ -500,9 +480,16 @@ export function createGarden(o: GardenOptions): Garden {
       const l = Math.hypot(b.x - a.x, b.z - a.z) || 1;
       return { a, tx: (b.x - a.x) / l, tz: (b.z - a.z) / l };
     };
+    // the beds planted on purpose, each from a generator of its own, so that changing one leaves the others as they were
+    const scattered = rb;
+    o.beds.forEach((b, i) => {
+      rb = seeded(4099 + i * 7919);
+      bed(b.x, b.z, b.tx, b.tz, b.along, b.across, b.density, true);
+    });
+    rb = scattered;
     // beds bordering the way, on both sides: clusters of two or three, each its own colour,
     // overlapping one another along the way
-    for (let n = 0; n < 30; n++) {
+    for (let n = 0; n < 22; n++) {
       const { a, tx, tz } = along(Math.floor(rb() * (P.length - 1)));
       const side = rb() < 0.5 ? -1 : 1;
       const off = 1.6 + rb() ** 1.4 * 5.5;
@@ -801,10 +788,13 @@ export function createGarden(o: GardenOptions): Garden {
     for (let n = 0, tries = 0; n < COUNT && tries < 4000; tries++) {
       const a = rnd() * TAU;
       const r = 14 + rnd() ** 0.8 * 70;
-      const x = Math.cos(a) * r;
-      const z = 18 + Math.sin(a) * r;
-      const size = 0.9 + rnd() ** 1.5 * 1.7;
-      if (!o.clear(x, z, 4 + size)) continue;
+      let x = o.centre.x + Math.cos(a) * r;
+      let z = o.centre.z + Math.sin(a) * r;
+      let size = 0.9 + rnd() ** 1.5 * 1.7;
+      const planted = o.pinwheels[tries];
+      // those planted on purpose come first, wherever they were put
+      if (planted) ({ x, z, s: size } = planted);
+      else if (!o.clear(x, z, 4 + size)) continue;
       place.set([x, ground(x, z) + STALK * size - 0.1, z, size], n * 4);
       pinwheels.push({ x, z, size, top: ground(x, z) + STALK * size - 0.1 });
       spin.set([rnd() * TAU, (rnd() < 0.5 ? -1 : 1) * (1.2 + rnd() * 2.6) / size, rnd() * TAU, 0], n * 4);
@@ -928,7 +918,7 @@ export function createGarden(o: GardenOptions): Garden {
     const hue = new Float32Array(COUNT * 3);
     for (let n = 0; n < COUNT; n++) {
       const flock = n % 2;
-      const lead = flock ? 2.6 : 3.1; // where each flock is when the scene begins
+      const lead = o.flocks[flock]!; // where each flock is when the scene begins
       const r = (flock ? 50 : 82) + (rnd() - 0.5) * 30;
       const speed = (flock ? -1 : 1) * (7.5 + rnd() * 1.5);
       orbit.set([r, lead + (rnd() - 0.5) * 0.75 * (60 / r), (flock ? 17 : 24) + rnd() * 14, speed / r], n * 4);
@@ -952,7 +942,7 @@ export function createGarden(o: GardenOptions): Garden {
         void main() {
           float ang = aOrbit.y + uT * aOrbit.w;
           float dir = sign(aOrbit.w);
-          vec3 centre = vec3(aOrbit.x * cos(ang), aOrbit.z + 2.5 * sin(uT * 0.5 + aBird.y), 18.0 + aOrbit.x * sin(ang));
+          vec3 centre = vec3(${o.centre.x.toFixed(2)} + aOrbit.x * cos(ang), aOrbit.z + 2.5 * sin(uT * 0.5 + aBird.y), ${o.centre.z.toFixed(2)} + aOrbit.x * sin(ang));
           vec3 fwd = vec3(-sin(ang), 0.0, cos(ang)) * dir;
           vec3 right = vec3(fwd.z, 0.0, -fwd.x);
           // a few strong beats, then a glide
