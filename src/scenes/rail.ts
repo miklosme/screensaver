@@ -11,15 +11,12 @@ import { TIMING } from "./types";
  *   spring   the climb       one full turn to the left, rising 14 units all the way: a helix
  *   summer   the serpentine  a sweep right, a long 205 degree curl left that dives 3.3 units
  *                            and climbs most of the way back, a flick right: the busiest season
- *   fall     the dunes       two camel-backs (up 13, down 15, up 12, down 10 degrees) over an S: a
- *                            sweep right, a hard 100 degree left-hander through the hollow between
- *                            them that ends with the exit dead ahead, a flick right; hardly banked
- *   winter   the vortex      a spiral dive to the right, 290 degrees round and 11 units down: a
- *                            tight hook at the top, banked to 27 degrees, that opens out as it falls
+ *   fall     the dunes       two camel-backs (up 13, down 15, up 12, down 8 degrees) over a slow S
+ *   winter   the vortex      a spiral dive to the right, 330 degrees round and 11 units down,
+ *                            that tightens and banks harder (to 28 degrees) as it falls
  *
  * Plots of all of it: `loop/out/after/rail-views.png` and `rail-timeline.png` of the pass that
- * built it (pass 002; fall and winter as they are now are in those of pass 011's D3), or
- * `rail.frame` / `rail.pose` below.
+ * built it (pass 002), or `rail.frame` / `rail.pose` below.
  *
  * WHO RIDES WHAT. The scene at (zero-based) position `index` in the playing order rides season
  * `index % 4`, so a fifth scene rides spring again. A scene's 25 s timeline is the last 5 s of the
@@ -98,13 +95,10 @@ import { TIMING } from "./types";
  * `rail` is the whole lap in its own coordinates, for plots and for anything that needs more
  * than one stretch. `src/scenes/burrow.tsx` and `burrow/build.ts` are the worked example: a
  * tunnel swept along summer, chambers placed on it by distance, the camera with a look-ahead.
- * `src/scenes/dollhouse.tsx` is the other: an open garden laid out round fall from what the
- * rail's camera has in view, the sand following the track's rises, the rail moved into a world
- * that keeps its exit at the origin.
  *
  * ---------------------------------------------------------------------------------------------
- * Legacy: the seam state. A scene that still has its own camera track (helix and orbit, until
- * they migrate) keeps the "seam state" around both of its seams:
+ * Legacy: the seam state. A scene that still has its own camera track (helix, dollhouse, orbit
+ * until they migrate) keeps the "seam state" around both of its seams:
  *
  *   - it travels in a straight line, along its own view axis,
  *   - it does not rotate (no yaw, pitch or roll rate),
@@ -270,13 +264,12 @@ const BANK_LIMIT = 34 * DEG;
 export const CLEARANCE = 8;
 
 /**
- * THE DESIGN. Spring, summer and fall are fixed numbers, and winter closes the lap: three of its
- * numbers are left to `close()`, which nudges them until the lap meets itself. p[0] moves a few
- * degrees of turn between the hook winter begins with and the rest of its spiral, p[1] stretches
- * that hook, p[2] scales the dive.
+ * THE DESIGN. Three numbers are left to `close()`, which nudges them until the lap meets itself:
+ * p[0] stretches fall, p[1] moves a few degrees of turn from fall's first sweep to its second,
+ * p[2] scales winter's dive.
  */
 function design(p: readonly number[]): SeasonDesign[] {
-  const [hook = 0, reach = 0, dive = 0] = p;
+  const [weave = 0, hinge = 0, dive = 0] = p;
   return [
     // spring: the climb. One full turn to the left, rising all the way: a helix.
     {
@@ -302,35 +295,28 @@ function design(p: readonly number[]): SeasonDesign[] {
       roll: [],
       bank: 3.6,
     },
-    // fall: the dunes. An S over two camel-backs. A jog to the left on the level (a garden's
-    // doorway is passed on either hand), a sweep to the right up the first dune, a hard left-hander
-    // down through the hollow and up the second, which ends with the exit dead ahead, and a flick
-    // to the right down the far side into the approach. It hardly banks: the exit is in sight from
-    // the left-hander on, and a camera that leaned into it would show the exit tilted.
+    // fall: the dunes. Four camel-backs over a slow S.
     {
       length: 95,
       turn: [
-        { at: 3, len: 12, deg: 9, ease: 5 },
-        { at: 18, len: 16, deg: -20, ease: 6 },
-        { at: 39.5, len: 21.5, deg: 100, ease: 8 },
-        { at: 62, len: 14, deg: -20, ease: 6 },
+        { at: 3, len: 26, deg: -70 + 20 * weave, ease: 8 },
+        { at: 29, len: 46, deg: 147 - 20 * weave - 20 * hinge, ease: 12 },
       ],
       slope: [
-        { at: 19, len: 14, deg: 13, ease: 6 },
-        { at: 33, len: 18, deg: -15, ease: 7 },
-        { at: 51, len: 12.5, deg: 12, ease: 6 },
-        { at: 63.5, len: 12, deg: -10.5, ease: 5.5 },
+        { at: 3, len: 16, deg: 13, ease: 6 },
+        { at: 19, len: 20, deg: -15, ease: 7 },
+        { at: 39, len: 16, deg: 12, ease: 6 },
+        { at: 55, len: 20, deg: -8, ease: 7 },
       ],
       roll: [],
-      bank: 0.4,
+      bank: 4.5,
     },
-    // winter: the vortex. A spiral dive to the right: a tight hook at the top that opens out into a
-    // wide sweep as it falls.
+    // winter: the vortex. A spiral dive to the right that tightens as it falls.
     {
       length: 106,
       turn: [
-        { at: 3, len: 84, deg: -152 - 20 * hook, ease: 10 },
-        { at: 3, len: 42.5 + 10 * reach, deg: -140 + 20 * hook, ease: 10 },
+        { at: 3, len: 84, deg: -190 + 20 * hinge, ease: 10 },
+        { at: 40, len: 46, deg: -110, ease: 14 },
       ],
       slope: [{ at: 6, len: 76, deg: -10 * (1 + dive), ease: 12 }],
       roll: [],
