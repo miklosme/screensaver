@@ -703,40 +703,80 @@ const DETAIL_GLSL: Record<Detail, string> = {
       }
       diffuseColor.rgb = stone * ao;
     }`,
-  // The newel: ashlar courses with pillowed, worn edges, and a carved band of beads running down
-  // each of the barley-sugar grooves. Laid out in the column's own (turning) coordinates.
+  // The newel: ashlar courses with soft bevelled edges, and a carved band of domed studs running
+  // down each of the barley-sugar grooves. Laid out in the column's own (turning) coordinates, in
+  // angle and height, and carved analytically: the slope of every bevel, stud and grain is written
+  // to hxG (per local metre) rather than left to screen derivatives, which step in 2x2 blocks.
   column: /* glsl */ `
     {
       vec3 p = vHxL;
       float wpx = length(fwidth(vHxW)) * 0.8 + 1e-4;
       float fade = 1.0 - smoothstep(0.03, 0.2, wpx);
-      float g = hxGrain(p, wpx);
-      vec3 m = hxTint(p) * (1.0 + 0.1 * g);
-      hxH += 0.0035 * g;
+      // hxGrain's bedding and middle octave; its fine octave is replaced by the carved grain below
+      hxBed = hxN3(p * 0.6 + 7.0);
+      float g = (hxBed - 0.5) * 0.16;                     // as before from afar
+      if (wpx < 0.12) g += (hxN3(p * 7.0) - 0.5) * 0.11 * (1.0 - smoothstep(0.03, 0.12, wpx));
+      vec3 m = hxTint(p) * (1.0 + g);
+      // fine sandstone grain, carved and speckled, each octave gone before it shrinks to a few pixels
+      float f1 = 1.0 - smoothstep(0.004, 0.012, wpx);
+      float f2 = 1.0 - smoothstep(0.0012, 0.0035, wpx);
+      vec4 n1 = f1 > 0.0 ? hxN3d(p * 37.0 + 3.1) : vec4(0.5, 0.0, 0.0, 0.0);
+      vec4 n2 = f2 > 0.0 ? hxN3d(p * 113.0 + 17.0) : vec4(0.5, 0.0, 0.0, 0.0);
+      hxG += n1.yzw * (37.0 * 0.002 * f1) + n2.yzw * (113.0 * 0.0007 * f2);
+      m *= 1.0 + 0.14 * ((n1.x - 0.5) * f1 + (n2.x - 0.5) * 1.3 * f2);
+      hxSheen = 0.5 + 0.5 * sin(p.x * 1.9 + 2.0 * sin(p.y * 1.3 + p.z * 0.7) + p.z * 2.3);
       float phi = atan(p.z, p.x);
+      vec3 dphi = vec3(-p.z, 0.0, p.x) / max(dot(p.xz, p.xz), 1e-4);   // d(phi)/dp
       float ga = (fract((phi + p.y * 0.2) * ${glf(4 / TAU)}) - 0.5) * ${glf(TAU)}; // 0 in a groove
       float dg = ga * 0.68;                               // metres across the groove
+      float sg = dg < 0.0 ? -1.0 : 1.0;
+      vec2 Gg = vec2(2.72, 0.544);                        // d(dg) / d(phi, y)
+      vec2 G = vec2(0.0);                                 // d(height) / d(phi, y)
       if (abs(dg) < 0.21) {
-        // sunk 4 cm, the same depth the ashlar's pillowed edges fall to, so the two meet cleanly
+        // a domed stud in a sunk band, its foot in a thin dark contact line
         float by = (fract(p.y / 0.3) - 0.5) * 0.3 * 1.13;
-        float d = length(vec2(dg, by)) / 0.125;
+        vec2 q = vec2(dg, by) / 0.125;
+        float d = length(q);
+        float qpx = wpx / 0.125 * 1.5;
         float bead = sqrt(max(0.0, 1.0 - d * d));
-        hxH += 0.07 * bead - 0.04;
-        m *= mix(0.62, 1.12, smoothstep(0.0, 0.5, bead));
+        float edge = 1.0 - smoothstep(1.0 - qpx * 2.0, 1.0, d);   // the dome's flank fades to the floor
+        vec2 dq = -q / max(bead, 0.18) * 0.07 * edge;            // d(height)/dq
+        G = vec2(dq.x * Gg.x, dq.x * Gg.y + dq.y * 1.13) / 0.125;
+        hxStud = 1.0 - smoothstep(0.85, 1.0, d);
+        float foot = hxBand(d, 0.96, 1.08, qpx);
+        m *= mix(0.7, 1.1, smoothstep(0.0, 0.6, bead)) * (1.0 - 0.4 * foot * fade);
         float fillet = hxBand(abs(dg), 0.165, 0.21, wpx);
         m *= 1.0 + 0.12 * fillet;
       } else {
         float row = floor(p.y / 0.52);
         float bx = phi * ${glf(18 / TAU)} + 0.5 * mod(row, 2.0);
         float fy = fract(p.y / 0.52), fx = fract(bx);
-        float jd = min(min(fy, 1.0 - fy) * 0.52, min(fx, 1.0 - fx) * 1.05);   // metres to a joint
-        jd = min(jd, abs(dg) - 0.21);                        // the band's edge is a joint too
-        float pillow = max(0.0, 1.0 - jd / 0.08);
-        hxH -= 0.04 * pillow * pillow;
-        float jw = max(0.012, wpx * 0.7);
+        // metres to the nearest joint and that distance's slope, the corners rounded by a smooth min
+        float ay = min(fy, 1.0 - fy) * 0.52;
+        vec2 gy = vec2(0.0, fy < 0.5 ? 1.0 : -1.0);
+        float ax = min(fx, 1.0 - fx) * 1.05;
+        vec2 gx = vec2(fx < 0.5 ? ${glf((18 / TAU) * 1.05)} : ${glf((-18 / TAU) * 1.05)}, 0.0);
+        float k = 0.035;
+        float h = clamp(0.5 + 0.5 * (ax - ay) / k, 0.0, 1.0);
+        float jd = mix(ax, ay, h) - k * h * (1.0 - h);
+        vec2 gj = mix(gx, gy, h);
+        float ab = abs(dg) - 0.21;                          // the band's edge is a joint too
+        h = clamp(0.5 + 0.5 * (ab - jd) / k, 0.0, 1.0);
+        jd = mix(ab, jd, h) - k * h * (1.0 - h);
+        gj = mix(sg * Gg, gj, h);
+        // a soft bevel, steepest at the joint but rounded there over a couple of pixels
+        float r = max(0.004, wpx * 2.0);
+        float js = sqrt(jd * jd + r * r) - r;
+        float bev = max(0.0, 1.0 - js / 0.05);
+        G = gj * (0.022 * 2.0 * bev / 0.05 * jd / (js + r));   // of the height -0.022 bev^2
+        float jw = max(0.008, wpx * 0.7);
         float joint = 1.0 - smoothstep(jw * 0.5, jw + wpx, jd);
-        m *= (0.88 + 0.18 * hxHash(vec2(floor(bx), row))) * (1.0 - 0.45 * joint * fade) * (1.0 - 0.12 * pillow * fade);
+        float bh = hxHash(vec2(floor(bx), row));
+        float bt = hxHash(vec2(row, floor(bx)) + 19.7) - 0.5;
+        m *= (0.88 + 0.18 * bh) * (vec3(1.0) + bt * vec3(0.08, 0.025, -0.07) * fade);
+        m *= (1.0 - mix(0.3, 0.45, smoothstep(0.004, 0.02, wpx)) * joint * fade) * (1.0 - 0.07 * bev * bev * fade);
       }
+      hxG += G.x * dphi + vec3(0.0, G.y, 0.0);
       diffuseColor.rgb *= m * hxStairAO(vHxW);
     }`,
   // The keyhole arch: a thin carved slab. Radial voussoirs with a raised keystone round the
@@ -922,6 +962,18 @@ const RAIL_SHEEN_GLSL = /* glsl */ `
             hxGlow += vec3(1.0, 0.64, 0.3) * (0.3 * spec + far * (0.14 + 0.4 * spec + 0.2 * rim * rim));
           }`;
 
+/** the newel's studs catch the key light in a small hot glint; the stone a faint, uneven sheen */
+const STUD_GLINT_GLSL = /* glsl */ `
+          {
+            vec3 rv = normalize(vViewPosition);
+            vec3 rl = normalize((viewMatrix * vec4(-0.35, 1.0, -0.6, 0.0)).xyz);
+            float nh = max(dot(normal, normalize(rl + rv)), 0.0);
+            // the studs' glint is from the lamps above the eye, so it sits high on every dome
+            float sh = max(dot(normal, normalize(rv + normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz) * 0.9)), 0.0);
+            float near = 1.0 - smoothstep(4.0, 14.0, length(vViewPosition));
+            hxGlow += vec3(1.0, 0.82, 0.58) * near * (hxStud * 0.45 * pow(sh, 60.0) + smoothstep(0.35, 0.8, hxSheen) * 0.05 * pow(nh, 8.0) * (1.0 - hxStud));
+          }`;
+
 /**
  * Light off the void: slow caustic ripples, as on the floor of a pool, over the stone that faces
  * the void. Two gyroid networks in world space, warped and drifting with uHxT alone, whose zero
@@ -1017,6 +1069,11 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
         uniform vec4 uHxPool[${POOL_N}];
         vec3 hxGlow = vec3(0.0);
         float hxH = 0.0; // carved height (metres) the bumped details write; the normal follows it
+        /** the carved height's slope, per metre of HX_GP, for details that carve analytically */
+        vec3 hxG = vec3(0.0);
+        #define HX_GP ${detail === "column" ? "vHxL" : "vHxW"}
+        float hxStud = 0.0;  // 1 on the newel's domed studs, which catch a highlight
+        float hxSheen = 0.5; // how polished the stone is here, independent of its colour
         ${CAUSTIC_FN_GLSL}
         float hxHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         /** integer lattice hash: exact, so the two sides of a cell wall always agree */
@@ -1038,6 +1095,25 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             mix(mix(hxH3(i), hxH3(i + o.xyy), f.x), mix(hxH3(i + o.yxy), hxH3(i + o.xxy), f.x), f.y),
             mix(mix(hxH3(i + o.yyx), hxH3(i + o.xyx), f.x), mix(hxH3(i + o.yxx), hxH3(i + o.xxx), f.x), f.y),
             f.z);
+        }
+        /** hxN3 with its gradient: (value, d/dp) */
+        vec4 hxN3d(vec3 p) {
+          vec3 fl = floor(p);
+          ivec3 i = ivec3(fl);
+          vec3 f = p - fl;
+          vec3 u = f * f * (3.0 - 2.0 * f);
+          vec3 du = 6.0 * f * (1.0 - f);
+          const ivec2 o = ivec2(1, 0);
+          float a = hxH3(i), b = hxH3(i + o.xyy), c = hxH3(i + o.yxy), d = hxH3(i + o.xxy);
+          float e = hxH3(i + o.yyx), f1 = hxH3(i + o.xyx), g = hxH3(i + o.yxx), h = hxH3(i + o.xxx);
+          float k1 = b - a, k2 = c - a, k3 = e - a, k4 = a - b - c + d;
+          float k5 = a - c - e + g, k6 = a - b - e + f1, k7 = -a + b + c - d + e - f1 - g + h;
+          return vec4(
+            a + k1 * u.x + k2 * u.y + k3 * u.z + k4 * u.x * u.y + k5 * u.y * u.z + k6 * u.z * u.x + k7 * u.x * u.y * u.z,
+            du * vec3(
+              k1 + k4 * u.y + k6 * u.z + k7 * u.y * u.z,
+              k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x,
+              k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y));
         }
         /** the grain's base octave, kept for hxTint so the bedding costs no second noise */
         float hxBed = 0.5;
@@ -1070,9 +1146,10 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             vec3 sx = dFdx(-vViewPosition), sy = dFdy(-vViewPosition);
             vec3 r1 = cross(sy, normal), r2 = cross(normal, sx);
             float det = dot(sx, r1);
-            vec3 grad = sign(det) * (dFdx(hxH) * r1 + dFdy(hxH) * r2);
+            // hxH's screen derivatives, plus the analytic slope hxG chained through the position's
+            vec3 grad = sign(det) * ((dFdx(hxH) + dot(hxG, dFdx(HX_GP))) * r1 + (dFdy(hxH) + dot(hxG, dFdy(HX_GP))) * r2);
             normal = normalize(abs(det) * normal - grad);
-          }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (POOLED.includes(detail) ? poolGlsl(detail) : "") + causticGlsl(detail)
+          }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (detail === "column" ? STUD_GLINT_GLSL : "") + (POOLED.includes(detail) ? poolGlsl(detail) : "") + causticGlsl(detail)
           : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : "") + (detail === "rail" ? RAIL_SHEEN_GLSL : "") + (detail === "wall" ? BEAM_LIT_GLSL : "") + causticGlsl(detail),
       )
       .replace(
