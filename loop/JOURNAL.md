@@ -224,3 +224,36 @@ Learned:
 - A "completed" notice that is one sentence about a background job is a worker pausing; O5 sent
   three before its report.
 
+## Pass 006 (2026-11-13)
+
+Slices:
+- B4 burrow · The hoop glows, the hoop alone (fable) kept, no regressions.
+- H7 helix · The lamp by the lens (opus, sent back once for the rail as H7b) kept. Astra alone
+  reported the darker rails losing the spiral's outline at t=0 to 5 (rides on H4).
+- O3 orbit · The whale is the event (opus, sent back once as O3b) kept. Fable alone reported
+  the whale tangling with the finial at t=22 and the moon clipped at t=19 (O8).
+- D11 dollhouse · The exit is the richest thing in the garden (opus) reverted: astra and sol
+  both reported the leaves' lost panel outlines. Its plinth and surround were not criticised.
+Gate: frame cost worst 3.19 ms (orbit), loop worst 11 ms, seams 0.00–0.31% RMSE, bundle 289 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.3, burrow 7.0, dollhouse 6.7, orbit 7.7. The dollhouse score
+was given to the reverted version (`loop/out/pass-006/reviewed/`).
+Learned:
+- One object per slice works: three of four kept, against one of five in pass 005. The one
+  revert was again a slice with a part too many (plinth, surround and leaves).
+- "Keep what it has and add to it" was the instruction that landed the hoop. The reverted
+  leaves replaced a readable painted line with truer but quieter relief. A reviewer judges a
+  1280-pixel frame: contrast that reads at that size beats correctness.
+- Sending a slice back once, with one sentence and the frame that shows the fault, worked
+  three times this pass and last (rail, whale, grey band). Each follow-up was a fresh worker
+  that merged the first one's branch.
+- A worker told to stay in one file will leave a patch for the other file when the outcome
+  needs it (O3's moon). Check which file owns the thing before writing "Files you own".
+- A mistake of mine: I reported the burrow's worst frame as risen to 3.38 ms because of the
+  hoop. The re-run without D11 reads 3.06 ms: the extra was the reverted dollhouse exit seen
+  through the hoop at t=24, or noise, not the hoop.
+- The dollhouse is the lowest scene (6.7) and all three reviewers now rank its flowers and
+  flat ground first. Dunes and haze were tried in pass 005 and reverted; the next try is the
+  flowers themselves (D13).
+- Bundle is 289 kB of 400; frame cost 3.19 ms of 4.0.
+
