@@ -178,92 +178,6 @@ vec2 shingle(vec2 sv) {
   return vec2(mix(0.5, (0.8 + 0.5 * f.y) * (0.88 + 0.24 * tone), tile) + 0.5 * hem, tile * (1.0 - 0.7 * f.y));
 }`;
 
-/**
- * Topiary. All of it works on the bush scaled to its size, so clumps and leaves keep a world size
- * whatever the bush's shape: `bushH` lumps the ball in the vertex shader, `clumpB` and `leafB`
- * draw clumps of leaves and the leaves in them in the fragment shader.
- */
-const BUSH_GLSL = /* glsl */ `
-vec3 hashB(vec3 p) {
-  p = fract(p * vec3(0.1031, 0.1030, 0.0973));
-  p += dot(p, p.yxz + 33.33);
-  return fract((p.xxy + p.yxx) * p.zyx);
-}
-/** overlapping leaves: x is how far inside the topmost leaf (0 at its edge, -1 for a hole), y its
- * stacking height, z its tone, w how much it faces up */
-vec4 leafB(vec3 p) {
-  vec3 i = floor(p);
-  vec3 f = fract(p);
-  vec4 best = vec4(-1.0, -1.0, 0.0, 0.5);
-  for (int z = -1; z <= 1; z++)
-  for (int y = -1; y <= 1; y++)
-  for (int x = -1; x <= 1; x++) {
-    vec3 g = vec3(float(x), float(y), float(z));
-    vec3 o = hashB(i + g);
-    vec3 r = g + o - f;
-    // a pointed lens of a leaf, lying along its own random direction
-    vec3 ax = normalize(fract(o.yzx * 7.13 + o.zxy * 3.71) - 0.5);
-    float rp = dot(r, ax);
-    float sz = 1.05 + 0.5 * o.z;
-    float d = length(r - ax * rp) / (0.5 * sz) + abs(rp) / (1.25 * sz);
-    if (d < 1.0) {
-      float h = o.y + 0.35 * (1.0 - d);
-      if (h > best.y) best = vec4(1.0 - d, h, o.z, fract(o.x * 5.13 + o.y * 2.71));
-    }
-  }
-  return best;
-}
-/** round clumps of leaves: the height of the highest dome over p, 0 in the gaps */
-float clumpB(vec3 p) {
-  vec3 i = floor(p);
-  vec3 f = fract(p);
-  float h = 0.0;
-  for (int z = -1; z <= 1; z++)
-  for (int y = -1; y <= 1; y++)
-  for (int x = -1; x <= 1; x++) {
-    vec3 g = vec3(float(x), float(y), float(z));
-    vec3 o = hashB(i + g + 3.1);
-    vec3 r = g + o - f;
-    float rr = 0.62 + 0.3 * o.z;
-    h = max(h, 1.0 - dot(r, r) / (rr * rr));
-  }
-  return h;
-}
-/** value noise and its gradient */
-vec4 noiseB(vec3 x) {
-  vec3 p = floor(x);
-  vec3 w = fract(x);
-  vec3 u = w * w * (3.0 - 2.0 * w);
-  vec3 du = 6.0 * w * (1.0 - w);
-  float a = hashB(p).x;
-  float b = hashB(p + vec3(1.0, 0.0, 0.0)).x;
-  float c = hashB(p + vec3(0.0, 1.0, 0.0)).x;
-  float d = hashB(p + vec3(1.0, 1.0, 0.0)).x;
-  float e = hashB(p + vec3(0.0, 0.0, 1.0)).x;
-  float f = hashB(p + vec3(1.0, 0.0, 1.0)).x;
-  float g = hashB(p + vec3(0.0, 1.0, 1.0)).x;
-  float h = hashB(p + vec3(1.0, 1.0, 1.0)).x;
-  float k1 = b - a, k2 = c - a, k3 = e - a, k4 = a - b - c + d, k5 = a - c - e + g, k6 = a - b - e + f, k7 = -a + b + c - d + e - f - g + h;
-  return vec4(
-    a + k1 * u.x + k2 * u.y + k3 * u.z + k4 * u.x * u.y + k5 * u.y * u.z + k6 * u.z * u.x + k7 * u.x * u.y * u.z,
-    du * vec3(k1 + k4 * u.y + k6 * u.z + k7 * u.y * u.z, k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x, k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y));
-}
-/**
- * Two octaves of billowed noise: rounded clumps with creases between. x is the height (world
- * units) at a point P of the bush scaled to size, yzw its gradient; the second value is the fold
- * (0 in a crease).
- */
-vec4 bushH(vec3 P, vec3 seed, float amp, out float fold) {
-  vec4 n1 = noiseB(P / 0.8 + seed);
-  vec4 n2 = noiseB(P / 0.38 + seed.yzx + 17.0);
-  float s1 = 2.0 * n1.x - 1.0;
-  float s2 = 2.0 * n2.x - 1.0;
-  fold = smoothstep(0.0, 0.3, abs(s1));
-  return amp * vec4(
-    0.85 * abs(s1) + 0.35 * abs(s2) - 0.5,
-    0.85 * sign(s1) * 2.0 * n1.yzw / 0.8 + 0.35 * sign(s2) * 2.0 * n2.yzw / 0.38);
-}`;
-
 // ---------------------------------------------------------------- the moon-gate hut's own shading
 const HUT_ORIGIN = `vec3(0.0, ${(-R).toFixed(1)}, ${HUT_Z.toFixed(1)})`;
 const GATE_C = `vec3(0.0, ${DOOR_H.toFixed(2)}, ${(DOOR_Z - HUT_Z).toFixed(2)})`;
@@ -723,10 +637,7 @@ function buildWorld() {
   }
 
   // ---------------------------------------------------------------- trees
-  // bushes that come near the lens get the fine ball; the rest, only ever seen from afar, a coarse one
   const trees = new Inst();
-  const farTrees = new Inst();
-  const treeFeet: { s: number; z: number; r: number }[] = [];
   for (let attempt = 0, n = 0; attempt < 5000 && n < 300; attempt++) {
     const a = anchors[Math.floor(rnd() * anchors.length)]!;
     const ang = rnd() * 6.283;
@@ -753,8 +664,7 @@ function buildWorld() {
     }
     if (!ok) continue;
     col.setHSL(hue, 0.55, light);
-    (nearMain(s, z, r + 12) ? trees : farTrees).add(s, z, rnd() * 6, 0, r * k * 0.8, 0, r, r * k, r, col);
-    treeFeet.push({ s, z, r });
+    trees.add(s, z, rnd() * 6, 0, r * k * 0.8, 0, r, r * k, r, col);
     n++;
   }
 
@@ -922,11 +832,6 @@ function buildWorld() {
   ctx.fill();
   // contact shadows: every tower sits in a soft dark ring where it meets the cobbles
   for (const b of buildings) blob(b.s, b.z, b.rad + 2.4, "3,4,16", 0.75);
-  // and every bush in a dark patch, darkest right under it
-  for (const t of treeFeet) {
-    blob(t.s, t.z, t.r * 1.3 + 1.2, "3,4,16", 0.7);
-    blob(t.s, t.z, t.r * 1.0 + 0.4, "2,3,12", 0.75);
-  }
   // light pools: lamps and doorways pour soft light onto the street (a falloff, not a disc)
   const pool = (s: number, z: number, r: number, rgb: string, a: number) => {
     const s0 = ((s % C) + C) % C;
@@ -1207,17 +1112,23 @@ function buildWorld() {
     new THREE.Float32BufferAttribute([-1.3, -0.4, 0, 1.3, -0.4, 0, 1.3, 1.45, 0, -1.3, 1.45, 0], 3),
   );
   windowGeo.setIndex([0, 1, 2, 0, 2, 3]);
-  // topiary: a fine welded ball; the tree shader pushes it out into leaf clumps (`BUSH_GLSL`)
-  const ballGeo = (detail: number) => {
-    const g0 = new THREE.IcosahedronGeometry(1, detail);
+  // topiary: a smooth, gently lumpy ball (welded so its normals are smooth)
+  const treeGeo = (() => {
+    const g0 = new THREE.IcosahedronGeometry(1, 4);
     g0.deleteAttribute("normal");
     g0.deleteAttribute("uv");
     const g = mergeVertices(g0);
+    const p = g.getAttribute("position");
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i);
+      const y = p.getY(i);
+      const z = p.getZ(i);
+      const k = 1 + 0.045 * Math.sin(3.1 * x + 1.3) * Math.sin(2.7 * y + 0.4) * Math.sin(3.3 * z + 2.1) + 0.025 * Math.sin(6.3 * x + 5.1 * z + 3.7 * y);
+      p.setXYZ(i, x * k, y * k, z * k);
+    }
     g.computeVertexNormals();
     return g;
-  };
-  const treeGeo = ballGeo(8);
-  const farTreeGeo = ballGeo(4);
+  })();
   const postGeo = new THREE.CylinderGeometry(0.06, 0.1, 2.75, 8, 1, true).translate(0, 1.375, 0);
   const bulbGeo = new THREE.SphereGeometry(0.28, 16, 10);
   // a soft cone of light under each street lamp, from the head to the cobbles
@@ -1575,98 +1486,52 @@ function buildWorld() {
   });
   windowAir(windowMat);
   const treeMat = new THREE.MeshLambertMaterial({ emissive: "#03141a" });
-  // Topiary: the ball is pushed out into two octaves of clumps in the vertex shader (normals from the
-  // same displacement), leaves in relief from a finer octave, darker in the folds and at the foot,
-  // top-lit, with a warm rim on the side that faces a lamp. Far off it is a soft dark mass.
+  // Topiary: clipped leaf scales over a smooth ball, lit from above, with a warm rim where a lamp is near.
   withAir(treeMat, "tree", 0.85, (sh) => {
     sh.uniforms.uLamp = lampUniform;
     sh.vertexShader = sh.vertexShader
-      .replace(
-        "#include <common>",
-        `#include <common>\nvarying vec3 vLp;\nvarying vec3 vBP;\nvarying vec3 vSeed;\nvarying vec3 vUpV;\nvarying float vFold;\nvarying float vHg;\n${BUSH_GLSL}`,
-      )
-      .replace(
-        "#include <beginnormal_vertex>",
-        `#include <beginnormal_vertex>
-        vec3 bS = vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz));
-        vec3 bSeed = fract(instanceMatrix[3].xyz * 0.0137) * 61.0;
-        float bAmp = 0.3 * min(bS.x, 2.0);
-        vec3 bP0 = normalize(position);
-        vec3 bNe = normalize(bP0 / bS);
-        float bFold;
-        vec4 bH = bushH(bP0 * bS, bSeed, bAmp, bFold);
-        vec3 bB0 = bP0 * bS + bNe * bH.x;
-        // the clumps tilt the normal by the height's slope along the surface
-        vec3 bN = normalize(bNe - (bH.yzw - bNe * dot(bH.yzw, bNe)));
-        objectNormal = bN * bS;
-        vFold = bFold;
-        vBP = bB0;
-        vSeed = bSeed;
-        vHg = (bB0.y + 0.8 * bS.y) / min(bS.x, 1.6);
-        vUpV = (viewMatrix * modelMatrix * vec4(instanceMatrix[1].xyz, 0.0)).xyz;`,
-      )
+      .replace("#include <common>", "#include <common>\nvarying vec3 vLo;\nvarying vec3 vLp;\nvarying vec2 vSc;")
       .replace(
         "#include <begin_vertex>",
         `#include <begin_vertex>
-        transformed = bB0 / bS;
+        vLo = position;
+        vSc = vec2(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz));
         {
           mat4 iw = modelMatrix * instanceMatrix;
-          vLp = (iw * vec4(transformed, 1.0)).xyz + normalize(mat3(iw) * vec3(bN.x / bS.x, 0.0, bN.z / bS.z)) * 1.6;
+          vLp = (iw * vec4(transformed, 1.0)).xyz + normalize(mat3(iw) * vec3(position.x, 0.0, position.z)) * 1.6;
         }`,
       );
     sh.fragmentShader = sh.fragmentShader
-      .replace(
-        "#include <common>",
-        `#include <common>\nvarying vec3 vLp;\nvarying vec3 vBP;\nvarying vec3 vSeed;\nvarying vec3 vUpV;\nvarying float vFold;\nvarying float vHg;\n${LAMP_PARS}\n${BUMP_GLSL}\n${BUSH_GLSL}`,
-      )
+      .replace("#include <common>", `#include <common>\nvarying vec3 vLo;\nvarying vec3 vLp;\nvarying vec2 vSc;\n${LAMP_PARS}\n${BUMP_GLSL}\n${SHINGLE_GLSL}`)
       .replace(
         "#include <color_fragment>",
         /* glsl */ `#include <color_fragment>
         float leafH = 0.0;
-        float leafF = 0.0;
         {
-          // clumps of leaves about 0.45 across, leaves about 0.15 long; each fades before it gets
-          // small enough to shimmer
-          vec3 q = vBP / 0.42 + vSeed * 3.0;
-          float px = length(fwidth(q));
-          leafF = 1.0 - smoothstep(0.15, 0.5, px);
+          vec3 n = normalize(vLo);
+          float th = acos(clamp(n.y, -1.0, 1.0));
+          float sn = sin(th);
+          // leaves about 0.17 across whatever the bush's size; fewer round the crown so they keep their shape
+          float N = floor(vSc.x * 36.0) * exp2(clamp(floor(log2(sn * 1.3 + 1e-3)), -3.0, 0.0));
+          vec2 sv = vec2((atan(n.z, n.x) * 0.159155 + 0.5) * N, (3.14159 - th) * vSc.y * 6.0);
+          vec2 sh = shingle(sv);
+          float fade = 1.0 - smoothstep(0.15, 0.7, length(fwidth(sv)));
           #ifdef USE_FOG
-            leafF *= 1.0 - smoothstep(0.0, 0.35, ${EXT_GLSL});
+            fade *= 1.0 - smoothstep(0.0, 0.4, ${EXT_GLSL});
           #endif
-          vec3 m = vec3(1.0);
-          if (leafF > 0.0) {
-            float cl = clumpB(q);
-            float lF = 1.0 - smoothstep(0.15, 0.5, px * 3.2);
-            vec4 lf = lF > 0.0 ? leafB(q * 3.2 + 9.0) : vec4(0.5, 0.7, 0.5, 0.5);
-            float hole = step(lf.x, 0.0);
-            // each leaf faces its own way: some catch the light, some sit in shade; between them, deeper leaves
-            float leaf = mix(mix(0.55, 1.4, lf.w) * (0.85 + 0.3 * smoothstep(0.0, 0.6, lf.x)), 0.6, hole);
-            float tilt = mix(1.0, leaf, lF);
-            m = vec3(mix(0.5, 1.05, smoothstep(0.0, 0.8, cl)) * tilt)
-              * mix(vec3(0.8, 1.12, 0.9), vec3(1.0, 1.0, 1.04), mix(0.5, lf.z, lF));
-            leafH = (0.12 * sqrt(max(cl, 0.0)) + 0.01 * lf.x * lF) * leafF;
-          }
-          diffuseColor.rgb *= mix(vec3(0.92), m, leafF);
-          diffuseColor.rgb *= mix(0.4, 1.0, vFold);            // folds between the big clumps
-          diffuseColor.rgb *= mix(0.22, 1.0, smoothstep(0.0, 0.9, vHg)); // the foot, in its own shade
+          diffuseColor.rgb *= mix(1.0, 0.4 + 0.75 * sh.x, fade);
+          leafH = 0.03 * sh.y * fade;
+          diffuseColor.rgb *= mix(0.32, 1.5, smoothstep(-0.8, 0.95, n.y));
         }`,
       )
-      .replace(
-        "#include <normal_fragment_maps>",
-        `#include <normal_fragment_maps>
-        vec3 nGeo = normal;
-        normal = bumpV(-vViewPosition, normal, leafH, faceDirection);
-        float upL = dot(normal, normalize(vUpV));
-        diffuseColor.rgb *= mix(0.35, 2.3, smoothstep(-0.6, 0.95, upL));
-        diffuseColor.rgb *= 1.0 + vec3(0.2, 0.45, 0.3) * smoothstep(0.6, 1.0, upL) * leafF;`,
-      )
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = bumpV(-vViewPosition, normal, leafH, faceDirection);")
       .replace(
         "#include <lights_fragment_end>",
         `#include <lights_fragment_end>
         {
           vec3 Lw = lampAt(vLp);
-          float g = 1.0 - clamp(abs(dot(nGeo, normalize(vViewPosition))), 0.0, 1.0);
-          totalEmissiveRadiance += Lw * (diffuseColor.rgb * 1.6 + 1.5 * g * g * g + 0.1 * max(upL, 0.0));
+          float g = 1.0 - clamp(abs(dot(normal, normalize(vViewPosition))), 0.0, 1.0);
+          totalEmissiveRadiance += Lw * (diffuseColor.rgb * 1.2 + 0.7 * g * g) + vec3(1.0, 0.62, 0.3) * 0.1 * g * g * g;
         }`,
       );
   });
@@ -1972,11 +1837,11 @@ function buildWorld() {
     path,
     pathLen,
     sky,
-    inst: { bodies, domes, windows, trees, farTrees, posts, bulbs, arches, pillars, cones },
+    inst: { bodies, domes, windows, trees, posts, bulbs, arches, pillars, cones },
     reflLights,
     reflU,
     geo: {
-      groundGeo, bodyGeo, domeGeos, windowGeo, treeGeo, farTreeGeo, postGeo, bulbGeo, archGeo, pillarGeo, pointsGeo, coneGeo,
+      groundGeo, bodyGeo, domeGeos, windowGeo, treeGeo, postGeo, bulbGeo, archGeo, pillarGeo, pointsGeo, coneGeo,
       roadGeo, plazaGeo, hutGeo, porchGeo, frameGeo, portalGeo, leafGeoL, leafGeoR, trimGeoL, trimGeoR, stepGeo, roundWinGeo,
       winFrameGeo, beamGeo, beamGeo2, finialGeo, finialGeo2, crescentGeo, moonGeo,
     },
@@ -2074,7 +1939,6 @@ function buildObjects(w: World, portalMaterial: THREE.Material) {
   inst.domes.forEach((d, i) => addInst(d, geo.domeGeos[i]!, mat.domeMat));
   addInst(inst.windows, geo.windowGeo, mat.windowMat);
   addInst(inst.trees, geo.treeGeo, mat.treeMat);
-  addInst(inst.farTrees, geo.farTreeGeo, mat.treeMat);
   addInst(inst.posts, geo.postGeo, mat.postMat);
   addInst(inst.bulbs, geo.bulbGeo, mat.bulbMat);
   addInst(inst.arches, geo.archGeo, mat.stoneMat);
