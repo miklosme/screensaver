@@ -135,8 +135,6 @@ export interface KoiOptions {
   fogFar: number;
   /** GLSL that defines `vec3 hxSky(vec3 dir)` */
   skyGlsl: string;
-  /** shafts of light the fish brighten in: a line from `a` along unit `dir`, flaring from r0 to r1 */
-  shafts?: { a: Vector3; dir: Vector3; len: number; r0: number; r1: number }[];
 }
 
 export interface Koi {
@@ -161,20 +159,6 @@ export function createKoi(o: KoiOptions): Koi {
   geometry.setAttribute("aFish", new InstancedBufferAttribute(fish, 4));
   geometry.instanceCount = o.count;
 
-  const v3 = (v: Vector3) => `vec3(${v.x.toFixed(3)}, ${v.y.toFixed(3)}, ${v.z.toFixed(3)})`;
-  // a fish brightens while it crosses a shaft: distance from its centre to each shaft's axis
-  const shaftGlsl = (o.shafts ?? [])
-    .map(
-      (sh) => /* glsl */ `
-        {
-          vec3 q = c - ${v3(sh.a)};
-          float u = clamp(dot(q, ${v3(sh.dir)}) / ${sh.len.toFixed(2)}, 0.0, 1.0);
-          float rr = ${sh.r0.toFixed(2)} + ${(sh.r1 - sh.r0).toFixed(2)} * u;
-          float dd = length(q - ${v3(sh.dir)} * u * ${sh.len.toFixed(2)});
-          vLit = max(vLit, (1.0 - smoothstep(rr * 0.3, rr * 1.05, dd)) * smoothstep(0.0, 0.18, u) * (1.0 - smoothstep(0.55, 1.0, u)));
-        }`,
-    )
-    .join("");
   const material = new ShaderMaterial({
     side: DoubleSide,
     uniforms: { uT: { value: 0 }, uEye: { value: new Vector3() }, uFwd: { value: new Vector3(0, 0, -1) } },
@@ -190,7 +174,6 @@ export function createKoi(o: KoiOptions): Koi {
       varying vec3 vN;
       varying float vFin;
       varying float vSeed;
-      varying float vLit;
       void main() {
         float ang = aOrbit.y + uT * aOrbit.w;
         float yy = mod(aOrbit.z + uT * aFish.w, ${o.yRange.toFixed(1)});
@@ -206,8 +189,6 @@ export function createKoi(o: KoiOptions): Koi {
         float d = max(length(perp), 1e-3);
         float need = (3.4 + 0.2 * max(along, 0.0)) * smoothstep(-5.0, 1.0, along) * (1.0 - smoothstep(40.0, 60.0, along));
         c += perp / d * max(0.0, need + aFish.x * 0.6 - d);
-        vLit = 0.0;
-        ${shaftGlsl}
 
         vec3 fwd = normalize(vec3(-sin(ang) * r * aOrbit.w, aFish.w, cos(ang) * r * aOrbit.w));
         vec3 side = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));
@@ -236,7 +217,6 @@ export function createKoi(o: KoiOptions): Koi {
       varying vec3 vN;
       varying float vFin;
       varying float vSeed;
-      varying float vLit;
       ${o.skyGlsl}
       float kHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
       float kNoise(vec2 p) {
@@ -276,8 +256,6 @@ export function createKoi(o: KoiOptions): Koi {
         float ndl = dot(n, normalize(vec3(-0.35, 1.0, -0.6))) * 0.5 + 0.5;
         float rim = pow(1.0 - max(dot(n, V), 0.0), 2.5);
         col = col * (0.42 + 0.8 * ndl) + vec3(1.0, 0.55, 0.2) * rim * 0.35;
-        // in a shaft of light the lantern flares up, its rim catching the beam
-        col += (col * 0.55 + vec3(1.0, 0.6, 0.26) * (0.18 + 0.6 * rim)) * vLit;
 
         float dist = length(cameraPosition - vW);
         float f = smoothstep(${o.fogNear.toFixed(1)}, ${o.fogFar.toFixed(1)}, dist);
