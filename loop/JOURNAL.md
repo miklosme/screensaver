@@ -351,3 +351,39 @@ Learned:
   diff.
 - Frame cost 3.26 ms of 4.0; bundle 312 kB of 400, growing about 7 kB a pass.
 
+## Pass 010 (2026-11-13)
+
+Slices:
+- O11 orbit · The window rooms, corrected and further out (opus): both commits kept, no
+  regressions.
+- B10 burrow · Round doorway rims (fable) kept; its second commit, the relief ("Doorways
+  grown"), reverted on astra's regression, which the frames confirm.
+- H13 helix · Ripples you can see (opus, sent back once as H13b) reverted: all three say the
+  cell web buries the coffers. Caustics are parked (H14).
+- D3 dollhouse · Rebuilt around fall (fable) not merged: short at 15.5 and 22 by its worker's
+  account and mine. Branch `t3/dollhouse-fall-rail` kept; it is pass 011's keystone.
+- S1 stage 1: four proposals for the fifth world, written by four Fable designers from kits
+  dealt by a script; tracked in `loop/designs/pass-010/`, summarised for the owner (question 15).
+Gate: frame cost worst 3.11 ms (orbit), loop worst 12 ms, seams 0.00–0.31% RMSE, bundle 314 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.3, burrow 7.0, dollhouse 6.3, orbit 8.0. The helix score was
+given to the reverted ripples; the burrow score to the reverted relief
+(`loop/out/pass-010/reviewed/`). The dollhouse was not touched and fell 0.4: noise.
+Learned:
+- Twice more I merged what I had doubts about in writing (the newel's net, the rims'
+  "stitching") and the panel named exactly that. The rule now: a slice I describe with a
+  doubt is sent back or left out. No exceptions for slices already sent back once.
+- Caustics joined the dials pushed every way (too strong, invisible, too strong). A reviewer
+  who asks for an effect "at 0.25 to 0.4 of the albedo" will still call the result a
+  regression. Their fixes describe a direction, not a setting.
+- A migration judged by its own pass is cleaner: D3 is reviewed alone in pass 011, so its
+  verdict is not mixed with surface slices.
+- The designers' method worked: every proposal struck its five obvious premises, and the four
+  are unlike each other and unlike the existing worlds. Dealing table rows without
+  replacement mattered: the first deal, with replacement, gave two designers the same law,
+  light and movement.
+- D3's worker found that the previous scene's portal shows what lies on the line from the
+  camera through the joint, about 16° off the view's centre until t≈3: openings should put
+  their focal point on that line.
+- Bundle 314 kB of 400: a fifth scene of about 50 kB fits, a sixth would not without trimming.
+

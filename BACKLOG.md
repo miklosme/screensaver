@@ -28,69 +28,54 @@ owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
   t=22, gate green, burrow pixel-identical; short at helix:0, 2.5 (not seen from below) and 19
   (a wider, flatter approach). Frames: `loop/out/pass-005/workers/K7/after/helix-three-columns.jpg`.
   D3, O4 and S1 below wait on the same answer.
-- **D3 dollhouse · Rebuilt around fall** — the dollhouse rides the rail's fall stretch
-  (`season(2)`; the header of `src/scenes/rail.ts` is the contract) and is at least as good a
-  picture as its legacy sheet in every frame: the garden's doorways, flower beds and hoops
-  stand along the track, the opening shows the garden with the navy doorway as its focal
-  point, the exit door on its plinth fills the screen at the end.
-  Taken in pass 010 without waiting for question 12: the owner's note asks for all four scenes
-  on the rail, the joints allow a rail scene between two legacy ones, and the helix's trouble
-  (a view from below that the level approach cannot give) does not apply to a garden seen
-  from eye height. The worker may reshape fall's body with the scene (frozen: the shared
-  approach, the joint state, summer, and fall's last 7 units if the orbit ever builds on
-  them). What made the burrow land: a per-frame list of what must be on screen, a plan
-  drawing and a per-second "what is in frame" table before building
-  (`loop/out/pass-003/workers/B5/after/`), judged against the legacy sheet.
-  Files: `src/scenes/rail.ts` (fall's data only), `src/scenes/dollhouse.tsx`,
-  `src/scenes/dollhouse/garden.ts` · Worker: fable · Frames: the whole dollhouse sheet against
-  `loop/out/pass-009/dollhouse.jpg`, burrow:22 burrow:24.5, the burrow sheet unchanged ·
-  Source: owner, pass 001
+- **D3 dollhouse · Rebuilt around fall (finishing)** — the first try (pass 010, commit `545c4bc`
+  on branch `t3/dollhouse-fall-rail`, unmerged) rides fall with the burrow untouched and is
+  better than the legacy sheet at t=0 to 12 (the navy hall seen close at t=8.5; an arch flown
+  through at t=12). Its worker reported it short, and I agree, on two frames:
+  dollhouse:15.5 (legacy: an arch framing the exit door dead centre; now a 10° tilted horizon
+  and hoops framing an ordinary doorway, the exit out of frame until t=16.5) and dollhouse:22
+  (legacy: the door square on; now 8° off axis and tilted 9° by the shared approach's bank).
+  To finish: (1) as its own commit that applies alone, the shared approach is flown without
+  camera roll (roll only; positions, heading and speed unchanged; commit `40fa788` on branch
+  `t3/helix-spring-keystone` did this once), with burrow:0, 2.5 and 22 shown before and
+  after; (2) the exit framed through an arch or hoop at t=15.5 with a level horizon, and
+  upright and as square-on as the approach allows at t=22.
+  Frames: `loop/out/pass-010/workers/D3/` (sheet, pairs, plan, frame table) · Files:
+  `src/scenes/rail.ts`, `src/scenes/dollhouse.tsx`, `src/scenes/dollhouse/garden.ts`,
+  `README.md` (one sentence) · Worker: fable · Source: owner, pass 001
 - **O4 orbit · Rebuilt around winter** — after D3, the same way. Source: owner, pass 001
-- **S1 new · A fifth world, designed by Fable and built by Opus** — a new scene (index 4, riding
-  spring) as unmistakably different from the first four as they are from one another.
-  Stage 1, the designs (pass 010; needs nothing): three to five Fable designers, each with a
-  kit drawn by a script and not by a model (`shuf` words from `/usr/share/dict/words` plus
-  dice-rolled rows from five small tables: a law of space to break, a material, a scale, a
-  kind of light, a way the inhabitants move), each with a different way in, none seeing the
-  others; each writes ten one-line premises, discards the five it thought of first, and
-  develops the strangest of the rest into a `DESIGN.md` column, a beat sheet on the 25 s
-  timeline and a technique list within the budgets. A forbidden list rules out the four
-  existing worlds and a model's first ideas (floating islands, neon city, coral reef, crystal
-  cave, clockwork, library, forest, space station, candy land). The proposals go to
-  `loop/out/pass-010/designs/` and a summary to `loop/DIRECTION.md` for the owner to choose
-  from or veto; without an answer by the next pass the director takes the one a blind ranking
-  by a second set of readers puts first.
-  Stage 2, the build (needs the owner's answer to question 12 or K7: the fifth scene rides
-  spring, which the helix does not ride yet, so the scene would take spring as it is).
-  Worker: fable designs, opus builds · Source: owner, pass 001
-- **B10 burrow · Doorways grown (second try: round first)** — two commits that apply alone.
-  (1) The doorway rims are round: the trim tube has 24 or more sides with smooth normals,
-  and nothing else changes (today it has ten, `sweepTube(..., 10, ...)` in `buildDoorFrame`).
-  (2) On the round rim: the wall's scales run onto the outer shoulder and thin out, the lip
-  has fine ridges and a sheen, kept away from the silhouette, with veins on the inner lip and
-  a dark crease at wall and floor (commit `ec0953b` has the shader).
-  Reverted in pass 009: "The newly detailed membrane rims look angular and laminated rather
-  than softly grown" (astra); "polygonal bands and broken highlights. Fine shader grooves
-  cannot hide the coarse rounded form. Increase sweepTube's radial segments from 10 to 24–32"
-  (sol) · Files: `src/scenes/burrow/build.ts`, `src/scenes/burrow/materials.ts` · Worker:
-  fable (short from opus once) · Frames: burrow:8.5 burrow:15.5 · Source: pass 008, 009
-- **O11 orbit · The window rooms, corrected and further out** — (1) a fault in the diff: the
-  room shader gets an unnormalised view ray and finds the lamp's closest point with
-  `dot(L-P, d)`, so the lamp's glow depends wrongly on camera distance: normalise the ray
-  (sol, pass 009). (2) Rooms register on more than the nearest one or two panes: a cheap
-  one-plane parallax for windows between about 12 and 30 px, and the walking figure's head
-  clear of the transom so it reads (fable; the worker's own note). The overhead town stays
-  flat gold · Files: `src/scenes/orbit.tsx` · Worker: opus · Frames: orbit:5 orbit:8.5
-  orbit:12 · Source: pass 009 sol, fable
-- **H13 helix · Ripples you can see** — the caustics of pass 009 sit between its two versions:
-  the first (`0467beb`: bright thread lines over the coffers) was sent back as hiding the
-  carving, the second (`facfb24`, on `loop`) is invisible to one reviewer ("cannot be seen:
-  the pass-009 sheet is indistinguishable from pass-008"). Wanted: at helix:8.5 a viewer
-  comparing with and without sees the ripples at once on the soffit and newel, as soft-edged
-  bright cells (not hairlines), and the coffers still read. Prove it with an A/B of
-  helix:8.5 and a soffit crop. Astra and sol also ask that the ripples follow or brighten
-  near passing koi · Files: `src/scenes/helix.tsx` · Worker: opus · Frames: helix:8.5
-  helix:12 helix:15.5 · Source: pass 009 fable; astra, sol (opportunity)
+- **S1 new · A fifth world** — four proposals are with the owner (question 15 in
+  `loop/DIRECTION.md`; `loop/designs/pass-010/`: roost, slurp, wick, earshot). Pass 011: with
+  no answer, three readers on other models rank them blind against the brief; the build
+  (opus, index 4, riding spring as the rail is) starts in the pass after, from the winner's
+  proposal, with its column added to `DESIGN.md` first. Source: owner, pass 001
+- **B2 burrow · Eyes that belong to the wall** (astra and sol both, pass 010) — every eye sits in
+  a socket: a shallow fleshy collar that blends into the surrounding scales, soft occlusion
+  round it, a wet rim; a closed eye is a curved fold of lid (upper over lower), not a plum
+  ball with a slit; the dome's eyes open towards the hoop over t=20 to 23. Their number and
+  places stay (a busier dome was reverted in pass 005).
+  "Eyes read as separate balls attached to the wall; the closed ones become plain plum
+  spheres with thin slits" (astra); "their dark horizontal openings resemble slots rather
+  than eyelids" (sol) · Files: `src/scenes/burrow/creatures.ts` · Worker: opus · Frames:
+  burrow:8.5 burrow:22 · Source: pass 000 sol, fable; pass 008 sol; pass 010 astra, sol
+- **O12 orbit · The whale's shadow** (asked for by astra and sol as their opportunity in passes
+  009 and 010) — as the whale and calf pass overhead a broad, soft shadow in their shape
+  drifts across the plaza, the road and the nearest roofs, dimming the lamp pools a little as
+  it goes: the creature overhead is suddenly huge and present. From `clock.t` only.
+  Technique: project the whale's position (already a function of `clock.t` in
+  `src/scenes/orbit/sky.ts`) onto the cylinder's ground in the ground and roof shaders as a
+  soft ellipse or two-lobe shape; no shadow map · Files: `src/scenes/orbit.tsx`,
+  `src/scenes/orbit/sky.ts` (exporting the whale's path) · Worker: opus · Frames: orbit:15.5
+  orbit:19 orbit:22 (and two frames a second apart) · Source: pass 008 sol; pass 009 astra,
+  sol; pass 010 sol
+- **B12 burrow · Doorway rims seen from the corridor** — the round rims (kept in pass 010) get,
+  on both sides, only what nobody objected to: the wall's scale rows fading onto the outer
+  shoulder and a wide, soft occlusion gradient where the tube meets wall and floor. No lip
+  ridges, no veins, no dark marks at the feet (reverted in pass 010: "closely spaced contour
+  bands and angular scale marks; the right foot looks dirty and cracked", astra). Fable's
+  point: from the corridor side, which the camera sees most, the beads are "smooth, untextured
+  orange tubes like plastic pool noodles" · Files: `src/scenes/burrow/materials.ts` · Worker:
+  opus · Frames: burrow:8.5 burrow:15.5 burrow:19 · Source: pass 010 fable, astra
 - **H11 helix · Stone and lamp at the lens** — the nearest risers and tread edges beside the
   runner have crisp stone grain and a narrow bevel instead of smeared vertical bands and dark
   seams; the newel's joints are antialiased; the lamp post beside the lens has fluting and
@@ -123,11 +108,12 @@ owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
   Pass 008, fable again: mid-ride frames are "70% uniform red scale wall"; vary scale size and
   hue along the tunnel, eye clusters at the t=12 and t=19 stretches, something overlapping the
   lens edge.
-- **D16 dollhouse · Depth in the garden** (ranked first by astra and sol in pass 009) — WAIT for
-  D3: the garden is being rebuilt along the rail. Then: near, middle and far separate by more
+- **D16 dollhouse · Depth in the garden** (ranked first by astra and sol in pass 009) — after D3: the garden is being rebuilt along the rail. Then: near, middle and far separate by more
   than size, with a soft dark pool under every flower clump, tree and doorway foot and a
   coloured pool of light on the sand in front of each doorway. Mind pass 005: haze that
   washes out the horizon's colour and dunes that hide the skyline were reverted.
+  Pass 010 (all three, ranked first by astra and sol): contact shadow under flower clusters
+  and the plinth's edge, petals with a light gradient, clouds with a lit top.
 - **D10 dollhouse · No two rooms alike, and something moves in each** — the doorways hold
   visibly different impossible rooms again (a twisting room of rotating arch layers comes back
   beside the hall, the rotunda and the avenue), and each has one thing in motion from
@@ -159,27 +145,15 @@ owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
   `src/director/looks.ts` · Files: `src/scenes/burrow/*` (B5 is done) · Worker: opus ·
   Frames: burrow:5 burrow:8.5 burrow:15.5 burrow:22 · Source: pass 000 astra, fable; pass 001
   panel 3/3 (opportunity)
-- **B2 burrow · The walls are watching** — many more eyes, set in fleshy sockets, clustered at the
-  fork arches and in the dome; each opens as the camera nears, follows it and blinks, with a wet
-  highlight and a mint glow on the wall around it.
-  Technique: iris offset towards `uEye` in the fragment shader, eyelid as a signed distance opened
-  by distance along the track, blink hashed per instance · Files: `src/scenes/burrow/creatures.ts`
-  (B5 is done) · Worker: opus · Frames: burrow:2.5 burrow:8.5 burrow:22 · Source: pass 000 sol,
-  fable (opportunity)
-  Pass 003: sleeping eyes read as dark maroon balls or dashes at 15 to 25 units (B5's worker,
-  fable): a lid that takes the wall's colour, or a slit of glow.
-  Pass 006: the dome's eyes are "closed-slit eyes too small to read": scale them up and open
-  them in a wave over t=20 to 23 (fable); staggered slow blinks and gaze (sol, opportunity).
-  One reviewer notes t=0, 2.5, 5 and 19 are nearly the same composition: a ring of eyes
-  opening in sequence between t=10 and 19 would vary the middle.
-  Pass 008, sol: closed eyes in the dome "look like detached purple balls with black cuts":
-  raised lid rims, recessed sockets, an occlusion halo.
-  Pass 009, fable: eight to twelve full-size eyes in the dome wall that open towards the hoop
-  as the camera arrives; the dome's ribs catching the hoop's light.
 - **H12 helix · Beats on the climb** — KEYSTONE (camera): t=8.5, 12 and 15.5 are nearly the same
   composition; the look target swings out over the void at about t=10 and something crosses
   near the lens at about t=13 (fable, pass 008). Waits on the owner's rail decision, since the
   helix's camera track is what question 12 is about.
+- **H14 helix · Caustics** — PARKED: pushed three ways. `0467beb` (thread lines) hid the
+  coffers; `facfb24` (soft lifts, on `loop`) is invisible to one reviewer; `2519c09` +
+  `217a3e8` (a cell web) was reverted by all three as a net over the carving. If ever taken
+  again: isolated soft pools of light under a broad irregular mask, suppressed in the coffer
+  recesses, at about half of 2519c09's gain (astra's and sol's wording), and an A/B at 640 px.
 - **O9 orbit · Bushes** — PARKED: pushed both ways. Smooth ellipsoids with a tiled leaf texture
   drew one reviewer's complaint for three passes ("flat silhouette, no leaf relief"); lumpy
   displaced bushes (pass 008, commit `2726367`, reverted) drew all three ("craggy blue rocks").
@@ -353,6 +327,11 @@ mostly five things, none of which the screensaver did at baseline:
   Faults: O11.
 - **H10 helix · Caustics** (pass 009) — soft ripples of light on soffit and newel, too faint for
   one reviewer: `loop/out/pass-009/workers/H10/compare.jpg`. Leftover: H13.
+- **O11 orbit · The window rooms, corrected and further out** (pass 010) — the lamp is measured
+  along a unit ray (bulbs now show from the street), a figure stands clear of the bars, a
+  hint of depth on mid-distance windows: `loop/out/pass-010/workers/O11/after/`.
+- **B10 burrow · Round doorway rims** (pass 010; the relief on them was reverted, see B12) —
+  32-sided tubes cut finer at the crown: `loop/out/pass-010/frames/burrow-8.5.png`.
 
 ## Rejected
 
@@ -402,3 +381,6 @@ Items tried and dropped, with the reason, so they are not tried the same way twi
   rocks. Parked as O9.
 - **Relief on the ten-sided doorway rims** (pass 009, commit `ec0953b`, reverted) — shading
   detail on coarse geometry shows the facets. Round the tube first: B10's second try.
+- **Caustics as a web of cells** (pass 010, commits `2519c09`, `217a3e8`, reverted) and **lip
+  ridges, veins and foot creases on the doorway rims** (pass 010, commit `47bf969`,
+  reverted) — parked as H14; the rims continue as B12 with scales and a soft seat only.
