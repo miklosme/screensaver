@@ -126,28 +126,35 @@ function whaleGeometry() {
   return g;
 }
 
+/** where the moon hangs: the middle of the cylinder's +z end cap (orbit.tsx puts it at ZH - 0.5) */
+const MOON = new THREE.Vector3(0, 0, 179.5);
+
 function whaleMaterial(o: SkyOptions) {
   return new THREE.ShaderMaterial({
     side: THREE.DoubleSide,
-    uniforms: { uTime: { value: 0 }, uFog: { value: o.fogColor } },
+    uniforms: { uTime: { value: 0 }, uSwim: { value: 0 }, uFog: { value: o.fogColor } },
     vertexShader: /* glsl */ `
       attribute vec3 aData;
-      uniform float uTime;
+      uniform float uSwim;
       varying vec3 vData;
       varying vec3 vObj;
       varying vec3 vW;
       varying vec3 vN;
       void main() {
         vec3 p = position;
-        // the stroke of the tail runs down the back half of the body
-        float w = smoothstep(0.12, -0.6, p.z);
-        float k = p.z * 5.2 + uTime * 1.25;
-        p.y += 0.062 * sin(k) * w * w - 0.012 * sin(k - 1.2) * (1.0 - w);
+        // a travelling wave runs from the chest to the flukes: barely a ripple at the head,
+        // a slow full stroke at the tail
+        float w = smoothstep(0.25, -0.55, p.z);
+        float k = p.z * 4.2 + uSwim;
+        float bend = 0.075 * sin(k) * w * w;
+        p.y += bend - 0.01 * sin(k - 1.4) * (1.0 - w);
+        // flukes stay flat across, but pitch with the stroke
+        if (aData.z > 0.5 && aData.z < 1.5) p.y += abs(p.x) * 0.3 * sin(k - 0.7);
         // flippers row slowly, bending towards their tips
         float reach = max(abs(p.x) - 0.085, 0.0);
-        if (aData.z > 1.5 && aData.z < 2.5) p.y += reach * (0.5 * sin(uTime * 0.8 + reach * 4.0) - 0.15);
-        if (aData.z > 0.5 && aData.z < 1.5) p.y += abs(p.x) * 0.25 * sin(k - 0.6);
-        vec3 n = normalize(normal + vec3(0.0, 0.0, -0.32 * cos(k) * w * w) * normal.y);
+        if (aData.z > 1.5 && aData.z < 2.5) p.y += reach * (0.45 * sin(uSwim * 0.5 + reach * 4.0) - 0.12);
+        float slope = 0.075 * 4.2 * cos(k) * w * w;
+        vec3 n = normalize(normal + vec3(0.0, 0.0, -slope) * normal.y);
         vec4 world = modelMatrix * vec4(p, 1.0);
         vData = aData;
         vObj = position;
@@ -163,15 +170,37 @@ function whaleMaterial(o: SkyOptions) {
       varying vec3 vW;
       varying vec3 vN;
       float wHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-      /** a field of twinkling stars on a wrapped grid */
-      vec3 stars(vec2 g, float density) {
+      /** where a cell's star sits (cell units) */
+      vec2 starAt(vec2 cell) { return cell + vec2(0.22) + 0.56 * vec2(wHash(cell + 3.1), wHash(cell + 7.7)); }
+      float segDist(vec2 p, vec2 a, vec2 b) {
+        vec2 ab = b - a;
+        return length(p - a - ab * clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0));
+      }
+      /**
+       * Constellations on a grid in body units (g.x along the body, g.y round it): a star in some
+       * cells, and faint lines from a star to its neighbours ahead and above, so they join up
+       * into figures. Returns (star, line).
+       */
+      vec2 constellation(vec2 g, float density) {
         vec2 cell = floor(g);
-        float h = wHash(cell);
-        vec2 at = vec2(0.3) + 0.4 * vec2(wHash(cell + 3.1), wHash(cell + 7.7));
-        float d = length(fract(g) - at);
-        float tw = 0.45 + 0.55 * sin(uTime * (1.0 + 2.0 * h) + h * 40.0);
-        float s = step(1.0 - density, h) * (smoothstep(0.16, 0.0, d) * 0.6 + smoothstep(0.05, 0.02, d)) * tw;
-        return mix(vec3(0.35, 0.95, 1.0), vec3(1.0, 0.78, 0.4), step(0.93, wHash(cell + 1.3))) * s;
+        float star = 0.0;
+        float line = 0.0;
+        for (int j = -1; j <= 1; j++)
+          for (int i = -1; i <= 1; i++) {
+            vec2 c = cell + vec2(float(i), float(j));
+            if (wHash(c) < 1.0 - density) continue;
+            vec2 a = starAt(c);
+            float d = length(g - a);
+            float big = 0.6 + 0.8 * wHash(c + 5.3);
+            float tw = 0.75 + 0.25 * sin(uTime * (0.8 + 1.6 * wHash(c + 9.1)) + wHash(c) * 40.0);
+            star += (smoothstep(0.075 * big, 0.0, d) * 1.6 + smoothstep(0.3 * big, 0.0, d) * 0.25) * big * tw;
+            // join to the next star along, or the one round the flank
+            vec2 n1 = c + vec2(1.0, 0.0);
+            vec2 n2 = c + vec2(0.0, 1.0);
+            if (wHash(n1) >= 1.0 - density && wHash(c + 11.0) < 0.75) line = max(line, smoothstep(0.035, 0.0, segDist(g, a, starAt(n1))));
+            if (wHash(n2) >= 1.0 - density && wHash(c + 13.0) < 0.45) line = max(line, smoothstep(0.035, 0.0, segDist(g, a, starAt(n2))));
+          }
+        return vec2(star, line);
       }
       void main() {
         vec3 V = normalize(cameraPosition - vW);
@@ -183,30 +212,42 @@ function whaleMaterial(o: SkyOptions) {
         // 1 on the belly, 0 on the back
         float belly = body > 0.5 ? smoothstep(0.25, -0.45, cos(ang)) : 0.25;
 
-        vec3 back = mix(vec3(0.035, 0.05, 0.24), vec3(0.09, 0.07, 0.36), u);
-        vec3 pale = vec3(0.36, 0.5, 0.86);
+        // ink-blue back, a dusk-blue belly: a silhouette darker than the sky behind it
+        vec3 back = mix(vec3(0.018, 0.024, 0.12), vec3(0.04, 0.035, 0.17), u);
+        vec3 pale = vec3(0.12, 0.16, 0.36);
         vec3 col = mix(back, pale, belly * smoothstep(0.98, 0.5, u));
         // throat pleats from the chin to the flippers
         float pleat = 0.5 + 0.5 * cos(ang * 34.0);
-        col *= 1.0 - 0.3 * pleat * belly * smoothstep(0.52, 0.3, u) * body;
+        col *= 1.0 - 0.35 * pleat * belly * smoothstep(0.52, 0.3, u) * body;
         // fins: dark, with a pale ribbed hem
         float hem = smoothstep(0.55, 1.0, vData.x) * (1.0 - body);
-        col = mix(col, pale * (0.8 + 0.2 * sin(vData.y * 30.0)), hem * 0.6);
+        col = mix(col, pale * (0.8 + 0.2 * sin(vData.y * 30.0)), hem * 0.35);
 
-        // light: the moon ahead, the town's glow from everywhere else
-        float moon = max(dot(n, vec3(0.0, 0.0, 1.0)), 0.0);
+        // light: the moon at the +z end, the town's warm glow from below
+        vec3 L = normalize(vec3(${MOON.x.toFixed(1)}, ${MOON.y.toFixed(1)}, ${MOON.z.toFixed(1)}) - vW);
+        float ndl = dot(n, L);
         float ndv = max(dot(n, V), 0.0);
-        vec3 lit = col * (vec3(0.5, 0.45, 0.75) + vec3(0.5, 0.75, 1.0) * moon);
-        lit += vec3(0.25, 0.6, 1.0) * pow(1.0 - ndv, 3.0) * 0.55;
+        vec3 lit = col * (vec3(0.3, 0.3, 0.5) + vec3(0.4, 0.6, 1.0) * max(ndl, 0.0) * 0.6);
+        // moonlight running along the edge of her back: a thin silver-blue rim that cuts her from the sky
+        float edge = pow(1.0 - ndv, 5.0);
+        float toMoon = smoothstep(-0.2, 0.6, ndl);
+        float onBack = mix(1.0, 0.25, belly);
+        lit += vec3(0.5, 0.75, 1.0) * edge * (0.12 + 1.1 * toMoon) * onBack;
 
-        // her freckles are stars; a denser river of them runs along each flank
-        vec2 g = body > 0.5 ? vec2(u * 46.0, vData.y * 30.0) : vec2(vData.x * 9.0, vData.y * 3.0 + vData.z * 5.0);
-        float flank = body * exp(-pow((abs(vData.y - 0.5) - 0.24) * 9.0, 2.0));
-        lit += stars(g, 0.16 + 0.5 * flank) * (0.9 + 1.2 * flank);
-        lit += stars(g * 2.7 + 11.0, 0.1) * 0.5;
+        // her freckles are stars, and on each flank they join into constellations
+        vec2 g = body > 0.5 ? vec2(u * 30.0, vData.y * 20.0) : vec2(vData.x * 6.0, vData.y * 2.0 + vData.z * 5.0);
+        float flank = body * exp(-pow((abs(vData.y - 0.5) - 0.24) * 7.0, 2.0)) * smoothstep(0.02, 0.12, u) * smoothstep(0.97, 0.8, u);
+        vec2 con = constellation(g, 0.12 + 0.4 * flank);
+        float gold = step(0.88, wHash(floor(g) + 1.3));
+        vec3 starCol = mix(vec3(0.55, 0.92, 1.0), vec3(1.0, 0.8, 0.45), gold);
+        lit += starCol * con.x * (1.2 + 2.6 * flank);
+        lit += vec3(0.35, 0.65, 1.0) * con.y * flank * 0.55;
+        // a dusting of finer stars everywhere
+        vec2 fine = constellation(g * 2.6 + 11.0, 0.08);
+        lit += vec3(0.6, 0.85, 1.0) * fine.x * 0.45;
         // a small bright eye
         vec3 e = vec3(abs(vObj.x) - 0.1, vObj.y + 0.022, vObj.z - 0.325);
-        lit += vec3(1.0, 0.85, 0.55) * smoothstep(0.014, 0.006, length(e)) * 2.0 * body;
+        lit += vec3(1.0, 0.85, 0.55) * smoothstep(0.014, 0.006, length(e)) * 3.0 * body;
 
         float fog = smoothstep(${o.fogNear.toFixed(1)}, ${o.fogFar.toFixed(1)}, length(cameraPosition - vW));
         gl_FragColor = vec4(mix(lit, uFog, fog), 1.0);
@@ -214,6 +255,54 @@ function whaleMaterial(o: SkyOptions) {
         #include <colorspace_fragment>
       }`,
   });
+}
+
+/**
+ * The pair's flight, in the town's unrolled coordinates: [t, s (arc length at the ground), z, height].
+ * Laid out against the camera track so that she is in view where the ride looks:
+ *  - 8 to 12.5: she comes out of the far end towards the camera, upper right;
+ *  - 13 to 14: she sweeps low over the camera;
+ *  - 14.5 to 17: she holds the open sky down the -z end of the town, ahead of the camera, and banks;
+ *  - 18 to 20: she turns back over the plaza;
+ *  - 20.5 to 24.5: she swims for the moon and crosses its disc, behind the hut's finial.
+ * Before 7 she is far off in the glare at the moon end, out of the opening frames.
+ */
+const FLIGHT: [number, number, number, number][] = [
+  [3, 70, 185, 40],
+  [6, 60, 175, 38],
+  [9, 45, 140, 32],
+  [12, 39, 88, 23],
+  [13.5, 46, 30, 23],
+  [14.8, 46, -15, 25],
+  [15.8, 33, -36, 26.5],
+  [16.8, 14, -44, 27],
+  [18, -12, -30, 27],
+  [20.5, 20, 62, 31],
+  [22, 2, 88, 33],
+  [24, -25, 108, 33],
+  [26, -50, 125, 33],
+];
+
+/** Catmull-Rom through the keys, with tangents from the actual key spacing in time */
+function flightAt(t: number, out: number[]) {
+  const K = FLIGHT;
+  const n = K.length;
+  let i = 0;
+  while (i < n - 2 && t > K[i + 1]![0]) i++;
+  const k0 = K[Math.max(0, i - 1)]!;
+  const k1 = K[i]!;
+  const k2 = K[i + 1]!;
+  const k3 = K[Math.min(n - 1, i + 2)]!;
+  const h = k2[0] - k1[0];
+  const s = Math.min(1, Math.max(0, (t - k1[0]) / h));
+  const s2 = s * s;
+  const s3 = s2 * s;
+  for (let c = 1; c <= 3; c++) {
+    const m1 = ((k2[c]! - k0[c]!) / Math.max(1e-6, k2[0] - k0[0])) * h;
+    const m2 = ((k3[c]! - k1[c]!) / Math.max(1e-6, k3[0] - k1[0])) * h;
+    out[c - 1] = (2 * s3 - 3 * s2 + 1) * k1[c]! + (s3 - 2 * s2 + s) * m1 + (-2 * s3 + 3 * s2) * k2[c]! + (s3 - s2) * m2;
+  }
+  return out;
 }
 
 export interface Sky {
@@ -226,12 +315,10 @@ export interface Sky {
 interface Swimmer {
   mesh: THREE.Mesh;
   size: number;
-  /** angle around the axis, distance from it and position along it at t = 0, and their rates */
-  th: number;
-  rho: number;
-  z: number;
-  dTh: number;
-  dZ: number;
+  /** offset from the flight line in her frame: right, up, forward (in mother lengths) */
+  off: [number, number, number];
+  /** seconds behind the mother on the flight line */
+  lag: number;
   phase: number;
 }
 
@@ -239,12 +326,13 @@ export function createSky(o: SkyOptions, pointsMat: THREE.Material): Sky {
   const root = new THREE.Group();
   const rnd = mulberry32(777);
 
-  // ---- the whales: swimming down the axis into the moon, the calf tucked under her flipper
+  // ---- the whales: a mother and, tucked in at her right flipper, her calf
   const geo = whaleGeometry();
   const mat = whaleMaterial(o);
+  const MOTHER = 30;
   const swimmers: Swimmer[] = [
-    { size: 50, th: -1.7, rho: 20, z: 40, dTh: 0.085, dZ: 4.5, phase: 0 },
-    { size: 20, th: -2.05, rho: 27, z: 56, dTh: 0.087, dZ: 4.5, phase: 2.1 },
+    { size: MOTHER, off: [0, 0, 0] as [number, number, number], lag: 0, phase: 0 },
+    { size: MOTHER * 0.42, off: [-0.12, 0.32, 0.12] as [number, number, number], lag: 0.12, phase: 1.9 },
   ].map((s) => {
     const mesh = new THREE.Mesh(geo, mat);
     mesh.frustumCulled = false;
@@ -364,31 +452,59 @@ export function createSky(o: SkyOptions, pointsMat: THREE.Material): Sky {
   root.add(lanterns);
 
   const pos = new THREE.Vector3();
-  const ahead = new THREE.Vector3();
+  const prev = new THREE.Vector3();
+  const next = new THREE.Vector3();
+  const fwd = new THREE.Vector3();
   const up = new THREE.Vector3();
-  const dir = new THREE.Vector3();
+  const right = new THREE.Vector3();
+  const rel = new THREE.Vector3();
   const m = new THREE.Matrix4();
-  const place = (s: Swimmer, t: number, out: THREE.Vector3) => {
-    const th = s.th + s.dTh * t;
-    const rho = s.rho + 1.5 * Math.sin(t * 0.21 + s.phase);
-    return out.set(rho * Math.sin(th), -rho * Math.cos(th), s.z + s.dZ * t);
+  const key = [0, 0, 0];
+  /** a point on the flight line, bent onto the cylinder */
+  const flight = (t: number, out: THREE.Vector3) => {
+    flightAt(t, key);
+    const th = key[0]! / o.R;
+    const rho = o.R - key[2]!;
+    return out.set(rho * Math.sin(th), -rho * Math.cos(th), key[1]!);
   };
 
   return {
     root,
     update(t, eye, forward) {
       mat.uniforms.uTime!.value = t;
+      // a slow stroke, one beat every four seconds
+      mat.uniforms.uSwim!.value = t * 1.6;
       lanternMat.uniforms.uTime!.value = t;
       lanternMat.uniforms.uEye!.value.copy(eye);
       lanternMat.uniforms.uFwd!.value.copy(forward);
       for (const s of swimmers) {
-        place(s, t, pos);
-        place(s, t + 0.5, ahead);
-        const th = s.th + s.dTh * t;
-        // back to the axis, plus a slow roll
-        up.set(-Math.sin(th), Math.cos(th), 0).applyAxisAngle(dir.subVectors(ahead, pos).normalize(), 0.12 * Math.sin(t * 0.3 + s.phase));
-        // Matrix4.lookAt points +z from the target to the eye, i.e. the whale's head at `ahead`
-        m.lookAt(ahead, pos, up);
+        const tt = t - s.lag;
+        flight(tt, pos);
+        flight(tt - 0.25, prev);
+        flight(tt + 0.25, next);
+        fwd.subVectors(next, prev).normalize();
+        // her back is to the axis; she banks into her turns and rolls a little as she swims
+        up.set(-pos.x, -pos.y, 0).normalize();
+        const turn = next.add(prev).addScaledVector(pos, -2); // curvature, towards the inside of the turn
+        right.crossVectors(fwd, up).normalize();
+        const bank = THREE.MathUtils.clamp(turn.dot(right) * 0.06, -0.5, 0.5) + 0.1 * Math.sin(t * 0.55 + s.phase);
+        up.addScaledVector(fwd, -up.dot(fwd)).normalize().applyAxisAngle(fwd, bank);
+        right.crossVectors(fwd, up).normalize();
+        // the calf keeps station off her flipper, drifting in and out a little
+        const k = MOTHER;
+        pos
+          .addScaledVector(right, s.off[0] * k * (1 + 0.12 * Math.sin(t * 0.4 + s.phase)))
+          .addScaledVector(up, s.off[1] * k + (s.lag ? 0.6 * Math.sin(t * 0.7) : 0))
+          .addScaledVector(fwd, s.off[2] * k);
+        // and both keep out of a cone ahead of the camera
+        rel.subVectors(pos, eye);
+        const along = rel.dot(forward);
+        rel.addScaledVector(forward, -along);
+        const d = Math.max(rel.length(), 1e-3);
+        const need = (s.size * 0.25 + 3 + 0.2 * Math.max(along, 0)) * THREE.MathUtils.smoothstep(along, -s.size * 0.5, 2);
+        if (d < need) pos.addScaledVector(rel, (need - d) / d);
+        // Matrix4.lookAt points +z from the target to the eye, i.e. the whale's head along fwd
+        m.lookAt(next.copy(pos).add(fwd), pos, up);
         s.mesh.position.copy(pos);
         s.mesh.quaternion.setFromRotationMatrix(m);
       }
@@ -400,4 +516,103 @@ export function createSky(o: SkyOptions, pointsMat: THREE.Material): Sky {
       lanternMat.dispose();
     },
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// the moon
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The moon on the cylinder's +z end cap (a disc of radius R + 2 in its own xy). A pearl disc lit
+ * from its upper left, kept just over the director's bloom threshold so it glows without
+ * clipping, inside a wide, dim halo that fades into the fog colour of the sky.
+ */
+export function moonMaterial(o: { R: number; fogColor: THREE.Color }) {
+  return new THREE.ShaderMaterial({
+    uniforms: { uFog: { value: o.fogColor } },
+    vertexShader: /* glsl */ `
+      varying vec2 vP;
+      void main() {
+        vP = position.xy / ${o.R.toFixed(1)};
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uFog;
+      varying vec2 vP;
+      float mHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float mNoise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mHash(i), mHash(i + vec2(1, 0)), f.x), mix(mHash(i + vec2(0, 1)), mHash(i + vec2(1, 1)), f.x), f.y);
+      }
+      void main() {
+        const float RD = 0.335;
+        float r = length(vP);
+        float disc = smoothstep(RD + 0.004, RD - 0.004, r);
+        // a sphere seen face on: its normal, lit from the upper left, darkening to the limb
+        vec2 q = vP / RD;
+        vec3 n = vec3(q, sqrt(max(1.0 - dot(q, q), 0.0)));
+        float lam = max(dot(n, normalize(vec3(-0.45, 0.5, 0.75))), 0.0);
+        float limb = pow(n.z, 0.35);
+        // soft grey seas
+        float seas = mNoise(q * 2.3 + 4.0) * 0.6 + mNoise(q * 5.1 - 2.0) * 0.4;
+        float sea = smoothstep(0.48, 0.7, seas);
+        vec3 face = mix(vec3(0.84, 0.92, 1.0), vec3(0.6, 0.72, 0.9), sea * 0.7);
+        vec3 col = face * (0.3 + 0.58 * lam) * limb;
+
+        // the sky around it: faint rings of light, and a wide, low halo
+        float rings = 0.5 + 0.5 * cos(r * 60.0);
+        vec3 sky = uFog * (1.0 + 0.2 * rings * smoothstep(0.34, 0.5, r) * smoothstep(1.1, 0.6, r));
+        float d = max(r - RD, 0.0);
+        sky += vec3(0.1, 0.24, 0.42) * (0.55 * exp(-d * 9.0) + 0.45 * exp(-d * 2.6));
+        gl_FragColor = vec4(mix(sky, col, disc), 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+    fog: false,
+    side: THREE.DoubleSide,
+  });
+}
+
+/**
+ * The finial's beam of light (an open cylinder 56 tall standing on its base): strongest where it
+ * leaves the orb, thinning out as it climbs, so that up in front of the moon it is only a thread.
+ */
+export function beamMaterial(opacity: number, R: number, color = "#7fefff") {
+  return new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color(color) }, uOpacity: { value: opacity } },
+    vertexShader: /* glsl */ `
+      varying float vH;
+      varying vec3 vW;
+      void main() {
+        vH = uv.y;
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vW = w.xyz;
+        gl_Position = projectionMatrix * viewMatrix * w;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      varying float vH;
+      varying vec3 vW;
+      void main() {
+        float a = uOpacity * (0.15 + 0.85 * exp(-vH * 4.0)) * smoothstep(1.0, 0.75, vH);
+        // where it crosses the moon's disc on screen it all but goes out, so the disc stays whole
+        vec3 toMoon = vec3(${MOON.x.toFixed(1)}, ${MOON.y.toFixed(1)}, ${MOON.z.toFixed(1)}) - cameraPosition;
+        float disc = ${(0.335 * R).toFixed(2)} / length(toMoon);
+        float off = acos(clamp(dot(normalize(vW - cameraPosition), normalize(toMoon)), -1.0, 1.0));
+        a *= mix(0.22, 1.0, smoothstep(disc * 0.85, disc * 1.6, off));
+        gl_FragColor = vec4(uColor * a, 1.0);
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
 }
