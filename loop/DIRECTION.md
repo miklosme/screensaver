@@ -140,6 +140,28 @@ other work in the meantime.
    for you to pick from or veto. Nothing of the fifth world is built until you choose or a
    pass goes by without an answer. Say stop here if you want neither.
 
+**From pass 010: the fifth world, four proposals to choose from**
+
+15. Four Fable designers each wrote a proposal for the fifth world, from kits dealt by a script
+   (`loop/designs/pass-010/kits.json`); none saw the others. The full proposals are in
+   `loop/designs/pass-010/`. Pick one, mix two, or veto all four. Nothing is built yet.
+
+   | | Premise | Exit | Palette | The gimmick |
+   |---|---|---|---|---|
+   | **roost** | A giant porcelain hen dozes on a floor as thin as a plate; a second place hangs upside down from the underside of the same floor, and the camera rises through a missing shard from one to the other. | The hen is the lid of a covered dish: she floats up and the gap under her is the window. | Bone white, celadon, cobalt brushwork, moss-dark, a seam of gold. | The floor has two sides: a lamp below is a nest above. |
+   | **slurp** | A tea tray flooded with glowing tea, where one endless looping straw runs from a teacup-sized sleeper, round the teapot, to a soap bubble. | The soap bubble on the straw's tip, swelling with the sleeper's breath. | Primrose light from below, bottle green, celadon and bone-white porcelain, vermilion. | Down is whatever is nearest: tea pours up, stacks curl over, the floor is the lamp. |
+   | **wick** | A ballroom at white noon where every candle is out and every reflection is lit: the candles are danced across the floor by their own reflections, which have legs. | The one lit flame in the room, on a taper thinner than a wrist. | Milk white, soot black, sealing-wax vermilion, primrose flame. | The reflection is the real one. |
+   | **earshot** | A pocket sewn from two pressed leaves where distance is loudness: leaf party-horns unroll to toot and arrive, curl up and recede. | A plumb line hung from a twig at a leaf's tip; the window is the blur of the humming thread. | Sunlit yellow-green, moss, straw-pale, russet, heliotrope. | Loud is near. |
+
+   My view, for what it is worth: **wick** is the furthest from the four existing worlds (the
+   only white-and-black one, with a joke that reads in every frame) and **roost** has the
+   best exit and the best reveal (you fly under the floor, then find the lamp was a nest).
+   **slurp** is charming but shares its porcelain and tea with roost and puts a round pot in
+   the middle of a climbing turn, next door to the helix's column. **earshot** has to show a
+   law about sound in a silent screensaver, which its own designer lists as the first risk.
+   If you do not choose, pass 011 will have three readers on other models rank the four
+   blind, and I will build the one they put first. It rides spring as the rail is today.
+
 ## Handled
 
 Notes the director has acted on, each with the pass number.
