@@ -90,21 +90,31 @@ vec3 lampAt(vec3 p) {
 }`;
 
 /**
- * The moon hangs at the +z end of the cylinder. Middle-distance silhouettes catch a faint cool rim
- * on the side that faces it, added after the air so towers part from the sky and from each other.
- * It is gated hard to moon-facing normals and dies out again in the far air, so the town overhead
- * sinks into depth instead of being outlined. Lit materials only (they have `normal` and
- * `vViewPosition`); kept under the bloom threshold so it reads as an edge.
+ * The moon hangs at the +z end of the cylinder. Silhouettes catch a cool rim on the side that faces
+ * it, added after the air so towers part from the sky. It is strongest on the middle-distance towers
+ * and on moon-facing normals; overhead it is kept to a restrained edge, because there the layers
+ * already part by value (`LAYER_GLSL`). Lit materials only (they have `normal` and `vViewPosition`);
+ * kept under the bloom threshold so it reads as an edge.
  */
 const RIM_GLSL = /* glsl */ `
   {
     vec3 nW = transpose(mat3(viewMatrix)) * normal;
     float graze = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0);
     float e = ${EXT_GLSL};
-    float rim = graze * graze * graze * graze * smoothstep(0.2, 0.85, nW.z)
-      * smoothstep(0.08, 0.3, e) * (1.0 - 0.8 * smoothstep(0.42, 0.75, e));
-    gl_FragColor.rgb += vec3(0.17, 0.25, 0.52) * 0.6 * rim;
+    float rim = graze * graze * graze * (0.2 + 0.8 * smoothstep(-0.1, 0.7, nW.z))
+      * smoothstep(0.08, 0.35, e) * (1.0 - 0.25 * smoothstep(0.5, 0.8, e));
+    gl_FragColor.rgb += vec3(0.17, 0.25, 0.52) * 0.8 * rim;
   }`;
+
+/**
+ * Value between the layers: across the town overhead a nearer tower is a step lighter and a touch
+ * warmer than the street it hangs from and the towers behind it, so successive layers separate
+ * without an outline on each.
+ */
+const LAYER_GLSL = /* glsl */ `
+  gl_FragColor.rgb *= mix(vec3(1.0), vec3(1.08, 1.05, 1.0), smoothstep(50.0, 90.0, vFogDepth))
+    * mix(vec3(1.0), vec3(0.8, 0.82, 0.92), smoothstep(100.0, 230.0, vFogDepth));
+`;
 
 /** overlapping round shingles in cell units (rows run up `sv.y`): x is the tone, y a height for a bump */
 const SHINGLE_GLSL = /* glsl */ `
@@ -212,6 +222,7 @@ function withAir(
       `#include <fog_fragment>
       #ifdef USE_FOG
         gl_FragColor.rgb = mix(gl_FragColor.rgb, ${AIR_GLSL}, clamp(${EXT_GLSL} * ${k.toFixed(3)}, 0.0, 1.0));
+        ${LAYER_GLSL}
         ${rim ? RIM_GLSL : ""}
       #endif`,
     );
@@ -1188,6 +1199,10 @@ function buildWorld() {
           #endif
           diffuseColor.rgb *= mix(1.0, m, fade);
           diffuseColor.rgb *= mix(0.3, 1.0, smoothstep(0.0, 2.2, h)); // contact shade at the foot
+          #ifdef USE_FOG
+            // overhead, a tower brightens towards its tip: it stands out of the darker street it hangs from
+            diffuseColor.rgb *= 1.0 + 0.8 * smoothstep(0.35, 0.75, ${EXT_GLSL}) * smoothstep(0.15, 1.0, h / vTw.z);
+          #endif
         }`,
       );
   }, true);
