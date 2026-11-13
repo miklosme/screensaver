@@ -186,6 +186,42 @@ export function createGarden(o: GardenOptions): Garden {
     g.setAttribute("aPlace", new InstancedBufferAttribute(place, 4));
     g.setAttribute("aLook", new InstancedBufferAttribute(look, 4));
     g.instanceCount = COUNT;
+    // each flower's dark foot: a little soft pool on the sand, under the head and leaning away from
+    // the sun (a fan: aPart 1 at its middle, 0 round its edge, which is what softens it)
+    {
+      const fp: number[] = [];
+      const fa: number[] = [];
+      for (let k = 0; k < 8; k++) {
+        const a0 = (k / 8) * TAU;
+        const a1 = ((k + 1) / 8) * TAU;
+        fp.push(0, 0, 0, Math.cos(a1), 0, Math.sin(a1), Math.cos(a0), 0, Math.sin(a0)); // facing up
+        fa.push(1, 0, 0);
+      }
+      const fg = geometry(fp, fa);
+      fg.setAttribute("aPlace", g.getAttribute("aPlace"));
+      fg.instanceCount = COUNT;
+      add(
+        fg,
+        o.shadowMaterial(/* glsl */ `
+          attribute float aPart;
+          attribute vec4 aPlace; // foot, height
+          varying vec3 vW;
+          varying float vA;
+          varying vec2 vQ;
+          const vec3 SUN = vec3(${o.sun.x.toFixed(4)}, ${o.sun.y.toFixed(4)}, ${o.sun.z.toFixed(4)});
+          ${o.groundGlsl}
+          void main() {
+            vec2 c = aPlace.xz - normalize(SUN.xz) * aPlace.w * 0.22;
+            vec2 xz = c + position.xz * aPlace.w * 0.42;
+            vW = vec3(xz.x, groundAt(xz) + 0.03, xz.y);
+            // only near: further off a drift's own pool does the work, and the foot is not drawn at all
+            float far = length(cameraPosition - aPlace.xyz);
+            vA = aPart * 0.6 * (1.0 - smoothstep(12.0, 40.0, far));
+            vQ = vec2(0.0);
+            gl_Position = far > 40.0 || aPlace.w == 0.0 ? vec4(2.0, 2.0, 2.0, 1.0) : projectionMatrix * viewMatrix * vec4(vW, 1.0);
+          }`),
+      );
+    }
     add(
       g,
       shader(/* glsl */ `
