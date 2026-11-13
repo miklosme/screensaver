@@ -698,6 +698,7 @@ const DETAIL_GLSL: Record<Detail, string> = {
         float rod = (1.0 - tread) * hxBand(v, 0.43, 0.53, 0.01) * (1.0 - smoothstep(1.5, 1.5 + px, lat));
         float runner = 1.0 - smoothstep(1.28 - px, 1.28 + px, lat);
         stone = mix(stone, pile * shade * 1.5, runner);
+        hxCaM = 1.0 - runner;
         stone = mix(stone, vec3(1.25, 0.8, 0.28) * (0.7 + 0.6 * sin(v * 62.0)), rod);
       }
       diffuseColor.rgb = stone * ao;
@@ -873,6 +874,7 @@ const poolGlsl = (detail: Detail) => /* glsl */ `
               acc += L.w * wrap * win * win / (1.0 + d2);
             }
             hxGlow += diffuseColor.rgb * vec3(1.0, 0.56, 0.24) * 9.0 * acc;
+            hxPoolAcc = acc;
           }`;
 
 /** the door lamps' warm wash on the arch, after the carved normal is known; fog still dims it */
@@ -920,6 +922,61 @@ const RAIL_SHEEN_GLSL = /* glsl */ `
             hxGlow += vec3(1.0, 0.64, 0.3) * (0.3 * spec + far * (0.14 + 0.4 * spec + 0.2 * rim * rim));
           }`;
 
+/**
+ * Light off the void: slow caustic ripples, as on the floor of a pool, over the stone that faces
+ * the void. Two gyroid networks in world space, warped and drifting with uHxT alone, whose zero
+ * lines are sharpened into soft ridges; their thickness is set in pixels (fwidth) so they neither
+ * shimmer far off nor smear by the lens, and fade away once a cell shrinks to a few pixels.
+ */
+const CAUSTIC_FN_GLSL = /* glsl */ `
+        float hxPoolAcc = 0.0;   // the lamps' pool at this fragment, which the ripples fade inside
+        float hxCaM = 1.0;       // 0 where a detail is not stone (the runner)
+        float hxGyrRidge(vec3 p) {
+          float g = dot(sin(p), cos(p.yzx));
+          float fw = fwidth(g) + 1e-4;
+          float w = 0.42 + fw;                                       // broad and soft: no bright thread
+          return exp(-g * g / (w * w * 2.0)) * (1.0 - smoothstep(0.12, 0.4, fw));
+        }
+        /** two ridge networks, .x teal-white and .y the amber one */
+        vec2 hxCaustic(vec3 w, float t) {
+          vec3 q = w + vec3(0.08, 0.035, -0.055) * t;            // the slow drift up the slanted axis
+          q += 0.22 * sin(q.zxy * 0.9 + vec3(0.0, 2.1, 4.2) + t * 0.08);
+          float a = hxGyrRidge(q * 2.6 + vec3(0.0, t * 0.05, 0.0));
+          float b = hxGyrRidge(q.zyx * 2.1 - vec3(t * 0.04, 0.0, t * 0.03) + 1.7);
+          return vec2(max(a, b) + 0.6 * a * b, b);
+        }`;
+/** how much each detail catches the ripples: facing the void (outward, down), near the lens */
+const causticGlsl = (detail: Detail) => {
+  const face: Partial<Record<Detail, string>> = {
+    stair: "0.75 * max(-nw.y, 0.0) + 0.8 * max(dot(nw.xz, rad), 0.0)",
+    column: "0.25 + 0.75 * max(dot(nw.xz, rad), 0.0)",
+    wall: "0.6 * max(-dot(nw.xz, rad), 0.0)",
+    keyhole: "0.3",
+  };
+  const near: Partial<Record<Detail, string>> = {
+    stair: "1.0 - smoothstep(4.0, 15.0, dist)",
+    column: "1.0 - smoothstep(3.0, 12.0, dist)",
+    wall: "1.0 - smoothstep(8.0, 22.0, dist)",
+    keyhole: "1.0 - smoothstep(10.0, 30.0, dist)",
+  };
+  /** the newel is close and lit flat, so it needs more than the soffit to show the same soft lift */
+  const gain: Partial<Record<Detail, string>> = { stair: "0.2", column: "0.3", wall: "0.18", keyhole: "0.18" };
+  if (!face[detail]) return "";
+  return /* glsl */ `
+          {
+            vec3 nw = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
+            vec2 rad = normalize(vHxW.xz + 1e-4);
+            float dist = length(vHxW - cameraPosition);
+            float k = clamp(${face[detail]}, 0.0, 1.0) * (${near[detail]}) * hxCaM;
+            k *= 1.0 - smoothstep(0.02, 0.25, hxPoolAcc);         // gone inside a lamp's pool
+            if (k > 0.004) {
+              vec2 c = hxCaustic(vHxW, uHxT);
+              vec3 tint = vec3(0.55, 0.95, 0.9) * c.x + vec3(0.95, 0.62, 0.3) * 0.45 * c.y;
+              hxGlow += diffuseColor.rgb * tint * ${gain[detail]} * k;          // a soft lift of the stone, read second
+            }
+          }`;
+};
+
 function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
   mat.onBeforeCompile = (s) => {
     s.uniforms.uHxT = hxTime;
@@ -960,6 +1017,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
         uniform vec4 uHxPool[${POOL_N}];
         vec3 hxGlow = vec3(0.0);
         float hxH = 0.0; // carved height (metres) the bumped details write; the normal follows it
+        ${CAUSTIC_FN_GLSL}
         float hxHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         /** integer lattice hash: exact, so the two sides of a cell wall always agree */
         float hxH3(ivec3 c) {
@@ -1014,8 +1072,8 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             float det = dot(sx, r1);
             vec3 grad = sign(det) * (dFdx(hxH) * r1 + dFdy(hxH) * r2);
             normal = normalize(abs(det) * normal - grad);
-          }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (POOLED.includes(detail) ? poolGlsl(detail) : "")
-          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : "") + (detail === "rail" ? RAIL_SHEEN_GLSL : "") + (detail === "wall" ? BEAM_LIT_GLSL : ""),
+          }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (POOLED.includes(detail) ? poolGlsl(detail) : "") + causticGlsl(detail)
+          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : "") + (detail === "rail" ? RAIL_SHEEN_GLSL : "") + (detail === "wall" ? BEAM_LIT_GLSL : "") + causticGlsl(detail),
       )
       .replace(
         "#include <tonemapping_fragment>",
