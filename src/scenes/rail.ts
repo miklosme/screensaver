@@ -32,9 +32,12 @@ import { TIMING } from "./types";
  * shape, bank and speed, so the two cameras move identically and the portal is a parallax-correct
  * window into the next world, bends included. That works for ANY pair of scenes, because the
  * APPROACH, the last 5 s of every season, is the same piece of track four times over: level,
- * 18.8 units long, a banked sweep of APPROACH_TURN degrees to the left that straightens out for
- * the last 4.76 units, slowing from 4.4 to RAIL.speed. It is also what lets the loop wrap from the
- * last scene to the first when the scene count is not a multiple of four.
+ * 18.8 units long, a sweep of APPROACH_TURN degrees to the left that straightens out for the last
+ * 4.76 units, slowing from 4.4 to RAIL.speed. It is flown without bank: the exit is in sight all
+ * the way down it, and a camera that leaned into the sweep showed every exit tilted (by up to 9
+ * degrees) until 1.4 s before the takeover. A season's own bends end before the approach begins,
+ * so whatever bank its body carries has eased out by then. It is also what lets the loop wrap
+ * from the last scene to the first when the scene count is not a multiple of four.
  *
  * A JOINT is still in the legacy seam state (see "Legacy" below) from 1.4 s before it to 0.6 s
  * after it: level, straight, not rotating, at RAIL.speed. So a scene on the rail can meet a scene
@@ -249,13 +252,12 @@ interface SeasonDesign {
   turn: Bend[];
   slope: Bend[];
   roll: Bend[];
-  /** radians of bank per unit of curvature in this season's body (the approach has its own) */
+  /** radians of bank per unit of curvature in this season's body (the approach has none) */
   bank: number;
 }
 
 /** degrees the shared approach swings to the left before it straightens out into a joint */
 export const APPROACH_TURN = 26;
-const APPROACH_BANK = 2.8;
 /** no bank beyond this: the horizon stays comfortable */
 const BANK_LIMIT = 34 * DEG;
 /** a stretch (25 s of track) keeps at least this far from itself */
@@ -358,7 +360,8 @@ function shapeOf(d: SeasonDesign, strict: boolean) {
     bank(s: number) {
       let body = 0;
       for (const b of d.turn) body += rate(b) * windowOf(b, s);
-      let a = soft(d.bank * body) + soft(APPROACH_BANK * rate(approach) * windowOf(approach, s));
+      // the approach is flown level: only the season's own bends bank
+      let a = soft(d.bank * body);
       for (const b of d.roll) a += b.deg * DEG * windowOf(b, s);
       return a;
     },
