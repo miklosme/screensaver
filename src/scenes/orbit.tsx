@@ -300,7 +300,10 @@ float wHash(float s, float k) { return fract(sin(s * 91.37 + k * 17.173) * 43758
 float wBox(vec2 p, vec2 c, vec2 h) { vec2 q = abs(p - c) - h; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0); }
 vec3 wRoom(vec2 Q, vec3 d, vec3 lit, float sd, float t, float aa) {
   const float RW = 0.62, Y0 = -0.5, Y1 = 1.42, D = 1.0;
-  d.z = min(d.z, -1e-3);
+  // the ray arrives as camera-to-pane in wall units; measured along a unit ray, every t below is a
+  // true distance from the pane, so the lamp's closest approach dot(L - P, d) means what it says
+  d.z = min(d.z, -1e-3 * length(d));
+  d = normalize(d);
   vec3 P = vec3(Q, 0.0);
   float tx = ((d.x > 0.0 ? RW : -RW) - P.x) / d.x;
   float ty = ((d.y > 0.0 ? Y1 : Y0) - P.y) / d.y;
