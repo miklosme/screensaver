@@ -280,14 +280,174 @@ function withAir(
   mat.customProgramCacheKey = () => `orbit-${key}`;
 }
 
+/** the scene's clock, for who walks past the windows */
+const WINDOW_TIME = { value: 0 };
+/** drawing-buffer height over 1080, so a window gets its room at the same on-screen size at any resolution */
+const WINDOW_RES = { value: 1 };
+
+/**
+ * A lit room behind a window, by interior mapping: the eye ray enters at the pane (wall units:
+ * x across, y up from the sill, z out of the wall) and meets a box behind it. Walls, floor and
+ * ceiling are lit by one lamp; a picture, a shelf or a mirror on the back wall, a curtain at one
+ * side, and now and then someone crossing or a cat on the sill, all picked by the window's seed.
+ */
+const ROOM_GLSL = /* glsl */ `
+uniform float uWinT;
+uniform float uWinRes;
+varying vec3 vRay;
+varying float vSeed;
+float wHash(float s, float k) { return fract(sin(s * 91.37 + k * 17.173) * 43758.5453); }
+float wBox(vec2 p, vec2 c, vec2 h) { vec2 q = abs(p - c) - h; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0); }
+vec3 wRoom(vec2 Q, vec3 d, vec3 lit, float sd, float t, float aa) {
+  const float RW = 0.62, Y0 = -0.5, Y1 = 1.42, D = 1.0;
+  d.z = min(d.z, -1e-3);
+  vec3 P = vec3(Q, 0.0);
+  float tx = ((d.x > 0.0 ? RW : -RW) - P.x) / d.x;
+  float ty = ((d.y > 0.0 ? Y1 : Y0) - P.y) / d.y;
+  float tz = -D / d.z;
+  float th = min(min(tx, ty), tz);
+  vec3 H = P + d * th;
+  float r1 = wHash(sd, 1.0), r2 = wHash(sd, 2.0), r3 = wHash(sd, 3.0), r4 = wHash(sd, 4.0);
+  float r5 = wHash(sd, 5.0), r6 = wHash(sd, 6.0), r7 = wHash(sd, 7.0), r8 = wHash(sd, 8.0);
+  // warm plaster, some rooms creamier, some rosier
+  vec3 cream = vec3(dot(lit, vec3(0.45, 0.4, 0.15))) * vec3(1.0, 0.82, 0.62);
+  vec3 wall = mix(lit, cream, 0.15 + 0.35 * r1) * mix(vec3(1.0), vec3(1.0, 0.85, 0.9), r2 * 0.6);
+  // the lamp: a pendant under the ceiling, or a table lamp in a back corner
+  float side = r3 < 0.5 ? -1.0 : 1.0;
+  vec3 L = r4 < 0.5 ? vec3((r5 - 0.5) * 0.5, Y1 - 0.3, -D * 0.5) : vec3(side * (RW - 0.22), 0.05, -D + 0.2);
+  vec3 c;
+  float edge;
+  if (th == tz) {
+    // back wall: faint wallpaper stripes, and one thing hung or standing on it
+    c = wall * 0.9;
+    edge = min(RW - abs(H.x), min(H.y - Y0, Y1 - H.y));
+    float k = fract(r6 * 3.0);
+    if (r6 < 0.34) {
+      // a framed picture: a cyan night with a moon
+      float px = (k - 0.5) * 0.5;
+      float f = wBox(H.xy, vec2(px, 0.78), vec2(0.17, 0.13));
+      vec3 pic = mix(vec3(0.05, 0.16, 0.3), vec3(0.2, 0.5, 0.6), smoothstep(0.9, 0.66, H.y)) * (0.4 + 0.6 * dot(lit, vec3(0.33)));
+      pic = mix(pic, lit * 1.1, 1.0 - smoothstep(0.03, 0.03 + aa, length(H.xy - vec2(px + 0.06, 0.83))));
+      c = mix(c, pic, 1.0 - smoothstep(-aa, aa, f + 0.025));
+      c = mix(c, lit * 0.18, (1.0 - smoothstep(-aa, aa, f)) * smoothstep(-aa, aa, f + 0.025));
+    } else if (r6 < 0.67) {
+      // a shelf of books
+      float y0 = 0.45 + k * 0.3;
+      float inShelf = step(abs(H.x - (k - 0.5) * 0.3), 0.36);
+      float plank = 1.0 - smoothstep(0.012, 0.012 + aa, abs(H.y - y0));
+      float bi = floor(H.x * 26.0 + sd * 7.0);
+      float bh = 0.1 + 0.08 * wHash(bi, sd);
+      float book = step(y0, H.y) * step(H.y, y0 + bh) * step(0.12, fract(H.x * 26.0 + sd * 7.0)) * step(0.2, wHash(bi, 9.0 + sd));
+      vec3 bc = mix(vec3(0.5, 0.12, 0.1), vec3(0.08, 0.3, 0.35), wHash(bi, 3.0)) * (0.5 + dot(lit, vec3(0.3)));
+      c = mix(c, bc, book * inShelf);
+      c = mix(c, lit * 0.22, plank * inShelf);
+    } else {
+      // a round mirror, catching the lamp
+      vec2 mc = vec2((k - 0.5) * 0.45, 0.78);
+      float m = length(H.xy - mc) - 0.12;
+      c = mix(c, lit * 0.25 + vec3(0.04, 0.06, 0.1), 1.0 - smoothstep(-aa, aa, m));
+      c = mix(c, lit * 0.15, (1.0 - smoothstep(-aa, aa, abs(m) - 0.012)));
+      c += lit * 0.5 * (1.0 - smoothstep(0.0, 0.08, length(H.xy - mc - vec2(-0.04, 0.04)))) * step(m, 0.0);
+    }
+    // a tall dark cupboard against the wall, on the side away from the lamp
+    if (r7 > 0.45) {
+      float cx = -side * (RW - 0.16);
+      float cb = wBox(H.xy, vec2(cx, (Y0 + 1.0) * 0.5), vec2(0.15, (1.0 - Y0) * 0.5));
+      vec3 cc = lit * 0.16 * (1.0 + 0.6 * smoothstep(0.6, 1.0, H.y));
+      cc = mix(cc, lit * 0.06, 1.0 - smoothstep(0.0, aa, abs(H.x - cx) - 0.004));
+      cc = mix(cc, lit * 0.35, (1.0 - smoothstep(0.0, aa, abs(H.y - 0.98) - 0.01)));
+      c = mix(c, cc, 1.0 - smoothstep(-aa, aa, cb));
+    }
+    // a skirting board
+    c = mix(c, lit * 0.12, step(H.y, Y0 + 0.07));
+  } else if (th == ty) {
+    if (d.y < 0.0) {
+      // floorboards and a rug
+      c = lit * vec3(0.42, 0.28, 0.2) * (0.8 + 0.15 * step(0.08, fract(H.x * 7.0 + 0.5 * floor(H.z * 2.0))));
+      float rug = length((H.xz - vec2(0.0, -D * 0.5)) / vec2(0.4, 0.3)) - 1.0;
+      vec3 rc = mix(vec3(0.55, 0.12, 0.16), vec3(0.1, 0.32, 0.38), r7) * (0.4 + dot(lit, vec3(0.3)));
+      c = mix(c, rc, 1.0 - smoothstep(-0.02, 0.02, rug));
+      edge = min(RW - abs(H.x), D + H.z);
+    } else {
+      // ceiling, with a beam
+      c = wall * 0.3 * (1.0 - 0.35 * (1.0 - smoothstep(0.03, 0.035, abs(H.z + D * 0.5))) * step(0.5, r8));
+      edge = min(RW - abs(H.x), D + H.z);
+    }
+  } else {
+    // side walls, a shade deeper, and darker towards the window
+    c = wall * 0.38 * mix(0.4, 1.0, smoothstep(0.0, -D, H.z));
+    edge = min(D + H.z, min(H.y - Y0, Y1 - H.y));
+  }
+  // the lamp's pool, and dusk in the corners
+  vec3 lv = H - L;
+  float pool = 1.0 / (1.0 + 9.0 * dot(lv, lv));
+  c *= (0.4 + 1.5 * pool) * (0.35 + 0.65 * smoothstep(0.0, 0.3, edge));
+  // the lamp itself, seen where the ray passes it
+  float tl = max(dot(L - P, d), 0.0);
+  float lr = length(P + d * min(tl, th) - L);
+  c += lit * 1.6 * (1.0 - smoothstep(0.035, 0.08, lr));
+  // someone crossing the room, now and then
+  if (r8 < 0.42) {
+    float per = 10.0 + 8.0 * r7;
+    float u = fract(t / per + r5) / 0.55;
+    if (u < 1.0) {
+      float zp = -D * (0.22 + 0.2 * r6);
+      float tp = zp / d.z;
+      if (tp < th) {
+        vec2 S = P.xy + d.xy * tp;
+        float dir = r2 < 0.5 ? -1.0 : 1.0;
+        float x = dir * mix(-0.48, 0.48, u) + 0.01 * sin(u * 28.0);
+        vec2 sp = S - vec2(x, 0.0);
+        float bob = 0.012 * sin(u * 28.0 + 1.0);
+        // head, neck and sloping shoulders, a little smaller than the pane so the room shows round them
+        float sh = length((sp - vec2(0.0, 0.8 + bob)) / vec2(0.052, 0.064)) - 1.0;
+        sh = min(sh, (wBox(sp, vec2(0.0, 0.7 + bob), vec2(0.018, 0.04))) / 0.055);
+        sh = min(sh, (wBox(sp, vec2(0.0, 0.32 + bob), vec2(0.045 + 0.05 * smoothstep(0.66, 0.5, sp.y), 0.3)) - 0.035) / 0.055);
+        sh *= 0.055;
+        c = mix(c, lit * 0.05 + vec3(0.03, 0.02, 0.05), 1.0 - smoothstep(-aa, aa, sh));
+      }
+    }
+  } else if (r8 > 0.88) {
+    // a cat on the sill, its tail swinging
+    float tp = -0.05 / d.z;
+    vec2 S = P.xy + d.xy * tp;
+    vec2 cp = S - vec2((r1 - 0.5) * 0.24, 0.0);
+    float cat = min(length((cp - vec2(0.0, 0.085)) / vec2(0.07, 0.085)) - 1.0, length(cp - vec2(0.0, 0.2)) / 0.05 - 1.0);
+    float ear = max(cp.y - 0.285 + 0.06 * abs(abs(cp.x) - 0.03) / 0.022, 0.2 - cp.y);
+    cat = min(cat, ear * 25.0);
+    float sw = sin(t * 1.7 + sd * 13.0);
+    vec2 tq = cp - vec2(0.07, 0.02);
+    float tail = abs(tq.y - 0.5 * tq.x - 1.6 * sw * tq.x * tq.x) - 0.012;
+    tail = max(tail, max(-tq.x, tq.x - 0.12 - 0.02 * sw));
+    cat = min(cat, tail * 25.0);
+    c = mix(c, lit * 0.08 + vec3(0.02, 0.015, 0.04), 1.0 - smoothstep(-aa * 25.0, aa * 25.0, cat));
+  }
+  // a curtain drawn to one side, lit through
+  if (r3 > 0.3 && r3 < 0.7) {
+    float tcz = -0.07 / d.z;
+    if (tcz < th) {
+      vec2 S = P.xy + d.xy * tcz;
+      float cw = 0.06 + 0.08 * r5 - 0.05 * S.y;
+      float cov = smoothstep(-aa, aa, side * S.x - (0.25 - cw));
+      vec3 fab = mix(vec3(0.9, 0.25, 0.25), vec3(0.3, 0.6, 0.65), r1) * lit.r;
+      vec3 cc = mix(lit, fab, 0.55) * (0.45 + 0.2 * sin(S.x * 70.0 + sd * 5.0)) * (0.8 + 0.2 * smoothstep(0.0, 1.0, S.y));
+      c = mix(c, cc, cov);
+    }
+  }
+  return c;
+}
+`;
+
 /**
  * Lit windows are lights, not wall: distance takes only a little of their saturation and none of
  * their brightness beyond three's own fog, so the town overhead stays inhabited.
  */
 function windowAir(mat: THREE.Material) {
   mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uWinT = WINDOW_TIME;
+    sh.uniforms.uWinRes = WINDOW_RES;
     sh.vertexShader = sh.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;")
+      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;\nvarying vec3 vRay;\nvarying float vSeed;")
       .replace(
         "#include <begin_vertex>",
         `#include <begin_vertex>
@@ -298,10 +458,16 @@ function windowAir(mat: THREE.Material) {
           vec3 wc = (modelMatrix * instanceMatrix * vec4(0.0, 0.5, 0.0, 1.0)).xyz;
           if (distance(wc, cameraPosition) > 52.0) transformed.xy = clamp(transformed.xy, vec2(-0.5 - 0.08 / ww, -0.1 / wh), vec2(0.5 + 0.08 / ww, 1.0));
           vWq = vec4(transformed.x * ww, transformed.y * wh, ww, wh);
+          // the eye ray in the wall's own frame (wall units), for the room behind the pane
+          mat4 wm = modelMatrix * instanceMatrix;
+          vec3 wv = (wm * vec4(transformed, 1.0)).xyz - cameraPosition;
+          vRay = vec3(dot(wv, normalize(wm[0].xyz)), dot(wv, normalize(wm[1].xyz)), dot(wv, normalize(wm[2].xyz)));
+          vec3 ip = instanceMatrix[3].xyz;
+          vSeed = floor(fract(dot(floor(ip * 7.0), vec3(0.1031, 0.1173, 0.0973))) * 4096.0);
         }`,
       );
     sh.fragmentShader = sh.fragmentShader
-      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;")
+      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;\n" + ROOM_GLSL)
       .replace(
         "#include <color_fragment>",
         /* glsl */ `#include <color_fragment>
@@ -320,6 +486,12 @@ function windowAir(mat: THREE.Material) {
         float bars = max(1.0 - smoothstep(0.016, 0.016 + pxw, abs(Q.x)), 1.0 - smoothstep(0.016, 0.016 + pxw, abs(Q.y - yc)));
         vec3 frameCol = lit * 0.06 + vec3(0.025, 0.02, 0.05);
         vec3 c = lit * mix(1.0, glow, detail);
+        // near windows look into a lit room; a window under ~30 px stays a flat gold pane, as do doors
+        float inner = (1.0 - smoothstep(0.012, 0.026, pxw * uWinRes)) * step(vWq.w, 1.5);
+        if (inner > 0.0 && dw < 0.01) {
+          vec3 room = wRoom(Q, vRay, lit, floor(vSeed + 0.5) / 4096.0, uWinT, pxw * 2.5);
+          c = mix(c, room * 1.45 + lit * 0.06 * glow, inner);
+        }
         c = mix(c, frameCol, detail * max(reveal * 0.85, bars * step(dw, 0.0)));
         diffuseColor.rgb = c;
         // a lit sill under the opening, and the glow the window throws on the brick round it
@@ -2112,6 +2284,8 @@ export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
 
     const pm = world.mat.pointsMat.uniforms;
     pm.uTime!.value = t;
+    WINDOW_TIME.value = t;
+    WINDOW_RES.value = state.gl.domElement.height / 1080;
     pm.uScale!.value = state.gl.domElement.height / (2 * Math.tan((camera.fov * Math.PI) / 360));
   });
 
