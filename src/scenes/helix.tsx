@@ -624,26 +624,60 @@ const DETAIL_GLSL: Record<Detail, string> = {
       float ao = 1.0;
       float shade = clamp(dot(diffuseColor.rgb, vec3(0.42)), 0.35, 1.25);
       vec3 stone = diffuseColor.rgb * hxTint(vHxW) * (1.0 + 0.1 * g);
-      hxH += 0.0035 * g;
-      if (kind < 1.5) {
-        float vm = v * 1.37;                                   // metres back from the nose
-        float nose = max(0.0, 1.0 - vm / 0.1);
-        hxH -= 0.06 * nose * nose;                             // the bullnose rolls over
-        stone *= 1.0 + 0.1 * hxBand(vm, 0.04, 0.12, wpx);       // worn bright lip
-        ao *= mix(0.55, 1.0, smoothstep(1.37, 1.05, vm));       // where the next riser rises
-      } else if (kind < 2.5) {
-        float vm = v * ${glf(THICK)};                          // metres down from the nose
-        float nose = max(0.0, 1.0 - vm / 0.09);
-        hxH -= 0.06 * nose * nose;
-        float scotia = hxBand(vm, 0.1, 0.15, wpx);              // a shadowed groove under the nose
-        hxH -= 0.02 * scotia;
-        ao *= 1.0 - 0.4 * scotia;
-        // a sunk panel of flutes on the stone either side of the runner
-        float panel = hxBand(vm, 0.2, 0.44, wpx) * smoothstep(1.45, 1.5, lat);
-        float flute = cos(lat * ${glf(TAU / 0.16)});
-        hxH += panel * (0.006 * flute * fine - 0.012);
-        stone *= 1.0 - panel * (0.1 - 0.06 * flute * fine);
-        ao *= mix(0.45, 1.0, smoothstep(0.53, 0.3, vm));        // foot, against the tread below
+      float runner = kind < 2.5 ? 1.0 - smoothstep(1.28 - px, 1.28 + px, lat) : 0.0;
+      hxH += 0.0035 * g * (kind < 2.5 ? runner : 1.0);
+      if (kind < 2.5) {
+        // Treads and risers. Under the runner the carving stays as it was, a height whose normal
+        // follows from screen derivatives; the stone either side is carved analytically, its slope
+        // per metre of (lat, vm) going to hxGT, so a narrow arris and thin lines stay crisp by the
+        // lens: a rounded nosing that catches the light, a fine quirk, thin dark contact lines.
+        float sc = kind < 1.5 ? 1.37 : ${glf(THICK)};
+        float vm = v * sc;                                      // metres back from, or down from, the nose
+        // the stone keeps its bedding, but its broad mottle gives way to the finer carved grain
+        stone *= (1.0 + 0.1 * (g - 0.6 * (g - (hxBed - 0.5) * 0.96))) / (1.0 + 0.1 * g);
+        float aoR = 1.0, aoS = 1.0;
+        vec2 G = vec2(0.0);                                     // d(height) / d(lat, vm) of the stone
+        float arris = max(0.0, 1.0 - vm / 0.035);
+        float bf = 1.0 - smoothstep(0.008, 0.02, wpx);          // the arris's slope, gone once it is a pixel
+        G.y += 0.06 / 0.035 * arris * bf;                       // of the height -0.03 arris^2
+        float lip = hxBand(vm, 0.004, 0.026, wpx);
+        float lw = max(0.006, wpx * 1.2);
+        if (kind < 1.5) {
+          float nose = max(0.0, 1.0 - vm / 0.1);
+          hxH -= runner * 0.06 * nose * nose;                   // the bullnose rolls over
+          aoR *= mix(0.55, 1.0, smoothstep(1.37, 1.05, vm));
+          stone *= 1.0 + 0.22 * lip;                            // the worn arris, bright
+          // where the next riser stands on the tread: a soft hollow and a thin dark line
+          aoS *= mix(0.78, 1.0, smoothstep(1.25, 1.02, vm)) * (1.0 - 0.5 * smoothstep(1.25 - lw - wpx, 1.25 - wpx * 0.3, vm));
+        } else {
+          float nose = max(0.0, 1.0 - vm / 0.09);
+          float scotia = hxBand(vm, 0.1, 0.15, wpx);
+          hxH -= runner * (0.06 * nose * nose + 0.02 * scotia);
+          aoR *= (1.0 - 0.4 * scotia) * mix(0.45, 1.0, smoothstep(0.53, 0.3, vm));
+          stone *= 1.0 + 0.12 * lip;
+          // a fine quirk under the arris
+          float qd = (vm - 0.07) / 0.009;
+          float quirk = exp(-qd * qd);
+          G.y += 0.005 * 2.0 * qd / 0.009 * quirk;
+          aoS *= 1.0 - 0.3 * quirk;
+          // a sunk panel of flutes on the stone either side of the runner
+          float A = smoothstep(0.17, 0.2, vm) * (1.0 - smoothstep(0.41, 0.44, vm));
+          float dA = hxDss(0.17, 0.2, vm) * (1.0 - smoothstep(0.41, 0.44, vm)) - smoothstep(0.17, 0.2, vm) * hxDss(0.41, 0.44, vm);
+          float B = smoothstep(1.45, 1.5, lat), dB = hxDss(1.45, 1.5, lat);
+          // flutes: parabolic channels 16 cm wide meeting in sharp arrises, carved and not painted
+          float fu = fract(lat / 0.16) * 2.0 - 1.0;
+          float hp = -0.01 - 0.01 * (1.0 - fu * fu) * fine;
+          G += vec2(A * dB * hp + A * B * 0.01 * fine * 2.0 * fu * 2.0 / 0.16, dA * B * hp);
+          float panel = A * B;
+          stone *= 1.0 - 0.05 * panel;
+          aoS *= 1.0 - 0.18 * panel * smoothstep(0.3, 0.44, vm);
+          // the foot, on the tread below: a soft hollow and a thin dark contact line
+          aoS *= mix(0.8, 1.0, smoothstep(0.5, 0.3, vm)) * (1.0 - 0.5 * smoothstep(0.5 - lw - wpx, 0.5 - wpx * 0.3, vm));
+        }
+        float st = 1.0 - runner;
+        stone *= 1.0 + 0.16 * hxFineGrain(vHxW, wpx, st, 1.6);
+        hxGT = vec2((vTile.x < 0.0 ? -G.x : G.x), G.y * sc) * st;
+        ao *= mix(aoS, aoR, runner);
       } else if (kind < 3.5) {
         float vm = v * 1.37;
         float cell = (fract(vTile.x / 1.05 + 0.5) - 0.5) * 1.05;
@@ -718,12 +752,7 @@ const DETAIL_GLSL: Record<Detail, string> = {
       if (wpx < 0.12) g += (hxN3(p * 7.0) - 0.5) * 0.11 * (1.0 - smoothstep(0.03, 0.12, wpx));
       vec3 m = hxTint(p) * (1.0 + g);
       // fine sandstone grain, carved and speckled, each octave gone before it shrinks to a few pixels
-      float f1 = 1.0 - smoothstep(0.004, 0.012, wpx);
-      float f2 = 1.0 - smoothstep(0.0012, 0.0035, wpx);
-      vec4 n1 = f1 > 0.0 ? hxN3d(p * 37.0 + 3.1) : vec4(0.5, 0.0, 0.0, 0.0);
-      vec4 n2 = f2 > 0.0 ? hxN3d(p * 113.0 + 17.0) : vec4(0.5, 0.0, 0.0, 0.0);
-      hxG += n1.yzw * (37.0 * 0.002 * f1) + n2.yzw * (113.0 * 0.0007 * f2);
-      m *= 1.0 + 0.14 * ((n1.x - 0.5) * f1 + (n2.x - 0.5) * 1.3 * f2);
+      m *= 1.0 + 0.14 * hxFineGrain(p, wpx, 1.0, 1.0);
       hxSheen = 0.5 + 0.5 * sin(p.x * 1.9 + 2.0 * sin(p.y * 1.3 + p.z * 0.7) + p.z * 2.3);
       float phi = atan(p.z, p.x);
       vec3 dphi = vec3(-p.z, 0.0, p.x) / max(dot(p.xz, p.xz), 1e-4);   // d(phi)/dp
@@ -1071,6 +1100,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
         float hxH = 0.0; // carved height (metres) the bumped details write; the normal follows it
         /** the carved height's slope, per metre of HX_GP, for details that carve analytically */
         vec3 hxG = vec3(0.0);
+        vec2 hxGT = vec2(0.0); // and per unit of vTile.xy, for the stair's faces
         #define HX_GP ${detail === "column" ? "vHxL" : "vHxW"}
         float hxStud = 0.0;  // 1 on the newel's domed studs, which catch a highlight
         float hxSheen = 0.5; // how polished the stone is here, independent of its colour
@@ -1115,6 +1145,21 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
               k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x,
               k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y));
         }
+        /** fine sandstone grain, carved: adds k times its slope (per metre of p) to hxG and returns
+         *  a speckle of about -0.5..0.5; each octave is gone before it shrinks to a few pixels */
+        float hxFineGrain(vec3 p, float wpx, float k, float fq) {
+          wpx *= fq;
+          p *= fq;
+          float f1 = 1.0 - smoothstep(0.004, 0.012, wpx);
+          if (f1 <= 0.0) return 0.0;
+          float f2 = 1.0 - smoothstep(0.0012, 0.0035, wpx);
+          vec4 n1 = hxN3d(p * 37.0 + 3.1);
+          vec4 n2 = f2 > 0.0 ? hxN3d(p * 113.0 + 17.0) : vec4(0.5, 0.0, 0.0, 0.0);
+          hxG += k * fq * (n1.yzw * (37.0 * 0.002 * f1) + n2.yzw * (113.0 * 0.0007 * f2)) / fq;
+          return (n1.x - 0.5) * f1 + (n2.x - 0.5) * 1.3 * f2;
+        }
+        /** smoothstep's slope */
+        float hxDss(float a, float b, float x) { float t = clamp((x - a) / (b - a), 0.0, 1.0); return 6.0 * t * (1.0 - t) / (b - a); }
         /** the grain's base octave, kept for hxTint so the bedding costs no second noise */
         float hxBed = 0.5;
         /** sandstone grain, about -1..1; the finer octaves dissolve once a pixel covers them */
@@ -1147,7 +1192,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             vec3 r1 = cross(sy, normal), r2 = cross(normal, sx);
             float det = dot(sx, r1);
             // hxH's screen derivatives, plus the analytic slope hxG chained through the position's
-            vec3 grad = sign(det) * ((dFdx(hxH) + dot(hxG, dFdx(HX_GP))) * r1 + (dFdy(hxH) + dot(hxG, dFdy(HX_GP))) * r2);
+            vec3 grad = sign(det) * ((dFdx(hxH) + dot(hxG, dFdx(HX_GP))${detail === "stair" ? " + dot(hxGT, dFdx(vTile.xy))" : ""}) * r1 + (dFdy(hxH) + dot(hxG, dFdy(HX_GP))${detail === "stair" ? " + dot(hxGT, dFdy(vTile.xy))" : ""}) * r2);
             normal = normalize(abs(det) * normal - grad);
           }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (detail === "column" ? STUD_GLINT_GLSL : "") + (POOLED.includes(detail) ? poolGlsl(detail) : "") + causticGlsl(detail)
           : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : "") + (detail === "rail" ? RAIL_SHEEN_GLSL : "") + (detail === "wall" ? BEAM_LIT_GLSL : "") + causticGlsl(detail),
