@@ -49,13 +49,13 @@ one seasonal rail the brief asks for, and scenes may be added to the playing ord
 A new scene gets its column here before it is built. `scripts/look.ts` and `scripts/review.ts`
 pick a scene up from `src/scenes/index.ts` as soon as it is registered.
 
-| | helix | burrow | dollhouse | orbit |
-|---|---|---|---|---|
-| Premise | An endless double-helix stair climbing a round arcade shaft. | The Win95 maze with no straight wall: a ribbed living tunnel that forks and curls. | A daylight dune garden of paper-thin doorways whose insides are vast. | A night town wrapped round the inside of a cylinder, so streets hang overhead. |
-| Palette | Sandstone, ivory and amber light against a deep teal void. | Coral, magenta and plum with mint bioluminescence. | Soft pastels: peach, mint, cream, powder blue. The one daylight scene. | Indigo and midnight blue, warm gold lamps, a few cyan accents. |
-| Who lives there | Lantern koi swimming up the shaft. | Eyes in the walls that wake as you pass; glowing mushrooms. | Flowers, pinwheels, paper birds. | A star-freckled whale and her calf; rising paper lanterns. |
-| Exit | A free-standing keyhole arch on a landing. | A spinning hoop in a dead-end dome. | A door on a bare plinth, seen to be empty from behind. | A moon gate on a tiny hut. |
-| The gimmick | The stair never ends. | You are being led, and the walls are watching. | Bigger on the inside. | Up keeps rotating. |
+| | helix | burrow | dollhouse | orbit | roost |
+|---|---|---|---|---|---|
+| Premise | An endless double-helix stair climbing a round arcade shaft. | The Win95 maze with no straight wall: a ribbed living tunnel that forks and curls. | A daylight dune garden of paper-thin doorways whose insides are vast. | A night town wrapped round the inside of a cylinder, so streets hang overhead. | A giant porcelain hen dozes on a floor as thin as a plate; a second place hangs upside down beneath the same floor. |
+| Palette | Sandstone, ivory and amber light against a deep teal void. | Coral, magenta and plum with mint bioluminescence. | Soft pastels: peach, mint, cream, powder blue. The one daylight scene. | Indigo and midnight blue, warm gold lamps, a few cyan accents. | Bone white, celadon haze, cobalt brushwork, moss-dark, a seam of gold, a touch of persimmon. The one near-monochrome scene. |
+| Who lives there | Lantern koi swimming up the shaft. | Eyes in the walls that wake as you pass; glowing mushrooms. | Flowers, pinwheels, paper birds. | A star-freckled whale and her calf; rising paper lanterns. | The hen, nodding off; painted eggs that drift up like bubbles and squeeze through the floor; teetering stacks of crockery. |
+| Exit | A free-standing keyhole arch on a landing. | A spinning hoop in a dead-end dome. | A door on a bare plinth, seen to be empty from behind. | A moon gate on a tiny hut. | The gap under the hen: she is the lid of a covered dish, and she floats up off it. |
+| The gimmick | The stair never ends. | You are being led, and the walls are watching. | Bigger on the inside. | Up keeps rotating. | The floor has two sides: a lamp below is a nest above. |
 
 ## What a good frame has
 

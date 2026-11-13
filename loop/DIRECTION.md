@@ -185,6 +185,19 @@ other work in the meantime.
    So unless you say otherwise here, pass 012 adds roost's column to `DESIGN.md` and starts
    building it (Opus 5.5, index 4, riding spring as the rail is today), with that borrowing.
 
+**From pass 011:**
+
+16. **roost is being built, and its column is in `DESIGN.md`.** You did not choose among the four
+   proposals, the three readers chose roost, and LOOP.md lets me add a new scene's column. I
+   added only the fifth column to the table "The worlds"; nothing else in `DESIGN.md` changed.
+   Remove it, or name another proposal, if you want a different fifth world: the first build
+   lands on `loop` only if the gate passes and the panel accepts it.
+17. **The dollhouse on the rail was reverted a second time, but for planting, not for the
+   camera** (the hall and the empty frame became two doorways; thinner flower beds; a flatter
+   skyline). All three reviewers still scored it 7. A third try in pass 012 starts from that
+   version. One change of the rail did stay: the shared approach is now flown without camera
+   roll, which levels the burrow's last five seconds.
+
 ## Handled
 
 Notes the director has acted on, each with the pass number.

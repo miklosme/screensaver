@@ -28,46 +28,46 @@ owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
   t=22, gate green, burrow pixel-identical; short at helix:0, 2.5 (not seen from below) and 19
   (a wider, flatter approach). Frames: `loop/out/pass-005/workers/K7/after/helix-three-columns.jpg`.
   D3, O4 and S1 below wait on the same answer.
-- **D3 dollhouse · Rebuilt around fall (finishing)** — the first try (pass 010, commit `545c4bc`
-  on branch `t3/dollhouse-fall-rail`, unmerged) rides fall with the burrow untouched and is
-  better than the legacy sheet at t=0 to 12 (the navy hall seen close at t=8.5; an arch flown
-  through at t=12). Its worker reported it short, and I agree, on two frames:
-  dollhouse:15.5 (legacy: an arch framing the exit door dead centre; now a 10° tilted horizon
-  and hoops framing an ordinary doorway, the exit out of frame until t=16.5) and dollhouse:22
-  (legacy: the door square on; now 8° off axis and tilted 9° by the shared approach's bank).
-  To finish: (1) as its own commit that applies alone, the shared approach is flown without
-  camera roll (roll only; positions, heading and speed unchanged; commit `40fa788` on branch
-  `t3/helix-spring-keystone` did this once), with burrow:0, 2.5 and 22 shown before and
-  after; (2) the exit framed through an arch or hoop at t=15.5 with a level horizon, and
-  upright and as square-on as the approach allows at t=22.
-  Frames: `loop/out/pass-010/workers/D3/` (sheet, pairs, plan, frame table) · Files:
-  `src/scenes/rail.ts`, `src/scenes/dollhouse.tsx`, `src/scenes/dollhouse/garden.ts`,
-  `README.md` (one sentence) · Worker: fable · Source: owner, pass 001
+- **D3 dollhouse · Rebuilt around fall (third try: the camera is right, the planting is not)** —
+  start from commit `8903fc5` (branch `t3/dollhouse-exit-framing`: fall reshaped into an S,
+  winter closing the lap, the exit framed in a hoop at t=15.5 and upright at t=22). The panel
+  reverted it in pass 011 for four things, none about the camera, and still scored the scene
+  7, 7, 7. What must be true:
+  (1) One doorway carries the scene's joke through the ride: the camera sees its vast hall,
+  then its paper-thin edge, then that the same frame is empty from behind, in succession,
+  with its distinctive frame pattern visible throughout (today's dollhouse does this with the
+  navy doorway at t=5 to 12). "The doorway whose interior is seen at t=8.5 and the empty arch
+  at t=12 are now separate objects ... the scene's central spatial joke" is weaker (astra, sol).
+  (2) Flower beds near the lens are as dense as today's at t=0 to 5, 8.5, 12 and 19: wide
+  overlapping drifts flanking the line of flight, not thin strips on bare sand (astra, fable).
+  (3) The skyline at t=0 to 5 and 19 to 22 is layered again: overlapping giant hoops, big
+  pinwheels and striped domes behind the doorways, not a row of similar lollipop trees; one
+  clear focal doorway in the opening thumbnail, not two equal ones (sol, fable).
+  (4) No shadow without a caster (the blotch on the flowers at t=2.5).
+  Frames of the reverted version: `loop/out/pass-011/reviewed/`; today's: `loop/out/pass-011/`.
+  Files: `src/scenes/rail.ts` (fall, winter), `src/scenes/dollhouse.tsx`,
+  `src/scenes/dollhouse/garden.ts`, `README.md` (one sentence) · Worker: fable · Source: owner,
+  pass 001; pass 011 panel 3/3 (regression)
 - **O4 orbit · Rebuilt around winter** — after D3, the same way. Source: owner, pass 001
-- **S1 new · A fifth world** — four proposals are with the owner (question 15 in
-  `loop/DIRECTION.md`; `loop/designs/pass-010/`: roost, slurp, wick, earshot). Pass 011: with
-  no answer, three readers on other models rank them blind against the brief; the build
-  (opus, index 4, riding spring as the rail is) starts in the pass after, from the winner's
-  proposal, with its column added to `DESIGN.md` first. Source: owner, pass 001
-- **B2 burrow · Eyes that belong to the wall** (astra and sol both, pass 010) — every eye sits in
-  a socket: a shallow fleshy collar that blends into the surrounding scales, soft occlusion
-  round it, a wet rim; a closed eye is a curved fold of lid (upper over lower), not a plum
-  ball with a slit; the dome's eyes open towards the hoop over t=20 to 23. Their number and
-  places stay (a busier dome was reverted in pass 005).
-  "Eyes read as separate balls attached to the wall; the closed ones become plain plum
-  spheres with thin slits" (astra); "their dark horizontal openings resemble slots rather
-  than eyelids" (sol) · Files: `src/scenes/burrow/creatures.ts` · Worker: opus · Frames:
-  burrow:8.5 burrow:22 · Source: pass 000 sol, fable; pass 008 sol; pass 010 astra, sol
-- **O12 orbit · The whale's shadow** (asked for by astra and sol as their opportunity in passes
-  009 and 010) — as the whale and calf pass overhead a broad, soft shadow in their shape
-  drifts across the plaza, the road and the nearest roofs, dimming the lamp pools a little as
-  it goes: the creature overhead is suddenly huge and present. From `clock.t` only.
-  Technique: project the whale's position (already a function of `clock.t` in
-  `src/scenes/orbit/sky.ts`) onto the cylinder's ground in the ground and roof shaders as a
-  soft ellipse or two-lobe shape; no shadow map · Files: `src/scenes/orbit.tsx`,
-  `src/scenes/orbit/sky.ts` (exporting the whale's path) · Worker: opus · Frames: orbit:15.5
-  orbit:19 orbit:22 (and two frames a second apart) · Source: pass 008 sol; pass 009 astra,
-  sol; pass 010 sol
+- **S1 roost · The fifth world, built** — the three-reader blind ranking chose **roost**
+  (`loop/designs/pass-010/roost.md`; rankings beside it): a giant porcelain hen dozes on a
+  floor as thin as a plate, a second place hangs upside down beneath the same floor, and the
+  camera rises through a missing shard from one to the other; the exit is the gap under the
+  hen, who is the lid of a covered dish and floats up. With one borrowing the readers asked
+  for: the hen's breath pulses the lamp's glow from the first frame. Index 4, riding spring
+  as the rail is; its column is in `DESIGN.md` since pass 011. Built in stages, each a pass:
+  first the place and the ride (floors, curtain light, lamp, stacks, the crossing, a plain hen
+  and a working exit), judged by the gate and the panel as a new scene; then the hen's craft,
+  the eggs, the detail.
+  Files: `src/scenes/roost.tsx`, `src/scenes/roost/*`, `src/scenes/index.ts`,
+  `src/director/looks.ts` (its entry), `README.md` ("Who lives where") · Worker: opus ·
+  Source: owner, pass 001; pass 011 ranking
+- **O12 orbit · The whale's shadow** — PARKED on a flight-path decision. Built in pass 011 (commit
+  `3c3c3db`, branch `t3/orbit-whale-shadow`, never merged): thrown by the moon, her shadow
+  only reaches ground the camera sees at t=18.3 to 20, where it reads as a dimmer foreground
+  and a weaker lamp pool, not as a whale; at t=15.5 it falls beyond the cylinder's end. Three
+  reviewers have asked for it (astra and sol again in pass 011). It needs her mid-ride pass to
+  dip lower over the road, which means re-keying a path that took three passes to settle.
 - **B12 burrow · Doorway rims seen from the corridor** — the round rims (kept in pass 010) get,
   on both sides, only what nobody objected to: the wall's scale rows fading onto the outer
   shoulder and a wide, soft occlusion gradient where the tube meets wall and floor. No lip
@@ -332,6 +332,12 @@ mostly five things, none of which the screensaver did at baseline:
   hint of depth on mid-distance windows: `loop/out/pass-010/workers/O11/after/`.
 - **B10 burrow · Round doorway rims** (pass 010; the relief on them was reverted, see B12) —
   32-sided tubes cut finer at the crown: `loop/out/pass-010/frames/burrow-8.5.png`.
+- **B2 burrow · Eyes that belong to the wall** (pass 011) — lids, sockets and collars in the
+  wall's own colour; the dome's eyes wake towards the hoop from t=19.6; astra and sol raised
+  the burrow to 8: `loop/out/pass-011/frames/burrow-8.5.png`, `loop/out/pass-011/workers/B2/`.
+- **The approach is flown without bank** (pass 011, a rail change of its own) — no camera roll in
+  any season's last 5 s; the burrow's dome is level at t=22:
+  `loop/out/pass-011/workers/D3/commitA-burrow-pairs.jpg`.
 
 ## Rejected
 
@@ -384,3 +390,5 @@ Items tried and dropped, with the reason, so they are not tried the same way twi
 - **Caustics as a web of cells** (pass 010, commits `2519c09`, `217a3e8`, reverted) and **lip
   ridges, veins and foot creases on the doorway rims** (pass 010, commit `47bf969`,
   reverted) — parked as H14; the rims continue as B12 with scales and a soft seat only.
+- **The dollhouse on fall with one doorway's joke split over two, thinned beds and a flat
+  skyline** (pass 011, commits `545c4bc`, `8903fc5`, reverted) — see D3's third try.

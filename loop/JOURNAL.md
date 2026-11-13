@@ -387,3 +387,36 @@ Learned:
   their focal point on that line.
 - Bundle 314 kB of 400: a fifth scene of about 50 kB fits, a sixth would not without trimming.
 
+## Pass 011 (2026-11-13)
+
+Slices:
+- B2 burrow · Eyes that belong to the wall (opus, sent back once as B2b for the dome) kept, no
+  regressions; astra and sol raised the burrow to 8.
+- Rail · The approach is flown without bank (fable, a commit of its own inside D3) kept.
+- D3 dollhouse · Rebuilt around fall (fable, second return) reverted: all three reported
+  regressions, about what stands along the track, not about the camera.
+- O12 orbit · The whale's shadow (opus) not merged: short by its worker's account and mine.
+- S1: three readers on other models ranked the four proposals blind: roost first for two,
+  second for the third.
+Gate: frame cost worst 3.18 ms (orbit), loop worst 12 ms, seams 0.00–0.31% RMSE, bundle 320 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.7, burrow 7.7, dollhouse 7.0, orbit 7.7. The dollhouse score
+was given to the reverted rail version (`loop/out/pass-011/reviewed/`).
+Learned:
+- A migration is judged on what the old ride showed, beat by beat, not only frame by frame.
+  The dollhouse's old track told a joke in three beats with one doorway (room, thin edge,
+  empty back); the new one kept every prop and lost the sequence. A migration brief has to
+  list the scene's story beats and the objects that carry them, not only what is in each
+  sheet frame.
+- Thinning props to stay inside a frame-cost allowance is a regression the panel sees at once
+  (flower beds). The allowance should be spent, or the cost found elsewhere.
+- What the worker and I worried about (the exit approach at t=19 and 22) drew no complaint;
+  what the panel reported, neither of us had looked for. My doubt rule catches my doubts, not
+  the panel's. Compare the two sheets as sequences before merging a migration.
+- The rail's roll through the approach was a real fault of its own: taking it out drew no
+  objection and the burrow rose a point.
+- An effect that depends on another creature's path (the whale's shadow) should start from
+  where that path is, measured, before the brief promises frames.
+- Blind ranking by other models found a flaw in my favourite that I had missed (wick's joke is
+  at floor level and the camera climbs away from it). Worth doing before any build this size.
+
