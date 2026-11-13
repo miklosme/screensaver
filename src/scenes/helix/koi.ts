@@ -13,10 +13,7 @@ import {
  *
  * Every fish is placed in the vertex shader from its instance attributes and the scene clock, so
  * the school is a pure function of `uT`. Fish also keep out of a cone in front of the camera
- * (`uEye` / `uFwd`): they may drift alongside, but never onto the line of flight. And they swim
- * round whatever stands in their water (`keepOut`: the bridge and the arch), by swelling their
- * orbit outwards as they pass it, and for the last seconds the school parts round the exit
- * (`door`) so that nothing touches its silhouette.
+ * (`uEye` / `uFwd`): they may drift alongside, but never onto the line of flight.
  */
 
 const TAU = Math.PI * 2;
@@ -138,25 +135,6 @@ export interface KoiOptions {
   fogFar: number;
   /** GLSL that defines `vec3 hxSky(vec3 dir)` */
   skyGlsl: string;
-  /**
-   * Things standing in the school's water. Each is a span of angle about the shaft's axis
-   * (`angle` = atan2(z, x), give or take `halfAngle`) and of height; fish passing through it are
-   * moved out to radius `r`, and ease out and back over as much again on either side.
-   */
-  keepOut?: KeepOut[];
-  /**
-   * The exit. From `from` to `to` (scene time) a cone opens from the camera round the line to
-   * `centre`, `radius` wide where it passes the door, and the fish move out of it.
-   */
-  door?: { centre: Vector3; radius: number; from: number; to: number };
-}
-
-export interface KeepOut {
-  angle: number;
-  halfAngle: number;
-  y: number;
-  halfY: number;
-  r: number;
 }
 
 export interface Koi {
@@ -181,31 +159,6 @@ export function createKoi(o: KoiOptions): Koi {
   geometry.setAttribute("aFish", new InstancedBufferAttribute(fish, 4));
   geometry.instanceCount = o.count;
 
-  const gl = (x: number) => x.toFixed(4);
-  const keepOut = (o.keepOut ?? [])
-    .map(
-      (k) => /* glsl */ `{
-          float da = abs(mod(ang - ${gl(k.angle)} + ${gl(Math.PI)}, ${gl(TAU)}) - ${gl(Math.PI)});
-          float w = (1.0 - smoothstep(${gl(k.halfAngle)}, ${gl(k.halfAngle * 2 + 0.2)}, da)) * (1.0 - smoothstep(${gl(k.halfY)}, ${gl(k.halfY * 2)}, abs(cy - ${gl(k.y)})));
-          r += max(0.0, ${gl(k.r)} - r) * w;
-        }`,
-    )
-    .join("\n");
-  const door = o.door
-    ? /* glsl */ `{
-          vec3 axis = vec3(${gl(o.door.centre.x)}, ${gl(o.door.centre.y)}, ${gl(o.door.centre.z)}) - uEye;
-          float reach = max(length(axis), 0.01);
-          axis /= reach;
-          vec3 rel = c - uEye;
-          float along = dot(rel, axis);
-          vec3 perp = rel - axis * along;
-          float d = max(length(perp), 1e-3);
-          // as wide as the door where it passes it, and no wider than a right angle close up
-          float need = max(along, 0.0) * min(${gl(o.door.radius)} / reach, 1.0) + aFish.x * 0.8;
-          c += perp / d * max(0.0, need - d) * smoothstep(${gl(o.door.from)}, ${gl(o.door.to)}, uT);
-        }`
-    : "";
-
   const material = new ShaderMaterial({
     side: DoubleSide,
     uniforms: { uT: { value: 0 }, uEye: { value: new Vector3() }, uFwd: { value: new Vector3(0, 0, -1) } },
@@ -227,10 +180,7 @@ export function createKoi(o: KoiOptions): Koi {
         // the wrap happens far below and far above; fish shrink to nothing there
         float grow = smoothstep(0.0, 10.0, yy) * smoothstep(${o.yRange.toFixed(1)}, ${(o.yRange - 10).toFixed(1)}, yy);
         float r = aOrbit.x + 1.4 * sin(uT * 0.21 + aFish.y * 3.0);
-        float cy = ${(o.yMid - o.yRange / 2).toFixed(1)} + yy + 0.7 * sin(uT * 0.6 + aFish.y);
-        // swim round what stands in the water
-        ${keepOut}
-        vec3 c = vec3(r * cos(ang), cy, r * sin(ang));
+        vec3 c = vec3(r * cos(ang), ${(o.yMid - o.yRange / 2).toFixed(1)} + yy + 0.7 * sin(uT * 0.6 + aFish.y), r * sin(ang));
 
         // keep the line of flight clear: nudge the fish out of a cone ahead of the camera
         vec3 rel = c - uEye;
@@ -239,8 +189,6 @@ export function createKoi(o: KoiOptions): Koi {
         float d = max(length(perp), 1e-3);
         float need = (3.4 + 0.2 * max(along, 0.0)) * smoothstep(-5.0, 1.0, along) * (1.0 - smoothstep(40.0, 60.0, along));
         c += perp / d * max(0.0, need + aFish.x * 0.6 - d);
-        // ... and, at the end, clear of the exit
-        ${door}
 
         vec3 fwd = normalize(vec3(-sin(ang) * r * aOrbit.w, aFish.w, cos(ang) * r * aOrbit.w));
         vec3 side = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));

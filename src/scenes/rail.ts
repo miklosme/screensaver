@@ -6,19 +6,17 @@ import { TIMING } from "./types";
  *
  * The rail is a single closed, curvature-continuous curve, designed below (`design`) and cut into
  * four seasons. It owns the camera's position, heading, bank and speed, all as pure functions of
- * time. One lap is 390 units and takes 4 x TIMING.cycle = 80 s.
+ * time. One lap is 396 units and takes 4 x TIMING.cycle = 80 s.
  *
- *   spring   the stair       a run-up of 10 units, then a turn and an eighth to the right on a
- *                            tight helix (radius 6.2, 13.8 up per turn) that climbs 16 units, and
- *                            an S out of it: 50 degrees back to the left before the approach
+ *   spring   the climb       one full turn to the left, rising 14 units all the way: a helix
  *   summer   the serpentine  a sweep right, a long 205 degree curl left that dives 3.3 units
  *                            and climbs most of the way back, a flick right: the busiest season
  *   fall     the dunes       two camel-backs (up 13, down 15, up 12, down 8 degrees) over a slow S
- *   winter   the vortex      a spiral dive to the right, 313 degrees round and 14 units down,
- *                            that tightens and banks harder (to 27 degrees) as it falls
+ *   winter   the vortex      a spiral dive to the right, 330 degrees round and 11 units down,
+ *                            that tightens and banks harder (to 28 degrees) as it falls
  *
- * Plots of all of it: `rail-views.png` and `rail-timeline.png` in the worker output of the passes
- * that built it (002) and reshaped spring (004), or `rail.frame` / `rail.pose` below.
+ * Plots of all of it: `loop/out/after/rail-views.png` and `rail-timeline.png` of the pass that
+ * built it (pass 002), or `rail.frame` / `rail.pose` below.
  *
  * WHO RIDES WHAT. The scene at (zero-based) position `index` in the playing order rides season
  * `index % 4`, so a fifth scene rides spring again. A scene's 25 s timeline is the last 5 s of the
@@ -60,8 +58,6 @@ import { TIMING } from "./types";
  * - DISTANCE. `frame(d)` takes local distance along the track: d = 0 is where the camera is at
  *   t = 0, `stretch.joint` (18.8) where it is at t = 5, and `stretch.exit` where it is at t = 25.
  *   The rail is closed, so d may run below 0 (the world behind the first frame) and past `exit`.
- *   Below 0 is the body of the season before, so whoever reshapes a season changes that part of
- *   the next scene's world: see spring's tail in `design`, which the burrow is built on.
  * - THE EXIT stands at `frame(stretch.exit)`: the camera reaches that point at t = 25 flying
  *   along its `tangent`, level and straight for the last 4.76 units, so a portal centred there
  *   and square to the tangent fills the screen at the takeover. Because the approach bends, the
@@ -82,13 +78,13 @@ import { TIMING } from "./types";
  *   makes the next world swim inside the portal. `lookTowards` applies such an offset. Field of
  *   view is the scene's own; hold it steady while `free(t)` is 0.
  * - SPEED is the rail's too: `stretch.distance(t)` is where the camera is, `stretch.speed(t)` how
- *   fast. Each season cruises at its own speed (spring 5.1, summer 5.9, fall 5.5, winter 6.5);
+ *   fast. Each season cruises at its own speed (spring 5.6, summer 5.9, fall 5.5, winter 6.5);
  *   the approach and the joints are the same for all. Beats that used to be keyed to t (doors,
  *   FOV ramps) are better keyed to where the camera is: `stretch.timeAt(d)`.
  * - ROOM. No two points of a stretch that are more than 3 x CLEARANCE apart along the track are
  *   closer than CLEARANCE in space (checked below, at start-up), so a tube of half that radius
  *   swept along a stretch never meets itself. Spring and winter do pass over their own plan,
- *   12 and 11 units higher or lower: that is the loop. The rail says nothing about what else a
+ *   12 and 9 units higher or lower: that is the loop. The rail says nothing about what else a
  *   scene builds; whatever stands near the track has to keep off the line of flight.
  * - LEVEL GROUND. The track is level (and the bed's `up` is +Y) through the whole approach and
  *   for 2 units after a joint, so an exit can stand on a flat floor.
@@ -96,12 +92,10 @@ import { TIMING } from "./types";
  * `rail` is the whole lap in its own coordinates, for plots and for anything that needs more
  * than one stretch. `src/scenes/burrow.tsx` and `burrow/build.ts` are the worked example: a
  * tunnel swept along summer, chambers placed on it by distance, the camera with a look-ahead.
- * `src/scenes/helix.tsx` is the other kind: a world that stands still (a stair round a column)
- * which spring was shaped to wind through, and which finds its own helix in the stretch at mount.
  *
  * ---------------------------------------------------------------------------------------------
- * Legacy: the seam state. A scene that still has its own camera track (dollhouse, orbit until
- * they migrate) keeps the "seam state" around both of its seams:
+ * Legacy: the seam state. A scene that still has its own camera track (helix, dollhouse, orbit
+ * until they migrate) keeps the "seam state" around both of its seams:
  *
  *   - it travels in a straight line, along its own view axis,
  *   - it does not rotate (no yaw, pitch or roll rate),
@@ -268,48 +262,20 @@ const BANK_LIMIT = 34 * DEG;
 export const CLEARANCE = 8;
 
 /**
- * Spring's helix is a stair's: the helix scene's (helix.tsx, which checks these against its own
- * numbers at mount). The stair's centre line winds at radius 5.5 and rises 0.4 per unit of plan,
- * 13.8 a turn; the camera rides 0.7 outside it, so the rail's helix has plan radius 6.2, the
- * pitch that climbs as much per turn, and this much track in one turn.
- */
-const STAIR_RADIUS = 5.5 + 0.7;
-const STAIR_PITCH = Math.atan((0.4 * 5.5) / STAIR_RADIUS) / DEG;
-const STAIR_TURN = (2 * Math.PI * STAIR_RADIUS) / Math.cos(STAIR_PITCH * DEG);
-/** degrees spring winds round the helix: a full turn, and what its tail turns back */
-const STAIR_WIND = 360 + 50.625;
-
-/**
  * THE DESIGN. Three numbers are left to `close()`, which nudges them until the lap meets itself:
- * p[0] moves turn between fall's two sweeps, p[1] between fall's second sweep and winter's
- * spiral, p[2] scales winter's dive.
+ * p[0] stretches fall, p[1] moves a few degrees of turn from fall's first sweep to its second,
+ * p[2] scales winter's dive.
  */
 function design(p: readonly number[]): SeasonDesign[] {
   const [weave = 0, hinge = 0, dive = 0] = p;
   return [
-    // spring: the stair. A run-up of 10 units straight at the foot of a tight helix, a turn and an
-    // eighth to the right on it, climbing all the way, and out of it in an S.
-    //
-    // THE TAIL. The scene on summer builds 7 units of its world behind its first frame, which is
-    // spring's last 7 units before the approach (25.8 .. 18.8 short of the joint). They are kept
-    // exactly as that scene was built round them: the last of a left sweep (radius 10.2, easing
-    // out over 9 units to 20 short of the joint) and of a 15 degree climb (easing out over 11
-    // units to 25 short of it). The second turn and the first slope below are those two, and
-    // everything else of spring ends 26.1 short of the joint, before they are alone. (Only the
-    // track bed is kept; the camera's bank there is spring's own, and nothing is built from it.)
+    // spring: the climb. One full turn to the left, rising all the way: a helix.
     {
-      length: 90,
-      turn: [
-        { at: 63.9 - (STAIR_TURN * STAIR_WIND) / 360 - 7, len: (STAIR_TURN * STAIR_WIND) / 360 + 7, deg: -STAIR_WIND, ease: 7 },
-        { at: 52, len: 18, deg: 50.625, ease: 9 },
-      ],
-      // the two slopes add up to the stair's pitch from 16.5 to 54 units past the joint
-      slope: [
-        { at: 5, len: 60, deg: 15, ease: 11 },
-        { at: 11.5, len: 52.4, deg: STAIR_PITCH - 15, ease: 5 },
-      ],
+      length: 96,
+      turn: [{ at: 3, len: 73, deg: 360, ease: 9 }],
+      slope: [{ at: 7, len: 64, deg: 15, ease: 11 }],
       roll: [],
-      bank: 0.4,
+      bank: 3.2,
     },
     // summer: the serpentine. A sweep to the right, then a long curl to the left that dives and
     // comes back up, and a flick to the right before the approach.

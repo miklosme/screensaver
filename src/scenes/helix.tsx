@@ -25,25 +25,16 @@ import {
   type Material,
 } from "three";
 import { TIMING, type SceneProps } from "./types";
-import { createFrame, lookTowards, season, type Stretch } from "./rail";
+import { RAIL, RAIL_LEAD_OUT, createRide, type Ride } from "./rail";
 import { createKoi, type Koi } from "./helix/koi";
 
 /**
- * HELIX — the endless staircase, on spring's stretch of the rail (rail.ts).
+ * HELIX — the endless staircase.
  *
  * A cantilevered sandstone stair winds around a slowly turning fluted column inside a vast shaft
  * whose wall is itself a counter-wound helical arcade. Other staircases hang in the teal void at
- * wrong angles, each rotating about its own axis so it seems to climb forever.
- *
- * Spring is a run-up, a turn and an eighth to the right on a helix, and an S out of it. The helix
- * IS the stair's: the camera flies in through open air with the whole tower ahead of it, comes
- * down onto the treads from outside the balustrade and climbs. Where the rail leaves the helix
- * the stair leaves the column with it, still climbing, as a bridge that sweeps back to the left,
- * crests where the rail levels out and steps down to a thin keyhole stele: the exit portal. The
- * twin stair, half a turn round, goes on up the column, so the stair never ends.
- *
- * Everything is laid out in TOWER coordinates: the rail's local frame shifted so that the column's
- * axis is x = z = 0. The stone shaders, the koi and the motes measure their angles from that axis.
+ * wrong angles, each rotating about its own axis so it seems to climb forever. Near the top the
+ * stair peels away from the column into open air and ends at a thin keyhole stele: the exit portal.
  */
 
 // ---------------------------------------------------------------------------------------------
@@ -51,42 +42,28 @@ import { createKoi, type Koi } from "./helix/koi";
 // ---------------------------------------------------------------------------------------------
 const TAU = Math.PI * 2;
 const R0 = 5.5; // centre-line radius of the stair around the column
-const SIDE = 0.7; // on the helix the camera rides this far outside the centre line
-const TURNS = 10; // helix turns below the point where the stair leaves the column
+const R1 = 13.5; // centre-line radius where the stair ends
+const TURNS = 10; // helix turns below the flare
+const FLARE = 0.56 * TAU; // angle over which the stair peels away
 const DS = 0.1; // path table resolution
-const TWIN_TURNS = 8.5; // the twin stair keeps climbing this many turns past that point
-const EXT = 3; // the path tables run on this far past their end
+const TWIN_TURNS = 8; // the twin stair keeps climbing this many turns past the door's angle
+const EXT = 40; // straight continuation behind the door (look-ahead only)
 const TREAD = 1.25;
 const SLOPE = 0.5 / TREAD;
 const THICK = 0.95;
 const COLUMN_R = 3.0;
-const WALL_R = 46;
-const WALL_N = 32; // arcade modules per turn
+const WALL_R = 38;
+const WALL_N = 26; // arcade modules per turn
 const WALL_H = 13;
 const WALL_PITCH = -13; // counter-wound
-const END_GAP = 0.22; // the portal stands this far past the rail's exit, clear of the near plane
+const CRUISE = 3.6; // camera speed on the stair; RAIL.speed at both seams
+const LEAD_EASE = 20; // track over which the fly-in bends from dead straight onto the helix
+const LAND_EASE = 12; // track over which the flare straightens out into the landing
+const END_GAP = 0.22; // camera stops this far in front of the portal plane
 const EYE = 2.6;
-const FOV = 72;
-const FOV_IN = 66; // through the arrival: a longer lens holds the tower larger in the orbit's gate
-const FOV_DOOR = 66; // on the way out; the burrow's, so the keyhole is a true window
+const EYE_RISE = 2.5; // the camera floats up to the keyhole's centre at the end
 const FOG_NEAR = 22;
 const FOG_FAR = 150;
-
-const DEG = Math.PI / 180;
-/** piecewise-linear with eased joints: [x, y] keys in rising x */
-const keyed = (keys: [number, number][]) => (x: number) => {
-  let i = 0;
-  while (i < keys.length - 2 && x > keys[i + 1]![0]) i++;
-  const [x0, y0] = keys[i]!, [x1, y1] = keys[i + 1]!;
-  return y0 + (y1 - y0) * smooth(x0, x1, x);
-};
-/**
- * Where the camera looks, as degrees off the rail's heading by distance past the joint: to the
- * left (the column is on the right), and upwards. Only as far as `stretch.free(t)` allows, which
- * is not at all until t = 5.6 or from t = 20.
- */
-const GLANCE_YAW = keyed([[0, 0], [7, 5], [10, 5], [18, -10], [45, -10], [56, 5], [67, 0]]);
-const GLANCE_PITCH = keyed([[0, 0], [8, 3], [18, -6], [50, -6], [60, -9], [70, -4]]);
 
 const DOOR_A = 2.45; // half width of the keyhole's shaft
 const DOOR_CY = 5.15; // centre of the keyhole's circle
@@ -118,35 +95,83 @@ function rng(seed: number) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// the layout: a helix round the column, and the bed of the rail from where the two part
+// the path: a helix that peels off into a spiral and ends in a straight line
 // ---------------------------------------------------------------------------------------------
-/** A stair's centre line in plan, tabulated every DS of plan length, and the height of its floor. */
 interface PathTable {
   x: Float32Array;
   z: Float32Array;
   h: Float32Array;
   flare: Float32Array;
-  end: number; // plan length at which the stair ends
+  end: number; // arc length at the door
   n: number;
 }
 
-/**
- * A stair that winds round the column from angle theta0 to thetaEnd: at angle th it is at
- * (R0 cos th, R0 sin th), which climbs to the right, and its floor rises SLOPE per unit of plan.
- */
-function helixPath(theta0: number, thetaEnd: number): PathTable {
-  const end = R0 * (thetaEnd - theta0);
+function buildPath(main: boolean): PathTable {
+  const thetaF = -FLARE;
+  const theta0 = thetaF - TURNS * TAU;
+  const thetaEnd = main ? 0 : TWIN_TURNS * TAU;
+  const dTheta = 0.002;
+  const count = Math.ceil((thetaEnd - theta0) / dTheta) + 1;
+  const fx = new Float32Array(count);
+  const fz = new Float32Array(count);
+  const fs = new Float32Array(count);
+  const ff = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const th = Math.min(thetaEnd, theta0 + i * dTheta);
+    const k = main ? Math.max(0, (th - thetaF) / FLARE) : 0;
+    const r = R0 + (R1 - R0) * k * k * k;
+    fx[i] = r * Math.cos(th);
+    fz[i] = r * Math.sin(th);
+    ff[i] = k;
+    fs[i] = i === 0 ? 0 : fs[i - 1]! + Math.hypot(fx[i]! - fx[i - 1]!, fz[i]! - fz[i - 1]!);
+  }
+  if (main) {
+    // The flare would arrive at the door still turning. Fade its curvature out instead, so that
+    // the landing (and the camera on it) runs dead straight into the keyhole.
+    const straight = RAIL_LEAD_OUT + END_GAP + 0.8;
+    const total = fs[count - 1]!;
+    const ox = fx.slice();
+    const oz = fz.slice();
+    const heading = (i: number) => Math.atan2(oz[i]! - oz[i - 1]!, ox[i]! - ox[i - 1]!);
+    let i = count - 1;
+    while (i > 2 && total - fs[i]! < straight + LAND_EASE) i--;
+    let psi = heading(i);
+    for (i++; i < count; i++) {
+      const bend = heading(i) - heading(i - 1);
+      const keep = 1 - smoother(straight + LAND_EASE, straight, total - fs[i]!);
+      psi += Math.atan2(Math.sin(bend), Math.cos(bend)) * keep;
+      const step = fs[i]! - fs[i - 1]!;
+      fx[i] = fx[i - 1]! + Math.cos(psi) * step;
+      fz[i] = fz[i - 1]! + Math.sin(psi) * step;
+    }
+  }
+  const tx = fx[count - 1]! - fx[count - 6]!;
+  const tz = fz[count - 1]! - fz[count - 6]!;
+  const tl = Math.hypot(tx, tz);
+  const end = fs[count - 1]!;
   const n = Math.ceil((end + EXT) / DS) + 1;
   const x = new Float32Array(n);
   const z = new Float32Array(n);
   const h = new Float32Array(n);
+  const flare = new Float32Array(n);
+  let j = 0;
   for (let k = 0; k < n; k++) {
-    const th = theta0 + (k * DS) / R0;
-    x[k] = R0 * Math.cos(th);
-    z[k] = R0 * Math.sin(th);
-    h[k] = SLOPE * k * DS;
+    const s = k * DS;
+    if (s <= end) {
+      while (j < count - 2 && fs[j + 1]! < s) j++;
+      const u = (s - fs[j]!) / Math.max(1e-6, fs[j + 1]! - fs[j]!);
+      x[k] = fx[j]! + (fx[j + 1]! - fx[j]!) * u;
+      z[k] = fz[j]! + (fz[j + 1]! - fz[j]!) * u;
+      flare[k] = ff[j]! + (ff[j + 1]! - ff[j]!) * u;
+    } else {
+      x[k] = fx[count - 1]! + (tx / tl) * (s - end);
+      z[k] = fz[count - 1]! + (tz / tl) * (s - end);
+      flare[k] = 1;
+    }
+    // the stair levels out into a landing just before the door
+    h[k] = k === 0 ? 0 : h[k - 1]! + SLOPE * DS * (main ? smooth(3, 16, end - (s - DS / 2)) : 1);
   }
-  return { x, z, h, flare: new Float32Array(n), end, n };
+  return { x, z, h, flare, end, n };
 }
 
 function pathAt(p: PathTable, s: number, out: Vector3): Vector3 {
@@ -172,121 +197,55 @@ function pathTangent(p: PathTable, s: number, out: Vector3): Vector3 {
   return out.normalize();
 }
 
-interface Layout {
-  stretch: Stretch;
-  /** the column's axis, and the height the stair's tables count from, in the rail's local frame: tower = local - origin */
-  origin: Vector3;
-  /** angle about the axis at which both stairs begin, far below */
-  theta0: number;
-  /** the stair the camera climbs: a helix up to plan length `leave`, then laid on the rail's bed out to the door */
-  main: PathTable;
-  leave: number;
-  /** its twin, half a turn round and so half a pitch higher: a helix all the way up */
-  twin: PathTable;
-  /** rail distances between which the camera is on the helix, EYE above the main stair */
-  on: number;
-  off: number;
-  /** the camera's path through the air and down onto the stair, in tower coordinates: lamps keep clear of it */
-  flight: Vector3[];
-  /** true where a lamp's globe would stand between the camera and the keyhole on the way out */
-  hidesDoor(globe: Vector3): boolean;
+/**
+ * The camera's own track. It is the stair's centre line, except that the camera cannot start out
+ * on a spiral (see rail.ts): it flies in from the void along a straight line that climbs at the
+ * stair's slope, and a transition curve then winds that line onto the helix.
+ */
+interface CameraTrack {
+  path: PathTable;
+  /** true (sloped) distance travelled at each table entry; the path itself is indexed by plan length */
+  dist: Float32Array;
+  ride: Ride;
+  /** value of `dist` where the camera stops, END_GAP short of the door */
+  stop: number;
 }
 
-/**
- * Finds the stair in the rail. Spring holds its hardest turn and its steepest climb together for
- * most of a turn (rail.ts): that piece is a helix, and it has to be the stair's, SIDE outside its
- * centre line. Before it the camera is in the air; after it the stair is laid on the rail's bed.
- */
-function buildLayout(stretch: Stretch): Layout {
-  const f = createFrame();
-  const dd = 0.02;
-  const body1 = stretch.exit - stretch.joint; // the approach is as long as the one the scene arrives on
-  let turn = 0;
-  let climb = 0;
-  for (let d = stretch.joint; d <= body1; d += dd) {
-    stretch.frame(d, f);
-    turn = Math.max(turn, -f.curvature);
-    climb = Math.max(climb, f.tangent.y);
-  }
-  let on = NaN;
-  let off = NaN;
-  for (let d = stretch.joint; d <= body1; d += dd) {
-    stretch.frame(d, f);
-    if (-f.curvature < turn - 1e-6 || f.tangent.y < climb - 1e-6) continue;
-    if (Number.isNaN(on)) on = d;
-    off = d;
-  }
-  stretch.frame((on + off) / 2, f);
-  const plan = Math.hypot(f.tangent.x, f.tangent.z);
-  const radius = plan / turn;
-  if (!(off - on > 10) || Math.abs(radius - (R0 + SIDE)) > 2e-3 || Math.abs(f.tangent.y / plan - (SLOPE * R0) / radius) > 2e-4)
-    throw new Error(
-      `helix: spring's turn (radius ${radius.toFixed(3)}, slope ${(f.tangent.y / plan).toFixed(4)}) is not the stair's helix ` +
-        `(radius ${R0 + SIDE}, slope ${((SLOPE * R0) / (R0 + SIDE)).toFixed(4)}): see STAIR in rail.ts`,
-    );
-  const ax = f.position.x + f.right.x * radius;
-  const az = f.position.z + f.right.z * radius;
-  stretch.frame(off, f);
-  const theta1 = Math.atan2(f.position.z - az, f.position.x - ax);
-  const theta0 = theta1 - TURNS * TAU;
-  const leave = R0 * TURNS * TAU;
-  const origin = new Vector3(ax, f.position.y - EYE - SLOPE * leave, az);
+function buildCameraTrack(path: PathTable): CameraTrack {
+  const cam: PathTable = { ...path, x: path.x.slice(), z: path.z.slice(), h: path.h.slice() };
+  const dist = new Float32Array(path.n);
+  for (let k = 1; k < path.n; k++) dist[k] = dist[k - 1]! + Math.hypot(DS, path.h[k]! - path.h[k - 1]!);
+  const track: CameraTrack = { path: cam, dist, ride: createRide({ cruise: CRUISE }), stop: 0 };
+  const kStop = (path.end - END_GAP) / DS;
+  track.stop = dist[Math.floor(kStop)]! + (kStop % 1) * (dist[Math.floor(kStop) + 1]! - dist[Math.floor(kStop)]!);
 
-  // ---- the bed: from where the stair leaves the helix to past the door ----
-  // The stair goes on climbing under the camera until the rail is level, and from there the rail
-  // stays level while the last flight steps down to the door: the eye meets the keyhole's middle.
-  const dEnd = stretch.exit + END_GAP;
-  const m = Math.ceil((dEnd + EXT + 0.5 - off) / dd) + 1;
-  const bs = new Float64Array(m), bx = new Float64Array(m), bz = new Float64Array(m), bh = new Float64Array(m);
-  for (let i = 0; i < m; i++) {
-    const d = off + i * dd;
-    stretch.frame(d, f);
-    // the camera moves to the middle of the bridge as it leaves the column
-    const side = SIDE * (1 - smooth(off + 2, off + 18, d));
-    bx[i] = f.position.x - ax + f.right.x * side;
-    bz[i] = f.position.z - az + f.right.z * side;
-    bh[i] = f.position.y - origin.y - EYE - (DOOR_CY - EYE) * smoother(stretch.exit - 17, stretch.exit - 5.5, d);
-    bs[i] = i === 0 ? 0 : bs[i - 1]! + Math.hypot(bx[i]! - bx[i - 1]!, bz[i]! - bz[i - 1]!);
+  // the straight outlasts the seam by the look-ahead
+  const bend0 = trackS(track, RAIL.release) + 2.2;
+  const join = Math.round((bend0 + LEAD_EASE) / DS);
+  const heading = (k: number) => Math.atan2(path.z[k + 1]! - path.z[k]!, path.x[k + 1]! - path.x[k]!);
+  let psi = heading(join);
+  let turn = heading(join + 5) - heading(join - 5);
+  turn = Math.atan2(Math.sin(turn), Math.cos(turn)) / 10; // the helix's heading change per table step
+  for (let k = join - 1; k >= 0; k--) {
+    psi -= turn * smooth(bend0, bend0 + LEAD_EASE, (k + 0.5) * DS);
+    cam.x[k] = cam.x[k + 1]! - Math.cos(psi) * DS;
+    cam.z[k] = cam.z[k + 1]! - Math.sin(psi) * DS;
+    cam.h[k] = cam.h[k + 1]! - SLOPE * DS; // same slope as the stair, so `dist` still holds
   }
-  const iEnd = (dEnd - off) / dd;
-  const end = leave + bs[Math.floor(iEnd)]! + (bs[Math.floor(iEnd) + 1]! - bs[Math.floor(iEnd)]!) * (iEnd % 1);
-  const main = helixPath(theta0, theta1);
-  const n = Math.ceil((end + EXT) / DS) + 1;
-  const grow = (a: Float32Array) => {
-    const b = new Float32Array(n);
-    b.set(a.subarray(0, Math.min(n, a.length)));
-    return b;
-  };
-  main.x = grow(main.x); main.z = grow(main.z); main.h = grow(main.h); main.flare = new Float32Array(n);
-  main.n = n;
-  main.end = end;
-  for (let k = Math.ceil(leave / DS), i = 0; k < n; k++) {
-    const s = k * DS - leave;
-    while (i < m - 2 && bs[i + 1]! < s) i++;
-    const u = (s - bs[i]!) / Math.max(1e-9, bs[i + 1]! - bs[i]!);
-    main.x[k] = bx[i]! + (bx[i + 1]! - bx[i]!) * u;
-    main.z[k] = bz[i]! + (bz[i + 1]! - bz[i]!) * u;
-    main.h[k] = bh[i]! + (bh[i + 1]! - bh[i]!) * u;
-    // 0 against the column, 1 once the stair stands free of it
-    main.flare[k] = Math.min(1, Math.max(0, (Math.hypot(main.x[k]!, main.z[k]!) - R0) / 1.5));
-  }
+  return track;
+}
 
-  const flight: Vector3[] = [];
-  for (let d = 0; d <= on + 1; d += 0.2) flight.push(stretch.frame(d, f).position.clone().sub(origin));
-  // From where the arch comes into sight the eye is on its way to the keyhole's middle, which is
-  // where the camera is at the exit: no globe may come within a unit of that line of sight.
-  const keyhole = stretch.frame(stretch.exit, f).position.clone().sub(origin);
-  const sight: Vector3[] = [];
-  for (let d = off + 4; d <= stretch.exit - 4; d += 0.25) sight.push(stretch.frame(d, f).position.clone().sub(origin));
-  const ray = new Vector3();
-  const to = new Vector3();
-  const hidesDoor = (globe: Vector3) =>
-    sight.some((eye) => {
-      ray.subVectors(keyhole, eye);
-      const k = to.subVectors(globe, eye).dot(ray) / ray.lengthSq();
-      return k > 0.12 && k < 1 && to.addScaledVector(ray, -k).lengthSq() < 1;
-    });
-  return { stretch, origin, theta0, main, leave, twin: helixPath(theta0, theta1 + TWIN_TURNS * TAU), on, off, flight, hidesDoor };
+/** plan length along the track at local time t */
+function trackS({ dist, ride, stop }: CameraTrack, t: number): number {
+  const d = stop - ride.length + ride.at(t);
+  let lo = 0;
+  let hi = dist.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (dist[mid]! <= d) lo = mid;
+    else hi = mid;
+  }
+  return (lo + (d - dist[lo]!) / (dist[hi]! - dist[lo]!)) * DS;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -446,7 +405,7 @@ const hxTime = { value: 0 };
  * Where the two stairs' treads cross the newel, so the newel can darken above and below each one.
  * Filled in by getAssets, read when the column's program is compiled on the first frame.
  */
-const hxStairs = { theta0: 0, offMain: 0, offTwin: 0, endMain: 0, endTwin: 0 };
+const hxStairs = { offMain: 0, offTwin: 0, endMain: 0, endTwin: 0 };
 /** the two lamps that flank the door, in world space; filled in by getAssets, they light the arch */
 const hxLamps = { value: [new Vector3(), new Vector3()] };
 
@@ -456,6 +415,7 @@ const KH_SPRING = Math.atan2(DOOR_A, KH_YJ - DOOR_CY); // the springer joint's a
 const KH_VOUSS = (2 * KH_SPRING) / 19; // nineteen voussoirs, the keystone in the middle
 const KH_COURSE = KH_YJ / 4; // four courses up each jamb
 
+const THETA0 = -FLARE - TURNS * TAU;
 const PITCH = SLOPE * TAU * R0;
 function stairAoGlsl(): string {
   return /* glsl */ `
@@ -469,16 +429,16 @@ function stairAoGlsl(): string {
     }
     float hxStairAO(vec3 w) {
       float phi = atan(w.z, w.x);
-      float lin = ${glf(SLOPE * R0)} * (phi - ${glf(hxStairs.theta0)});
+      float lin = ${glf(SLOPE * R0)} * (phi - ${glf(THETA0)});
       float ao = 1.0;
       for (int k = 0; k < 2; k++) {
         float yOff = k == 0 ? 0.0 : ${glf(PITCH / 2)};
         float off = k == 0 ? ${glf(hxStairs.offMain)} : ${glf(hxStairs.offTwin)};
-        float sEnd = k == 0 ? ${glf(hxStairs.endMain)} : ${glf(hxStairs.endTwin)};
+        float sEnd = k == 0 ? ${glf(R0 * TURNS * TAU)} : ${glf(hxStairs.endTwin)};
         float n = floor((w.y - yOff - lin) / ${glf(PITCH)});
         for (int j = 0; j < 2; j++) {
           float th = phi + (n + float(j)) * ${glf(TAU)};
-          ao *= hxSlabAO(w.y, ${glf(R0)} * (th - ${glf(hxStairs.theta0)}), off, yOff, sEnd);
+          ao *= hxSlabAO(w.y, ${glf(R0)} * (th - ${glf(THETA0)}), off, yOff, sEnd);
         }
       }
       return ao;
@@ -908,8 +868,8 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
 interface Satellite { pos: Vector3; tilt: Quaternion; scale: number; spin: number; phase: number }
 
 interface Assets {
-  index: number;
-  layout: Layout;
+  path: PathTable;
+  track: CameraTrack;
   stairs: BufferGeometry;
   rails: BufferGeometry;
   column: BufferGeometry;
@@ -923,7 +883,6 @@ interface Assets {
   doorBack: BufferGeometry;
   doorPortal: BufferGeometry;
   stone: MeshLambertMaterial;
-  depthOnly: MeshBasicMaterial;
   keyholeMat: MeshLambertMaterial;
   columnMat: MeshLambertMaterial;
   postMat: MeshLambertMaterial;
@@ -933,7 +892,6 @@ interface Assets {
   stairMat: MeshLambertMaterial;
   koi: Koi;
   glow: MeshBasicMaterial;
-  veilMat: MeshBasicMaterial;
   skyMat: ShaderMaterial;
   pointsMat: ShaderMaterial;
   balusterM: Float32Array;
@@ -958,12 +916,10 @@ function keyholeOutline(target: Path, grow: number, base: number) {
   target.lineTo(-a, base);
 }
 
-function getAssets(index: number): Assets {
-  if (cache?.index === index) return cache;
-  const layout = buildLayout(season(index));
-  const mainPath = layout.main;
-  const twinPath = layout.twin;
-  hxStairs.theta0 = layout.theta0;
+function getAssets(): Assets {
+  if (cache) return cache;
+  const mainPath = buildPath(true);
+  const twinPath = buildPath(false);
   const rand = rng(1987);
   const P = new Vector3();
   const T = new Vector3();
@@ -1036,11 +992,7 @@ function getAssets(index: number): Assets {
     sq.quad(lo(i0), lo(o0), lo(o1), lo(i1), ctr, tone, 0.7, 1.15, 1.05, 0.6, [[wi0, 0, 3], [wo0, 0, 3], [wo1, 1, 3], [wi1, 1, 3]]); // soffit
     if (i === nSteps) continue;
     const sm = s0 + TREAD / 2;
-    const globe = edge(sm, 1, top + 2.5, 0.22);
-    P.set(globe[0], globe[1], globe[2]);
-    // no lamp where the camera comes down over the balustrade onto the stair, and none across the keyhole
-    const post =
-      i % 6 === (main ? 5 : 0) && sm < END - 6 && !layout.flight.some((q) => q.distanceToSquared(P) < 1.4 * 1.4) && !layout.hidesDoor(P);
+    const post = i % 6 === (main ? 3 : 0) && sm < END - 6;
     if (post) pushPost(edge(sm, 1, top, 0.22));
     else pushBaluster(edge(sm, 1, top, 0.22), 1.45 + (heightAt(sm) - top));
     if (post) {
@@ -1058,7 +1010,7 @@ function getAssets(index: number): Assets {
       hxLamps.value[side < 0 ? 0 : 1]!.set(e[0], e[1], e[2]);
     }
     HEND = heightAt(END);
-    hxStairs.endMain = layout.leave; // past that it is clear of the column
+    hxStairs.endMain = END;
     hxStairs.offMain = END - nSteps * TREAD;
   } else {
     hxStairs.endTwin = END;
@@ -1233,8 +1185,7 @@ function getAssets(index: number): Assets {
     phase: rand() * TAU,
   });
   const satellites = [
-    sat(-30, -26, -12, -1.3, 0.1, 0.55, 0.16), // hangs below the fly-in, to its left
-    sat(33, 8, -10, 1.0, 0.1, 0.5, 0.12), // slants down past the tower's far side in the first frames
+    sat(-17, -11, -20, 1.3, 0.1, 0.55, 0.16), // hangs beside the fly-in
     sat(8, -52, -25, 0.2, 1.2, 0.5, -0.14),
     sat(14, 27, 27, 0.15, Math.PI / 2 - 0.12, 0.5, 0.18),
     sat(74, 6, 44, 0.5, 0.45, 1.5, -0.07),
@@ -1295,7 +1246,7 @@ function getAssets(index: number): Assets {
     pa.push(0, 0, rand() * TAU, 0.55);
   }
   for (let i = 0; i < 520; i++) {
-    const r = 4 + (WALL_R - 6) * Math.sqrt(rand());
+    const r = 4 + 32 * Math.sqrt(rand());
     const a = rand() * TAU;
     pp.push(r * Math.cos(a), HEND - 70 + rand() * 110, r * Math.sin(a));
     ps.push(0.18 + rand() * 0.3);
@@ -1313,21 +1264,11 @@ function getAssets(index: number): Assets {
   const columnMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "column");
   const postMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "post");
   const keyholeMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "keyhole");
-  // The bridge and the arch stand in the koi's water: where, as an angle about the column
-  const doorR = Math.hypot(doorPos.x, doorPos.z);
-  pathAt(path, layout.leave + 8, P);
-  const bridge0 = Math.atan2(P.z, P.x), bridge1 = Math.atan2(doorPos.z, doorPos.x);
-  const sweepA = Math.atan2(Math.sin(bridge1 - bridge0), Math.cos(bridge1 - bridge0));
-  // between the stair and the arcade, from far below the camera's start to far above the door;
-  // they swim round the bridge, and frame the arch without touching it
+  // between the stair's flare and the arcade, from far below the camera's start to above the door
   const koi = createKoi({
-    count: 84, rMin: 18.5, rMax: WALL_R - 5, yMid: HEND - 18, yRange: 150, fogNear: FOG_NEAR, fogFar: FOG_FAR, skyGlsl: SKY_GLSL,
-    keepOut: [{ angle: bridge0 + sweepA / 2, halfAngle: Math.abs(sweepA) / 2 + 0.2, y: HEND + 4, halfY: 6.5, r: doorR + 7.5 }],
-    door: { centre: new Vector3(doorPos.x, HEND + DOOR_CY, doorPos.z), radius: 6.2, from: 16, to: 18.5 },
+    count: 84, rMin: 18.5, rMax: 33, yMid: HEND - 22, yRange: 150, fogNear: FOG_NEAR, fogFar: FOG_FAR, skyGlsl: SKY_GLSL,
   });
   const glow = withVoidFog(new MeshBasicMaterial({ color: new Color(1.35, 0.6, 0.16) }), "globe");
-  // lamplight in the keyhole until the portal opens: the globes' glass, turned down
-  const veilMat = withVoidFog(new MeshBasicMaterial({ color: new Color(0.95, 0.4, 0.1), transparent: true }), "globe");
   const skyMat = new ShaderMaterial({
     side: BackSide,
     depthWrite: false,
@@ -1384,14 +1325,13 @@ function getAssets(index: number): Assets {
   });
 
   cache = {
-    index, layout, stairs, rails, column, wall, satellite,
+    path, track: buildCameraTrack(path), stairs, rails, column, wall, satellite,
     baluster: lathe(BALUSTER_PROFILE, 7),
     post: lathe(POST_PROFILE, 20),
     lantern: new SphereGeometry(0.22, 28, 16),
     sky: new SphereGeometry(1200, 24, 16),
     points, doorFrame, doorBack, doorPortal,
-    stone, keyholeMat, columnMat, postMat, wallMat, stairMat, koi, glow, veilMat, skyMat, pointsMat,
-    depthOnly: new MeshBasicMaterial({ colorWrite: false, fog: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 2 }),
+    stone, keyholeMat, columnMat, postMat, wallMat, stairMat, koi, glow, skyMat, pointsMat,
     balusterM: new Float32Array(balusters),
     postM: new Float32Array(posts),
     lanternM: new Float32Array(lanterns),
@@ -1414,30 +1354,22 @@ function instanced(geo: BufferGeometry, mat: Material, matrices: Float32Array): 
 // ---------------------------------------------------------------------------------------------
 const Y_AXIS = new Vector3(0, 1, 0);
 
-export default function Helix({ index, clock, camera, portalMaterial }: SceneProps) {
+export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
   const rig = useMemo(() => {
-    const A = getAssets(index);
+    const A = getAssets();
     const root = new Group();
     const sky = new Mesh(A.sky, A.skyMat);
     sky.frustumCulled = false;
     sky.renderOrder = -10;
-    // Draw order, so that stone nothing sees is never shaded: the column lays down its depth
-    // first, the stair and all that stands on it follow, then the column itself, and the arcade
-    // and the far stairs, which are behind it all, come last.
     const column = new Mesh(A.column, A.columnMat);
-    const columnDepth = new Mesh(A.column, A.depthOnly);
-    columnDepth.renderOrder = -5;
-    column.renderOrder = 2;
     const stairs = new Mesh(A.stairs, A.stairMat);
     const rails = new Mesh(A.rails, A.stone);
     const balusters = instanced(A.baluster, A.postMat, A.balusterM);
     const postMesh = instanced(A.post, A.postMat, A.postM);
     const lanterns = instanced(A.lantern, A.glow, A.lanternM);
     const wall = instanced(A.wall, A.wallMat, A.wallM);
-    wall.renderOrder = 3;
     const sats = new InstancedMesh(A.satellite, A.stone, A.satellites.length);
     sats.frustumCulled = false;
-    sats.renderOrder = 3;
     const points = new Points(A.points, A.pointsMat);
     points.frustumCulled = false;
     const door = new Group();
@@ -1446,66 +1378,61 @@ export default function Helix({ index, clock, camera, portalMaterial }: ScenePro
     const portal = new Mesh(A.doorPortal, portalMaterial);
     const doorBack = new Mesh(A.doorBack, A.keyholeMat);
     doorBack.renderOrder = 1; // after the portal, so the depth test spares the carving behind it
-    // The arch faces the way the camera flies in, and its portal is black until it shows the next
-    // scene (t = TIMING.portalLive): till then the keyhole is full of lamplight, which then thins.
-    const veil = new Mesh(A.doorPortal, A.veilMat);
-    veil.position.z = 0.012;
-    door.add(new Mesh(A.doorFrame, A.keyholeMat), doorBack, portal, veil);
-    root.add(sky, columnDepth, column, stairs, rails, balusters, postMesh, lanterns, wall, sats, A.koi.mesh, points, door);
-    return { A, root, sky, veil, columns: [column, columnDepth], sats, instancedMeshes: [balusters, postMesh, lanterns, wall, sats] };
-  }, [index, portalMaterial]);
+    door.add(new Mesh(A.doorFrame, A.keyholeMat), doorBack, portal);
+    root.add(sky, column, stairs, rails, balusters, postMesh, lanterns, wall, sats, A.koi.mesh, points, door);
+    return { A, root, sky, column, sats, instancedMeshes: [balusters, postMesh, lanterns, wall, sats] };
+  }, [portalMaterial]);
 
   useEffect(() => () => rig.instancedMeshes.forEach((m) => m.dispose()), [rig]);
 
   const tmp = useMemo(
-    () => ({ pose: createFrame(), look: new Vector3(), side: new Vector3(), q: new Quaternion(), o: new Object3D(), fwd: new Vector3() }),
+    () => ({ pos: new Vector3(), tan: new Vector3(), look: new Vector3(), q: new Quaternion(), o: new Object3D(), fwd: new Vector3() }),
     [],
   );
 
   useFrame((state) => {
-    const { A, sky, veil, columns, sats } = rig;
-    const { stretch, origin } = A.layout;
+    const { A, sky, column, sats } = rig;
+    const { path } = A.track;
     const t = Math.min(TIMING.total, Math.max(0, clock.t));
-    const { pose, look, side, q, o, fwd } = tmp;
+    const { pos, tan, look, q, o, fwd } = tmp;
 
-    // --- camera: the rail's. All the scene adds is where it looks, while the rail lets it ---
-    const d = stretch.distance(t);
-    stretch.frame(d, pose);
-    const free = stretch.free(t);
-    if (free > 0) {
-      const s = d - stretch.joint;
-      // degrees to the left of the rail's heading (the column is to the right), and above it
-      const yaw = GLANCE_YAW(s) + 0.7 * Math.sin(t * 0.45);
-      const pitch = GLANCE_PITCH(s) + 1.1 * Math.sin(t * 0.37 + 1);
-      side.crossVectors(pose.tangent, Y_AXIS).normalize();
-      look.copy(pose.tangent).applyAxisAngle(Y_AXIS, yaw * DEG).applyAxisAngle(side, pitch * DEG).multiplyScalar(20).add(pose.position);
-      lookTowards(pose, look, free);
-    }
-    camera.position.copy(pose.position).sub(origin);
-    camera.quaternion.copy(pose.quaternion);
-    // The lens is long and steady while the cameras share the track, opens as the camera comes
-    // down onto the stair, and has tightened again before they share the track on the way out.
-    const fov =
-      FOV_IN + (FOV - FOV_IN) * smooth(stretch.joint + 2.1, stretch.joint + 13, d) + (FOV_DOOR - FOV) * smooth(A.layout.off - 4, stretch.exit - stretch.joint - 1, d);
-    if (camera.fov !== fov) camera.fov = fov;
+    // --- camera: in from the void, a glide up the stair, then straight into the keyhole ---
+    const s = trackS(A.track, t);
+    const settle = smooth(path.end - 28, path.end - 6.5, s); // 0 on the helix, 1 on the final approach
+    pathAt(path, s, pos);
+    pos.y += EYE + EYE_RISE * smooth(path.end - 25, path.end - 6.5, s);
+    pathTangent(path, s, tan);
+    const side = 0.7 * (1 - settle);
+    pos.x += tan.z * side;
+    pos.z -= tan.x * side;
+    pathTangent(path, s + 1.6, tan);
+    const out = 0.0 * (1 - settle);
+    // on the fly-in the eye points exactly where the camera is going, i.e. up the stair's slope
+    const freed = smooth(RAIL.release, RAIL.release + 4, t);
+    const sway = freed * (1 - settle); // the idle drift stops for both seams
+    const up = (SLOPE + (0.24 - SLOPE) * freed) * (1 - settle) + 0.02 * Math.sin(t * 0.45) * sway;
+    look.set(pos.x + (tan.x + tan.z * out) * 10, pos.y + up * 10, pos.z + (tan.z - tan.x * out) * 10);
+    camera.position.copy(pos);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(look);
+    camera.rotateZ(-0.055 * (1 - settle) + 0.012 * Math.sin(t * 0.37 + 1) * sway);
+    camera.fov = 72 - 8 * settle;
 
     // --- the world turns ---
-    sky.position.copy(camera.position);
-    for (const m of columns) m.rotation.y = -t * 0.035;
+    sky.position.copy(pos);
+    column.rotation.y = -t * 0.035;
     for (let i = 0; i < A.satellites.length; i++) {
-      const sat = A.satellites[i]!;
-      q.setFromAxisAngle(Y_AXIS, sat.phase + t * sat.spin);
-      o.position.copy(sat.pos);
-      o.quaternion.copy(sat.tilt).multiply(q);
-      o.scale.setScalar(sat.scale);
+      const d = A.satellites[i]!;
+      q.setFromAxisAngle(Y_AXIS, d.phase + t * d.spin);
+      o.position.copy(d.pos);
+      o.quaternion.copy(d.tilt).multiply(q);
+      o.scale.setScalar(d.scale);
       o.updateMatrix();
       sats.setMatrixAt(i, o.matrix);
     }
     sats.instanceMatrix.needsUpdate = true;
     hxTime.value = t;
-    A.veilMat.opacity = 1 - smooth(TIMING.portalLive, TIMING.portalLive + 1.5, t);
-    veil.visible = A.veilMat.opacity > 0;
-    A.koi.update(t, camera.position, fwd.set(0, 0, -1).applyQuaternion(camera.quaternion));
+    A.koi.update(t, pos, fwd.subVectors(look, pos).normalize());
     A.pointsMat.uniforms.uT!.value = t;
     A.pointsMat.uniforms.uScale!.value =
       state.gl.domElement.height / (2 * Math.tan((camera.fov * Math.PI) / 360));
