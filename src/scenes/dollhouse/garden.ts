@@ -2,6 +2,7 @@ import {
   BufferAttribute,
   Color,
   DoubleSide,
+  DynamicDrawUsage,
   Group,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
@@ -57,8 +58,12 @@ export interface GardenOptions {
   ground: (x: number, z: number) => number;
   /** true where nothing else stands within r of (x, z) and the camera does not pass */
   clear: (x: number, z: number, r: number) => boolean;
-  /** points along the camera's track; flowers gather around it */
+  /** points along the camera's track (the drifts the garden first had were placed from these) */
   path: { x: number; z: number }[];
+  /** evenly spaced points along the camera's track: the flower beds border it */
+  track: { x: number; z: number }[];
+  /** true where no flower may grow: the stele's plinth, the doorways, the stepping stones */
+  blocked: (x: number, z: number) => boolean;
   rnd: () => number;
   /** GLSL defining `vec3 applyFog(vec3 colour, float distance)` */
   fogGlsl: string;
@@ -68,6 +73,8 @@ export interface GardenOptions {
   groundGlsl: string;
   /** a cast-shadow material around the given vertex shader, which sets vW and vA (see dollhouse.tsx) */
   shadowMaterial: (vertexShader: string) => ShaderMaterial;
+  /** a contact-shadow material around the given vertex shader, which sets vW, vA and vQ (see dollhouse.tsx) */
+  contactMaterial: (vertexShader: string) => ShaderMaterial;
 }
 
 export interface Garden {
@@ -76,7 +83,8 @@ export interface Garden {
   drifts: { x: number; z: number; r: number; hue: RGB }[];
   /** foot of each pinwheel stalk, and the height of its hub (the stalk's shadow is baked with the scene's) */
   pinwheels: { x: number; z: number; size: number; top: number }[];
-  update(t: number): void;
+  /** `eye` the camera's position, `at` a point it looks towards: the flowers drawn are those in view */
+  update(t: number, eye: { x: number; y: number; z: number }, at: { x: number; y: number; z: number }): void;
   dispose(): void;
 }
 
@@ -109,6 +117,246 @@ function geometry(pos: number[], part: number[]) {
   return g;
 }
 
+/** a small generator of its own (mulberry32) */
+function seeded(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** draws from `rnd` exactly what the garden's first flower drifts drew, so later placements keep their places */
+function skipOldDrifts(rnd: () => number, path: { x: number; z: number }[]) {
+  const COUNT = 3200;
+  let n = 0;
+  while (n < COUNT) {
+    const at = path[Math.floor(rnd() * path.length)]!;
+    const a = rnd() * TAU;
+    const d = 3 + rnd() ** 1.5 * 34;
+    const cx = at.x + Math.cos(a) * d;
+    const cz = at.z + Math.sin(a) * d;
+    rnd();
+    const spread = 1.2 + rnd() * 3.5;
+    rnd();
+    const k = Math.min(COUNT - n, 10 + Math.floor(rnd() * 40));
+    for (let i = 0; i < k; i++) {
+      const b = rnd() * TAU;
+      const r = spread * Math.sqrt(rnd());
+      if (Math.hypot(cx + Math.cos(b) * r, cz + Math.sin(b) * r) > 8.6) rnd();
+      rnd();
+      n++;
+    }
+  }
+}
+
+type V3 = [number, number, number];
+/** an indexed mesh grown part by part, each part a grid of points f(u, v), its normals from f's slopes */
+class Sheet {
+  pos: number[] = [];
+  nor: number[] = [];
+  part: number[] = [];
+  uv: number[] = [];
+  idx: number[] = [];
+  /** `up` says which way the part's front faces (and its normals) should point at a sample point */
+  grid(f: (u: number, v: number) => V3, nu: number, nv: number, part: number, up: (q: V3, n: V3) => number) {
+    const base = this.pos.length / 3;
+    const e = 1e-3;
+    const normal = (u: number, v: number): V3 => {
+      const a = f(u + e, v);
+      const b = f(u - e, v);
+      const c = f(u, v + e);
+      const d = f(u, v - e);
+      const du = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+      const dv = [c[0] - d[0], c[1] - d[1], c[2] - d[2]];
+      const n: V3 = [du[1]! * dv[2]! - du[2]! * dv[1]!, du[2]! * dv[0]! - du[0]! * dv[2]!, du[0]! * dv[1]! - du[1]! * dv[0]!];
+      const l = Math.hypot(...n);
+      return l < 1e-12 ? [0, 0, 0] : [n[0] / l, n[1] / l, n[2] / l];
+    };
+    const mid = normal(0.5, 0.5);
+    const flip = up(f(0.5, 0.5), mid) < 0 ? -1 : 1;
+    for (let i = 0; i <= nu; i++) {
+      for (let j = 0; j <= nv; j++) {
+        const u = i / nu;
+        const v = j / nv;
+        let n = normal(u, v);
+        if (n[0] === 0 && n[1] === 0 && n[2] === 0) n = normal(Math.max(u, 0.02), v);
+        this.pos.push(...f(u, v));
+        this.nor.push(n[0] * flip, n[1] * flip, n[2] * flip);
+        this.part.push(part);
+        this.uv.push(u, v);
+      }
+    }
+    for (let i = 0; i < nu; i++) {
+      for (let j = 0; j < nv; j++) {
+        const a = base + i * (nv + 1) + j;
+        const b = a + nv + 1;
+        if (flip > 0) this.idx.push(a, b, a + 1, b, b + 1, a + 1);
+        else this.idx.push(a, a + 1, b, b, a + 1, b + 1);
+      }
+    }
+  }
+  geometry() {
+    const g = new InstancedBufferGeometry();
+    g.setAttribute("position", new BufferAttribute(new Float32Array(this.pos), 3));
+    g.setAttribute("normal", new BufferAttribute(new Float32Array(this.nor), 3));
+    g.setAttribute("aPart", new BufferAttribute(new Float32Array(this.part), 1));
+    g.setAttribute("aUV", new BufferAttribute(new Float32Array(this.uv), 2));
+    g.setIndex(this.idx);
+    return g;
+  }
+}
+
+/** where the stem ends and the head sits, a flower being 1 tall */
+const HEAD_X = 0.12;
+const HEAD_Y = 0.96;
+/** the distances over which a flower hands over to its few-triangle self; grass is gone a little past them */
+const LOD_NEAR = 8.5;
+const LOD_FAR = 12.5;
+
+interface FlowerKind {
+  petals: number;
+  /** petal length and half width */
+  len: number;
+  width: number;
+  /** how far the petals rise towards their tips, roll up at their rims, and curl back at the end */
+  cup: number;
+  roll: number;
+  curl: number;
+  eye: number;
+}
+const FLOWER_KINDS: FlowerKind[] = [
+  // a cosmos: eight broad-tipped petals in a shallow bowl
+  { petals: 8, len: 0.36, width: 0.12, cup: 0.5, roll: 0.45, curl: 0.35, eye: 0.11 },
+  // a cupped poppy: five round petals, deep
+  { petals: 5, len: 0.34, width: 0.21, cup: 1.1, roll: 0.3, curl: 0.12, eye: 0.1 },
+  // a daisy: nine narrow rays round a big eye, curling back at their tips
+  { petals: 9, len: 0.4, width: 0.075, cup: 0.3, roll: 0.6, curl: 0.7, eye: 0.14 },
+];
+
+/** a flower of kind k; `far` is the few-triangle one drawn where it is only a few pixels across */
+function flowerGeometry(k: FlowerKind, far = false) {
+  const s = new Sheet();
+  // the stem: a quadratic curve from the foot to the head, tapering
+  const P1 = [-0.04, 0.5];
+  const bez = (u: number) => [2 * (1 - u) * u * P1[0]! + u * u * HEAD_X, 2 * (1 - u) * u * P1[1]! + u * u * HEAD_Y];
+  const tan = (u: number) => {
+    const t = [2 * (1 - u) * P1[0]! + 2 * u * (HEAD_X - P1[0]!), 2 * (1 - u) * P1[1]! + 2 * u * (HEAD_Y - P1[1]!)];
+    const l = Math.hypot(t[0]!, t[1]!);
+    return [t[0]! / l, t[1]! / l];
+  };
+  s.grid(
+    (u, v) => {
+      const [x, y] = bez(u);
+      const [tx, ty] = tan(u);
+      const r = 0.03 - 0.015 * u;
+      const a = v * TAU;
+      // across the curve in its plane is (ty, -tx); the other way is z
+      return [x! + r * Math.cos(a) * ty!, y! - r * Math.cos(a) * tx!, r * Math.sin(a)];
+    },
+    far ? 1 : 2,
+    far ? 2 : 3,
+    0,
+    (q, n) => n[2] * q[2] + n[0] * (q[0] - bez(0.5)[0]!) + n[1] * (q[1] - bez(0.5)[1]!),
+  );
+  // the head, nodding along the stem's last direction
+  const [hx, hy] = tan(1);
+  const th = Math.atan2(hx!, hy!);
+  const ct = Math.cos(th);
+  const st = Math.sin(th);
+  const head =
+    (f: (u: number, v: number) => V3) =>
+    (u: number, v: number): V3 => {
+      const [x, y, z] = f(u, v);
+      return [HEAD_X + x * ct + y * st, HEAD_Y - x * st + y * ct, z];
+    };
+  const outward = (q: V3, n: V3) => n[0] * (q[0] - HEAD_X) + n[2] * q[2];
+  const upward = (_q: V3, n: V3) => -n[0] * st + n[1] * ct;
+  // the calyx: a little cone up to the head, and five pointed sepals turned down under it
+  if (!far) s.grid(
+    head((u, v) => {
+      const r = 0.016 + (k.eye * 0.75 - 0.016) * u ** 1.6;
+      return [r * Math.cos(v * TAU), -0.07 + 0.065 * u, r * Math.sin(v * TAU)];
+    }),
+    1,
+    5,
+    3,
+    outward,
+  );
+  for (let j = 0; j < (far ? 0 : 5); j++) {
+    const a = (j / 5) * TAU + 0.3;
+    s.grid(
+      head((u, v) => {
+        const r = k.eye * 0.5 + 0.14 * u;
+        const w = 0.045 * (1 - u) * (v * 2 - 1);
+        return [Math.cos(a) * r - Math.sin(a) * w, -0.02 - 0.09 * u * u, Math.sin(a) * r + Math.cos(a) * w];
+      }),
+      1,
+      1,
+      3,
+      upward,
+    );
+  }
+  // the petals
+  for (let j = 0; j < k.petals; j++) {
+    const a = (j / k.petals) * TAU + (j % 2) * 0.04;
+    const lift = (j % 2) * 0.012;
+    s.grid(
+      head((u, v) => {
+        const vv = v * 2 - 1;
+        // far off, a petal is one quad: cut off before its tip, so that it stays broad
+        if (far) u = 0.12 + 0.68 * u;
+        const r = k.eye * 0.55 + u * k.len;
+        const w = (far ? 1.3 : 1) * k.width * Math.sqrt(Math.max(0, 1 - ((u - 0.42) / 0.58) ** 2)) * (0.4 + 0.6 * Math.min(1, u * 3));
+        const y = lift + k.cup * k.len * 0.6 * u ** 1.6 + k.roll * vv * vv * w - k.curl * k.len * Math.max(0, u - 0.6) ** 2 * 3;
+        return [Math.cos(a) * r - Math.sin(a) * vv * w, y, Math.sin(a) * r + Math.cos(a) * vv * w];
+      }),
+      far ? 1 : 3,
+      1,
+      1,
+      upward,
+    );
+  }
+  // the eye: a low dome
+  s.grid(
+    head((u, v) => {
+      const r = k.eye * u;
+      return [r * Math.cos(v * TAU), 0.02 + 0.045 * (1 - u * u), r * Math.sin(v * TAU)];
+    }),
+    1,
+    far ? 4 : 6,
+    2,
+    upward,
+  );
+  return s.geometry();
+}
+
+/** a tuft of grass: five tapering blades leaning out, 1 tall */
+function tuftGeometry() {
+  const s = new Sheet();
+  const r = seeded(77);
+  for (let j = 0; j < 5; j++) {
+    const a = (j / 5) * TAU + r() * 0.9;
+    const h = 0.55 + r() * 0.45;
+    const lean = 0.2 + r() * 0.35;
+    s.grid(
+      (u, v) => {
+        const w = 0.04 * (1 - u) ** 0.8 * (v * 2 - 1);
+        const out = 0.03 + lean * u * u;
+        return [Math.cos(a) * out - Math.sin(a) * w, h * u - 0.1 * lean * u * u, Math.sin(a) * out + Math.cos(a) * w];
+      },
+      3,
+      1,
+      4,
+      (q, n) => n[0] * q[0] + n[2] * q[2],
+    );
+  }
+  return s.geometry();
+}
+
 export function createGarden(o: GardenOptions): Garden {
   const { rnd, ground } = o;
   const root = new Group();
@@ -116,6 +364,13 @@ export function createGarden(o: GardenOptions): Garden {
   const pinwheels: Garden["pinwheels"] = [];
   const materials: ShaderMaterial[] = [];
   const geometries: InstancedBufferGeometry[] = [];
+  const pools: {
+    g: InstancedBufferGeometry;
+    list: { x: number; z: number }[];
+    d0: number;
+    d1: number;
+    attrs: { a: InstancedBufferAttribute; from: Float32Array }[];
+  }[] = [];
   const add = (g: InstancedBufferGeometry, m: ShaderMaterial) => {
     if (!m.uniforms.uT) m.uniforms.uT = { value: 0 };
     const mesh = new Mesh(g, m as Material);
@@ -128,86 +383,299 @@ export function createGarden(o: GardenOptions): Garden {
     new ShaderMaterial({ uniforms: { uT: { value: 0 } }, vertexShader, fragmentShader: FRAGMENT(o.fogGlsl, flat), side: DoubleSide });
 
   // -------------------------------------------------------------------------------------------
-  // flowers: a stem, six petals and a button (aPart 0 / 1 / 2)
+  // flowers and grass. Every flower is a bent, tapering stem, a green calyx, a ring of cupped
+  // petals whose rims roll up and whose tips curl back, and a domed eye; three shapes of head
+  // (aPart 0 stem, 1 petal, 2 eye, 3 calyx; tufts of grass are aPart 4). They grow in beds that
+  // border the camera's way, and each stands in a soft shadow of its own (a decal, see below).
   // -------------------------------------------------------------------------------------------
   {
-    const pos: number[] = [];
-    const part: number[] = [];
-    const tri = (a: number[], b: number[], c: number[], p: number) => {
-      pos.push(...a, ...b, ...c);
-      part.push(p, p, p);
-    };
-    tri([-0.035, 0, 0], [0.035, 0, 0], [0, 1, 0], 0);
-    tri([0, 0, -0.035], [0, 0, 0.035], [0, 1, 0], 0);
-    // the head is tipped a little towards +z; every flower gets its own yaw
-    const head = (r: number, a: number, lift = 0): number[] => {
-      const x = Math.cos(a) * r;
-      const z = Math.sin(a) * r;
-      return [x, 1 + lift + z * 0.45, z * 0.9];
-    };
-    for (let k = 0; k < 6; k++) {
-      const a = (k / 6) * TAU;
-      tri(head(0, 0), head(0.42, a - 0.42), head(0.7, a), 1);
-      tri(head(0, 0), head(0.7, a), head(0.42, a + 0.42), 1);
-      tri(head(0, 0, 0.03), head(0.22, a, 0.03), head(0.22, a + TAU / 6, 0.03), 2);
-    }
-    const g = geometry(pos, part);
+    // the drifts the scene had before are still drawn from `rnd`, so that everything placed after
+    // them (the pinwheels) stays where it was; the beds have a generator of their own
+    skipOldDrifts(rnd, o.path);
+    const rb = seeded(90731);
 
-    const COUNT = 3200;
-    const place = new Float32Array(COUNT * 4);
-    const look = new Float32Array(COUNT * 4);
-    // deeper than the sand they stand on in every case, so that a drift is a patch of colour from afar
+    const kinds = FLOWER_KINDS.map((k) => flowerGeometry(k));
+    const tuftGeo = tuftGeometry();
+    type Plant = { x: number; y: number; z: number; s: number; hue: RGB; ph: number };
+    const byKind: Plant[][] = kinds.map(() => []);
+    const tufts: Plant[] = [];
+    const P = o.track;
+    const lane = (x: number, z: number) => {
+      let best = Infinity;
+      for (let i = 0; i + 1 < P.length; i++) {
+        const a = P[i]!;
+        const b = P[i + 1]!;
+        const ex = b.x - a.x;
+        const ez = b.z - a.z;
+        const k = Math.max(0, Math.min(1, ((x - a.x) * ex + (z - a.z) * ez) / (ex * ex + ez * ez || 1)));
+        best = Math.min(best, Math.hypot(x - a.x - ex * k, z - a.z - ez * k));
+      }
+      return best;
+    };
+    // deeper than the sand they stand on in every case, so that a bed is a patch of colour from afar
     const hues = ["#f285a2", "#f4cc55", "#ea6a98", "#74aef0", "#b094ec", "#f4955a", "#5fcdb0"].map(onScreen);
-    let n = 0;
-    // drifts: each one a patch of a single colour near the camera's way
-    while (n < COUNT) {
-      const at = o.path[Math.floor(rnd() * o.path.length)]!;
-      const a = rnd() * TAU;
-      const d = 3 + rnd() ** 1.5 * 34;
-      const cx = at.x + Math.cos(a) * d;
-      const cz = at.z + Math.sin(a) * d;
-      const hue = hues[Math.floor(rnd() * hues.length)]!;
-      const spread = 1.2 + rnd() * 3.5;
-      const size = 0.2 + rnd() * 0.3;
-      const k = Math.min(COUNT - n, 10 + Math.floor(rnd() * 40));
-      if (Math.hypot(cx, cz) > 8.6 + spread) drifts.push({ x: cx, z: cz, r: spread, hue });
-      for (let i = 0; i < k; i++) {
-        const b = rnd() * TAU;
-        const r = spread * Math.sqrt(rnd());
-        const x = cx + Math.cos(b) * r;
-        const z = cz + Math.sin(b) * r;
-        // not on the stele's plinth
-        const ok = Math.hypot(x, z) > 8.6;
-        place.set([x, ground(x, z) - 0.02, z, ok ? size * (0.6 + 0.6 * rnd()) : 0], n * 4);
-        look.set([hue[0], hue[1], hue[2], rnd() * TAU], n * 4);
-        n++;
+    const grass = ["#8cc49a", "#a3d2a2", "#93ccb2"].map(onScreen);
+    const plant = (list: Plant[], x: number, z: number, s: number, hue: RGB, clearance: number) => {
+      if (o.blocked(x, z) || lane(x, z) < clearance) return false;
+      list.push({ x, y: ground(x, z) - 0.02, z, s, hue, ph: rb() * TAU });
+      return true;
+    };
+    /** a bed: an ellipse `along` by `across`, centred at (cx, cz), its long axis along (tx, tz) */
+    const bed = (cx: number, cz: number, tx: number, tz: number, along: number, across: number, density: number, near: boolean) => {
+      const hue = hues[Math.floor(rb() * hues.length)]!;
+      const main = Math.floor(rb() * kinds.length);
+      const size = near ? 0.3 + rb() * 0.16 : 0.26 + rb() * 0.18;
+      const count = Math.round(Math.PI * along * across * density);
+      for (let i = 0; i < count; i++) {
+        const rr = Math.sqrt(rb());
+        const b = rb() * TAU;
+        const lx = Math.cos(b) * rr * along;
+        const lz = Math.sin(b) * rr * across;
+        const x = cx + tx * lx - tz * lz;
+        const z = cz + tz * lx + tx * lz;
+        // taller in the middle of a bed, so that it mounds
+        const s = size * (0.62 + 0.5 * (1 - rr * rr)) * (0.85 + 0.3 * rb());
+        const kind = rb() < 0.82 ? main : Math.floor(rb() * kinds.length);
+        plant(byKind[kind]!, x, z, s, hue, 1.15);
+      }
+      // grass round the rim of the bed
+      for (let i = 0, m = Math.round((along + across) * 3); i < m; i++) {
+        const b = rb() * TAU;
+        const rr = 0.85 + 0.35 * rb();
+        const x = cx + tx * Math.cos(b) * rr * along - tz * Math.sin(b) * rr * across;
+        const z = cz + tz * Math.cos(b) * rr * along + tx * Math.sin(b) * rr * across;
+        plant(tufts, x, z, 0.24 + rb() * 0.16, grass[Math.floor(rb() * grass.length)]!, 0.95);
+      }
+      if (Math.hypot(cx, cz) > 9.5) drifts.push({ x: cx, z: cz, r: Math.sqrt(along * across), hue });
+    };
+    const along = (i: number) => {
+      const a = P[i]!;
+      const b = P[Math.min(P.length - 1, i + 1)]!;
+      const l = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+      return { a, tx: (b.x - a.x) / l, tz: (b.z - a.z) / l };
+    };
+    // beds bordering the way, on both sides: clusters of two or three, each its own colour,
+    // overlapping one another along the way
+    for (let n = 0; n < 30; n++) {
+      const { a, tx, tz } = along(Math.floor(rb() * (P.length - 1)));
+      const side = rb() < 0.5 ? -1 : 1;
+      const off = 1.6 + rb() ** 1.4 * 5.5;
+      for (let m = 0, k = 2 + Math.floor(rb() * 2); m < k; m++) {
+        const lA = 1.1 + rb() * 1.6;
+        const lB = 0.6 + rb() * 0.8;
+        const s = (m - (k - 1) / 2) * 1.7 + (rb() - 0.5) * 0.6;
+        const o2 = off + lB * 0.6 + (rb() - 0.3) * 1.2;
+        bed(a.x - tz * side * o2 + tx * s, a.z + tx * side * o2 + tz * s, tx, tz, lA, lB, 7 + rb() * 3, true);
       }
     }
-    g.setAttribute("aPlace", new InstancedBufferAttribute(place, 4));
-    g.setAttribute("aLook", new InstancedBufferAttribute(look, 4));
-    g.instanceCount = COUNT;
-    add(
-      g,
-      shader(/* glsl */ `
+    // and further out, round drifts that read as patches of colour across the garden
+    for (let n = 0; n < 28; n++) {
+      const { a } = along(Math.floor(rb() * (P.length - 1)));
+      const ang = rb() * TAU;
+      const d = 9 + rb() ** 1.5 * 30;
+      const r = 1.2 + rb() * 1.6;
+      bed(a.x + Math.cos(ang) * d, a.z + Math.sin(ang) * d, 1, 0, r, r, 4.2, false);
+    }
+    // grass, and a few small blossoms, close beside the way
+    for (let n = 0; n < 1100; n++) {
+      const { a, tx, tz } = along(Math.floor(rb() * (P.length - 1)));
+      const side = rb() < 0.5 ? -1 : 1;
+      const off = 1.0 + rb() ** 1.6 * 4.5;
+      const sl = (rb() - 0.5) * 2;
+      const x = a.x - tz * side * off + tx * sl;
+      const z = a.z + tx * side * off + tz * sl;
+      if (rb() < 0.2) plant(byKind[Math.floor(rb() * kinds.length)]!, x, z, 0.13 + rb() * 0.08, hues[Math.floor(rb() * hues.length)]!, 1.0);
+      else plant(tufts, x, z, 0.2 + rb() * 0.2, grass[Math.floor(rb() * grass.length)]!, 0.9);
+    }
+
+    const material = (far: number) => new ShaderMaterial({
+      uniforms: { uT: { value: 0 }, uFar: { value: far } },
+      side: DoubleSide,
+      vertexShader: /* glsl */ `
         attribute float aPart;
-        attribute vec4 aPlace; // foot, height
-        attribute vec4 aLook;  // petal colour, phase
+        attribute vec2 aUV;
+        attribute vec4 aPlace; // foot, size
+        attribute vec4 aLook;  // colour, phase
         uniform float uT;
-        ${VARYINGS}
+        uniform float uFar;
+        varying vec3 vCol;
+        varying vec3 vW;
+        varying vec3 vN;
+        varying vec3 vUP;
         void main() {
+          // near the eye the full flower; past ${LOD_NEAR} m the few-triangle one; between, one
+          // shrinks into the sand as the other grows out of it
+          // each flower hands over at a distance of its own, the two overlapping for a stride, so
+          // the change never sweeps across a bed as a line and nothing shrinks
+          float dist = length(cameraPosition - aPlace.xyz);
+          float swap = ${LOD_NEAR.toFixed(1)} + ${(LOD_FAR - LOD_NEAR).toFixed(1)} * fract(aLook.w * 7.13);
+          float grow = uFar > 1.5 ? 1.0 - smoothstep(${(LOD_FAR - 3).toFixed(1)}, ${(LOD_FAR + 2).toFixed(1)}, dist)
+                     : uFar > 0.5 ? step(swap - 0.5, dist) : step(dist, swap + 0.5);
+          if (grow <= 0.0) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+          }
           float yaw = aLook.w * 5.0;
-          float c = cos(yaw), s = sin(yaw);
+          mat2 R = mat2(cos(yaw), sin(yaw), -sin(yaw), cos(yaw));
           vec3 p = position;
-          p.xz = mat2(c, s, -s, c) * p.xz;
-          // a breeze crosses the garden in slow waves
+          vec3 n = normal;
+          p.xz = R * p.xz;
+          n.xz = R * n.xz;
+          // a breeze crosses the garden in slow waves; the stem bends, and the head nods with it
           float gust = sin(uT * 1.4 + aPlace.x * 0.22 + aPlace.z * 0.17) + 0.4 * sin(uT * 3.1 + aLook.w);
-          p.x += 0.16 * gust * position.y * position.y;
-          vW = aPlace.xyz + p * aPlace.w;
-          // dark green stems and a dark eye, so every flower has its own little contrast
-          vCol = aPart < 0.5 ? ${glScreen("#3f9468")} * (0.45 + 0.6 * position.y) : aPart < 1.5 ? aLook.rgb * (0.74 + 0.4 * length(position.xz)) : ${glScreen("#5c2a50")};
+          float k = 0.16 * gust * (aPart > 3.5 ? 0.7 : 1.0);
+          p.x += k * position.y * position.y;
+          n.y -= 2.0 * k * position.y * n.x;
+          vW = aPlace.xyz + p * aPlace.w * grow;
+          vN = normalize(n);
+          vUP = vec3(aUV, aPart);
+          vCol = aPart < 0.5 ? ${glScreen("#3f9468")} * (0.45 + 0.6 * position.y)
+               : aPart < 1.5 ? aLook.rgb
+               : aPart < 2.5 ? ${glScreen("#5c2a50")}
+               : aPart < 3.5 ? ${glScreen("#4f9f6c")}
+               : aLook.rgb * (0.5 + 0.6 * position.y);
           gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
-        }`),
-    );
+        }`,
+      fragmentShader: /* glsl */ `
+        varying vec3 vCol;
+        varying vec3 vW;
+        varying vec3 vN;
+        varying vec3 vUP;
+        const vec3 SUN = vec3(${o.sun.x.toFixed(4)}, ${o.sun.y.toFixed(4)}, ${o.sun.z.toFixed(4)});
+        ${o.fogGlsl}
+        void main() {
+          vec3 n = normalize(vN) * (gl_FrontFacing ? 1.0 : -1.0);
+          vec3 col = vCol;
+          float part = vUP.z;
+          if (part > 0.5 && part < 1.5) {
+            float u = vUP.x;
+            float across = abs(vUP.y * 2.0 - 1.0);
+            // deeper at the heart, paler towards the rim, a fine crease down the middle
+            col *= mix(0.7, 1.07, smoothstep(0.0, 0.8, u));
+            col *= 1.0 - 0.16 * (1.0 - smoothstep(0.0, 0.2, across)) * (1.0 - 0.7 * u);
+            // the underside is a duskier shade of the same colour
+            if (!gl_FrontFacing) col *= vec3(0.64, 0.58, 0.7);
+          } else if (part > 1.5 && part < 2.5) {
+            // the eye: a ring of pollen round a dark middle
+            col = mix(col, ${glScreen("#e8b85a")}, 0.55 * smoothstep(0.55, 0.85, vUP.x));
+          }
+          // a wrapped sun, so that the side turned from it is shaded, never black
+          float w = clamp(dot(n, SUN) * 0.5 + 0.5, 0.0, 1.0);
+          col *= 0.55 + 0.56 * w;
+          gl_FragColor = vec4(applyFog(col, length(cameraPosition - vW)), 1.0);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }`,
+    });
+    const nearMat = material(0);
+    const farMat = material(1);
+    const grassMat = material(2);
+    materials.push(nearMat, farMat, grassMat);
+    /**
+     * Instances drawn from a list: every frame only those in view and within [d0, d1) of the eye
+     * are copied to the front of the geometry's instance buffers, so nothing out of sight is
+     * transformed at all.
+     */
+    const pool = (g: InstancedBufferGeometry, m: ShaderMaterial, list: Plant[], d0: number, d1: number, src: Record<string, Float32Array>) => {
+      const attrs = Object.entries(src).map(([name, from]) => {
+        const a = new InstancedBufferAttribute(new Float32Array(from.length), 4);
+        a.setUsage(DynamicDrawUsage);
+        g.setAttribute(name, a);
+        return { a, from };
+      });
+      g.instanceCount = 0;
+      const mesh = new Mesh(g, m);
+      mesh.frustumCulled = false;
+      root.add(mesh);
+      geometries.push(g);
+      pools.push({ g, list, d0, d1, attrs });
+    };
+    const plantAttrs = (list: Plant[]) => {
+      const place = new Float32Array(Math.max(1, list.length) * 4);
+      const look = new Float32Array(Math.max(1, list.length) * 4);
+      list.forEach((f, i) => {
+        place.set([f.x, f.y, f.z, f.s], i * 4);
+        look.set([f.hue[0], f.hue[1], f.hue[2], f.ph], i * 4);
+      });
+      return { aPlace: place, aLook: look };
+    };
+    kinds.forEach((g, i) => {
+      const list = byKind[i]!;
+      const src = plantAttrs(list);
+      pool(g, nearMat, list, 0, LOD_FAR + 1, src);
+      pool(flowerGeometry(FLOWER_KINDS[i]!, true), farMat, list, LOD_NEAR - 1, 64, src);
+    });
+    pool(tuftGeo, grassMat, tufts, 0, LOD_FAR + 2, plantAttrs(tufts));
+
+    // the shadows: a dark pool at each foot, and a soft one where the sun throws the head
+    const dg = new InstancedBufferGeometry();
+    const corners = [-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5];
+    const dpos: number[] = [];
+    const dpart: number[] = [];
+    for (let q = 0; q < 2; q++) {
+      for (let c = 0; c < 4; c++) {
+        dpos.push(corners[c * 2]!, 0, corners[c * 2 + 1]!);
+        dpart.push(q);
+      }
+    }
+    dg.setAttribute("position", new BufferAttribute(new Float32Array(dpos), 3));
+    dg.setAttribute("aPart", new BufferAttribute(new Float32Array(dpart), 1));
+    // wound to face up
+    dg.setIndex([0, 2, 1, 0, 3, 2, 4, 6, 5, 4, 7, 6]);
+    const all = byKind.flat().map((f) => [f, 1] as const);
+    const dec = new Float32Array(all.length * 4);
+    const dec2 = new Float32Array(all.length * 4);
+    all.forEach(([f], i) => {
+      dec.set([f.x, f.y, f.z, f.s], i * 4);
+      // phase, the foot pool's width, the head's shadow, the foot pool's strength
+      dec2.set([f.ph, 0.42, 0.3, 0.65], i * 4);
+    });
+    const DECAL_VS = /* glsl */ `
+        attribute float aPart;
+        attribute vec4 aDec;
+        attribute vec4 aDec2;
+        uniform float uT;
+        varying vec3 vW;
+        varying float vA;
+        varying vec2 vQ;
+        const vec3 SUN = vec3(${o.sun.x.toFixed(4)}, ${o.sun.y.toFixed(4)}, ${o.sun.z.toFixed(4)});
+        ${o.groundGlsl}
+        void main() {
+          vec3 c = aDec.xyz;
+          float d;
+          // only near the eye: further off the bed's own broad shadow is enough
+          float fade = 1.0 - smoothstep(${(LOD_FAR - 5).toFixed(1)}, ${(LOD_FAR + 2).toFixed(1)}, length(cameraPosition - c));
+          if (fade <= 0.0 || aDec2.z <= 0.0) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+          }
+          if (aPart < 0.5) {
+            d = aDec2.y * aDec.w;
+            vA = aDec2.w * fade;
+          } else {
+            if (aDec2.z <= 0.0) {
+              gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+              return;
+            }
+            // the head, swaying as the flower does, thrown along the sun onto the sand
+            float yaw = aDec2.x * 5.0;
+            float gust = sin(uT * 1.4 + c.x * 0.22 + c.z * 0.17) + 0.4 * sin(uT * 3.1 + aDec2.x);
+            vec2 head = mat2(cos(yaw), sin(yaw), -sin(yaw), cos(yaw)) * vec2(${HEAD_X.toFixed(3)}, 0.0) + vec2(0.16 * gust * ${(HEAD_Y * HEAD_Y).toFixed(3)}, 0.0);
+            c.xz += (head - SUN.xz / SUN.y * ${HEAD_Y.toFixed(3)}) * aDec.w;
+            d = 0.95 * aDec.w;
+            vA = aDec2.z * fade;
+          }
+          vec3 w = vec3(c.x + position.x * d, 0.0, c.z + position.z * d);
+          w.y = groundAt(w.xz) + 0.03;
+          vW = w;
+          vQ = position.xz;
+          gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+        }`;
+    const decalMat = o.contactMaterial(DECAL_VS);
+    if (!decalMat.uniforms.uT) decalMat.uniforms.uT = { value: 0 };
+    materials.push(decalMat);
+    pool(dg, decalMat, all.map(([f]) => f), 0, LOD_FAR + 3, { aDec: dec, aDec2: dec2 });
+    if (import.meta.env.DEV) console.debug(`dollhouse: ${byKind.map((l) => l.length).join(" + ")} flowers, ${tufts.length} tufts`);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -417,12 +885,59 @@ export function createGarden(o: GardenOptions): Garden {
     );
   }
 
+  // pools drawn from one list are chosen in one pass over it
+  const poolGroups = new Map<object, typeof pools>();
+  for (const p of pools) poolGroups.set(p.list, [...(poolGroups.get(p.list) ?? []), p]);
+  let last: number[] = [];
+
   return {
     root,
     drifts,
     pinwheels,
-    update(t) {
+    update(t, eye, at) {
       for (const m of materials) m.uniforms.uT!.value = t;
+      // what is in view: a cone round the line of sight a little wider than the widest view
+      if (eye.x === last[0] && eye.y === last[1] && eye.z === last[2] && at.x === last[3] && at.z === last[4]) return;
+      last = [eye.x, eye.y, eye.z, at.x, at.z];
+      let fx = at.x - eye.x;
+      let fz = at.z - eye.z;
+      const fl = Math.sqrt(fx * fx + fz * fz) || 1;
+      fx /= fl;
+      fz /= fl;
+      const ey = (eye.y - 1) * (eye.y - 1);
+      for (const group of poolGroups.values()) {
+        const list = group[0]!.list;
+        const counts = group.map(() => 0);
+        for (let i = 0; i < list.length; i++) {
+          const f = list[i]!;
+          const dx = f.x - eye.x;
+          const dz = f.z - eye.z;
+          const d = Math.sqrt(dx * dx + dz * dz + ey);
+          if (dx * fx + dz * fz < 0.5 * d - 2.5) continue;
+          for (let k = 0; k < group.length; k++) {
+            const p = group[k]!;
+            if (d < p.d0 || d >= p.d1) continue;
+            const n = counts[k]!;
+            for (const { a, from } of p.attrs) {
+              const to = a.array as Float32Array;
+              to[n * 4] = from[i * 4]!;
+              to[n * 4 + 1] = from[i * 4 + 1]!;
+              to[n * 4 + 2] = from[i * 4 + 2]!;
+              to[n * 4 + 3] = from[i * 4 + 3]!;
+            }
+            counts[k] = n + 1;
+          }
+        }
+        group.forEach((p, k) => {
+          const n = counts[k]!;
+          p.g.instanceCount = n;
+          for (const { a } of p.attrs) {
+            a.clearUpdateRanges();
+            a.addUpdateRange(0, Math.max(1, n) * 4);
+            a.needsUpdate = true;
+          }
+        });
+      }
     },
     dispose() {
       for (const m of materials) m.dispose();

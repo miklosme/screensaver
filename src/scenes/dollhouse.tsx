@@ -250,6 +250,30 @@ const DOORS: DoorDef[] = [
   { x: 30, z: 6, fx: -1, fz: 0.5, scale: 0.9, pal: 3, frame: 3 },
 ];
 
+/** the stepping stones: a winding line from the stele's plinth, through the thin doorway, and on behind it */
+const STONES = 26;
+const stoneAt = (i: number) => {
+  const z = i < 13 ? 9.6 + i * 1.42 : 32 + (i - 13) * 1.42;
+  return { x: Math.sin(z * 0.21 + 0.6) * 1.1 * smoothstep(3, 7, Math.abs(z - 30)) + (i % 2 ? 0.3 : -0.3), z };
+};
+
+/** true where no flower may grow: on the stele's plinth, in a doorway's band or a hut, on a stepping stone */
+const flowerBlocked = (x: number, z: number) => {
+  if (Math.hypot(x, z) < 9.2) return true;
+  for (const d of DOORS) {
+    const l = Math.hypot(d.fx, d.fz);
+    const along = ((x - d.x) * d.fz - (z - d.z) * d.fx) / l;
+    const out = ((x - d.x) * d.fx + (z - d.z) * d.fz) / l;
+    if (Math.abs(along) < (D_A + 0.7) * d.scale && Math.abs(out) < 0.6 * d.scale + 0.25) return true;
+    if (d.hut && Math.hypot(out + D_A * d.scale * 2.05, along) < D_A * d.scale * 2.5) return true;
+  }
+  for (let i = 0; i < STONES; i++) {
+    const s = stoneAt(i);
+    if (Math.hypot(s.x - x, s.z - z) < 1.0) return true;
+  }
+  return false;
+};
+
 /** true where a prop of radius r stands clear of the camera's track, the doors and the stele */
 const clearOf = (pathPts: Vector3[]) => (x: number, z: number, r: number) => {
   for (const p of pathPts) if (Math.hypot(p.x - x, p.z - z) < r) return false;
@@ -458,7 +482,7 @@ const PAPER = /* glsl */ `
 
 const WHITE = new Color(1, 1, 1);
 const TREES = 220;
-const CONTACTS = 560;
+const CONTACTS = 640;
 const TINTS = 160;
 const FRAME_COLORS = ["#f4ead4", "#f6b598", "#a2dcbf", "#a6cbee"];
 const HUT_COLORS = ["#f3e4c6", "#f4a98e", "#93d6b8", "#9cc3ec"];
@@ -2129,11 +2153,14 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       ground,
       clear: clearOf(pathPts),
       path: pathPts,
+      track: cam.curve.getSpacedPoints(300),
+      blocked: flowerBlocked,
       rnd: mulberry32(4711),
       fogGlsl: FOG_GLSL,
       sun: SUN_DIR,
       groundGlsl: GROUND_GLSL,
       shadowMaterial: (vs) => makeShadowMaterial("CAST", vs),
+      contactMaterial: (vs) => makeShadowMaterial("CONTACT", vs),
     });
   }, [cam]);
   useEffect(() => () => garden.dispose(), [garden]);
@@ -2303,9 +2330,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     const St = stones.current!;
     const stoneCols = ["#a2dcbf", "#f3e6cc", "#f6b598"].map((h) => paint(h));
     for (let i = 0; i < St.count; i++) {
-      // a winding line from the stele's plinth, through the thin doorway, and on behind it
-      const z = i < 13 ? 9.6 + i * 1.42 : 32 + (i - 13) * 1.42;
-      const x = Math.sin(z * 0.21 + 0.6) * 1.1 * smoothstep(3, 7, Math.abs(z - 30)) + (i % 2 ? 0.3 : -0.3);
+      const { x, z } = stoneAt(i);
       const s = 0.55 + rnd() * 0.3;
       o.position.set(x, ground(x, z) - 0.04, z);
       o.rotation.set(0, 0, 0);
@@ -2313,6 +2338,8 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       o.updateMatrix();
       St.setMatrixAt(i, o.matrix);
       St.setColorAt(i, c.setRGB(...stoneCols[i % 3]!));
+      // each disc sits in a soft pool, thrown a little away from the sun
+      contact(x - SUN_DIR.x * 0.3 * s, z - SUN_DIR.z * 0.3 * s, s * 1.7, s * 1.7, 0, 1.0);
     }
     St.instanceMatrix.needsUpdate = true;
     if (St.instanceColor) St.instanceColor.needsUpdate = true;
@@ -2320,7 +2347,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     // the garden's flower drifts and pinwheel stalks
     const Tn = tints.current!;
     garden.drifts.slice(0, Tn.count).forEach((f, i) => {
-      contact(f.x - SUN_DIR.x * 0.3, f.z - SUN_DIR.z * 0.3, f.r * 1.1, f.r * 1.1, 0, 0.32);
+      contact(f.x - SUN_DIR.x * 0.3, f.z - SUN_DIR.z * 0.3, f.r * 1.1, f.r * 1.1, 0, 0.2);
       // the sand under a drift is stained with its colour
       tilt.setFromUnitVectors(up, groundNormal(f.x, f.z, _n));
       o.position.set(f.x, ground(f.x, f.z) + 0.04, f.z);
@@ -2349,7 +2376,6 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
   useFrame(() => {
     const t = Math.min(25, Math.max(0, clock.t));
-    garden.update(t);
     for (const m of mat.interiors) m.uniforms.uT!.value = t;
     cam.curve.getPointAt(Math.min(1, cam.ride.at(t) / cam.length), camera.position);
     // straight ahead while arriving, then the eye is drawn to the doorway, then on to the stele
@@ -2359,6 +2385,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     cam.look.lerp(LEAD_DIR, 1 - free).add(camera.position);
     camera.up.set(0, 1, 0);
     camera.lookAt(cam.look);
+    garden.update(t, camera.position, cam.look);
     // a breath of roll while orbiting
     camera.rotateZ(Math.sin((t / 25) * Math.PI * 2) * 0.02 * free * (1 - smoothstep(20, RAIL.settle, t)));
     const fov = 50 + 8 * smoothstep(16, 23.5, t);
@@ -2438,7 +2465,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       <instancedMesh ref={domes} args={[geo.bigBall, mat.dome, 22]} frustumCulled={false} />
       <instancedMesh ref={loops} args={[geo.loop, mat.loop, 16]} frustumCulled={false} />
       <instancedMesh ref={clouds} args={[geo.ball, mat.cloud, 48]} frustumCulled={false} />
-      <instancedMesh ref={stones} args={[geo.disc, mat.stone, 26]} frustumCulled={false} />
+      <instancedMesh ref={stones} args={[geo.disc, mat.stone, STONES]} frustumCulled={false} />
       <primitive object={garden.root} />
     </>
   );
