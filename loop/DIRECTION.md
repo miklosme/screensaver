@@ -105,6 +105,30 @@ other work in the meantime.
    for director-level bloom, which exists since pass 001. A short "already built" list in the
    review prompt would fix it; `loop/REVIEWER.md` and `scripts/review.ts` are yours.
 
+**From pass 005:**
+
+12. **The helix and the rail: your choice.** Three tries have not matched the helix's old opening
+   and exit approach from the rail's shared approach, which is level and fixed for every
+   season. I have stopped spending a slice on it. The third try is kept, unmerged, on branch
+   `t3/helix-spring-keystone` (`git checkout t3/helix-spring-keystone && bun run dev`, then
+   `?scene=helix`; side-by-side frames in
+   `loop/out/pass-005/workers/K7/after/helix-three-columns.jpg`). Options:
+   (a) merge that branch: helix and burrow share the rail and the keyhole is a true window,
+   at the price of an opening and an exit approach the panel will call slightly weaker;
+   (b) leave the helix on its own track for good and let the other scenes ride the rail
+   around it (the joints already allow that);
+   (c) change the shared approach so a scene can arrive from below, or aim the camera, during
+   its first seconds. That is a new rail design for all four seasons and re-opens the burrow.
+   The dollhouse and orbit migrations (D3, O4) and the fifth scene (S1) wait on this too: tell
+   me whether to go on with them under (b) while you decide.
+   The same branch has a separate commit, `40fa788`, that flies the approach without camera
+   roll; it levels the burrow's dome at t=22. Say so if you want it by itself.
+13. **A correction to question 9.** I proposed keeping a slice with two regression reports when
+   every reviewer scored the scene higher. This pass the helix's scores rose from 7, 7, 7 to
+   8, 8, 7 with no change to the helix at all, so a one-point rise is within the panel's noise
+   and proves little. I applied the rule to the letter this pass (two reports: revert) and will
+   keep doing so. B1 from pass 004 stays unless you say otherwise.
+
 ## Handled
 
 Notes the director has acted on, each with the pass number.

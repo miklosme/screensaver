@@ -20,35 +20,14 @@ Ranked. A pass takes from the top, skipping items whose `Needs` is not done yet.
 means all three reviewers of that pass raised it independently. The first three items are the
 owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
 
-- **K7 helix · The helix rides spring (third try)** — the helix rides the rail and no frame of
-  its sheet is worse than the legacy one. What the third try has to add to the second:
-  (1) the opening tower is monumental: seen from nearer and from below, the dark coffered
-  underside of an upper flight overlapping the top of the frame, the stair the brightest thing
-  in the shaft with the arcade behind it darker and cooler, two large koi near the lens in the
-  first 5 s; (2) no lamp globe ever fills more than a small part of the frame (the one beside
-  the lens at t=8.5 to 12 was "an oversized cropped highlight"); (3) from t=15.5 to 19 the
-  keyhole is approached up a rising flight, seen from below and growing steadily, with the
-  coffered soffit and a koi overhead, not along a flat bridge; (4) the arch at t=22 is upright
-  and centred.
-  Reverted in pass 004 (commit `56cfd25`; scores 7, 7, 7, the same as the legacy helix): "The
-  opening tower reads less tall and monumental ... with less upward perspective" (astra); "the
-  stair is a thin pale spiral left of centre that merges into the same-valued sandstone arcade,
-  and the koi are small specks" (fable); "The left foreground lamp is now an oversized, clipped
-  globe" (sol); "t=19 is a flat, level bridge with a small, distant keyhole"; "The keyhole arch
-  is now seen with a strong camera roll (horizon tilted roughly 10 degrees) and off-centre"
-  (fable). What worked and stays: the run-up, the whole stair in frame at t=0, the newel under
-  a tenth of the frame on the climb, cost and seams unchanged, the burrow pixel-identical.
-  Technique: start from `56cfd25` (`git cherry-pick`). (1) and (3) are the world's: where the
-  stair's axis stands relative to the run-up, how far the stair continues above the camera,
-  the arcade's distance extinction, the landing's grade. (2) is a mount-time check of each
-  globe's projected size along the whole camera path. (4) is the rail's: the shared approach
-  banks up to 9° through t=20 to 23.6 in every season; taking that roll out (the track's
-  positions unchanged, so the burrow's tunnel does not move) is allowed, as its own commit.
-  The burrow keeps 7 units of tunnel behind its first frame, so the end of spring's body is
-  frozen too · Files: `src/scenes/rail.ts`, `src/scenes/helix.tsx`, `src/scenes/helix/koi.ts`,
-  `README.md` (one sentence) · Worker: fable · Frames: the whole helix sheet against
-  `loop/out/pass-004/helix.jpg`, orbit:22 orbit:24.5, the burrow sheet · Source: owner, pass
-  001; pass 003 and 004 panel 3/3 (regression)
+- **K7 helix · The helix rides spring** — WAITING ON THE OWNER (question 12 in
+  `loop/DIRECTION.md`); not to be taken until answered. Three tries (passes 003, 004, 005) could
+  not match the legacy helix's opening and exit approach from the rail's level, fixed approach.
+  The third try is kept unmerged on branch `t3/helix-spring-keystone` (commits `2cc708b`,
+  `40fa788`, `32b6aa1`): whole tower nearer with large koi, no lamp on the lens, arch upright at
+  t=22, gate green, burrow pixel-identical; short at helix:0, 2.5 (not seen from below) and 19
+  (a wider, flatter approach). Frames: `loop/out/pass-005/workers/K7/after/helix-three-columns.jpg`.
+  D3, O4 and S1 below wait on the same answer.
 - **D3 dollhouse · Rebuilt around fall** / **O4 orbit · Rebuilt around winter** — each scene
   rides its season's stretch (`season(index)`; the header of `src/scenes/rail.ts` is the
   contract) and is at least as good a picture as its legacy sheet in every frame: the garden's
@@ -82,66 +61,111 @@ owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
   motion and what fits the budget; the director builds the winner and keeps the runners-up here.
   Each proposal is a `DESIGN.md` column, a beat sheet on the 25 s timeline and a technique list.
   Worker: fable designs, opus builds · Source: owner, pass 001
-- **B6 burrow · The ribs carry the light** — with the scales kept, the nested arches read again
-  at thumbnail size: each rib crest has a broad, pale, soft highlight (coral towards mint) that
-  is independent of the scale relief and fades with distance, the troughs stay dark plum, and
-  the scales quieten on the crests. The wall beside the lens no longer blows out to chalky
-  white at the frame edge (t=0 right, t=19 left), and near scales vary a little in size, hue
-  and wetness instead of forming a regular grid. Move half as far as the reviewers ask: the
-  scales are liked.
-  Kept in pass 004 with this regression open (astra, sol): "the darker, less luminous rib
-  crests weaken the repeating depth rhythm that was especially clear in pass-003"; "lose the
-  previous pale rib highlights and longitudinal fluting"; fable: "hard specular scales that
-  blow out to near-white at the frame edge" · Files: `src/scenes/burrow/materials.ts` ·
-  Worker: opus · Frames: burrow:0 burrow:5 burrow:12 burrow:19, helix:22 · Source: pass 004
-  astra, sol (regression), fable
-- **B4 burrow · The hoop is a crafted thing, in a dome with a foreground** (panel 3/3 in passes
-  003 and 004; "the least crafted object in the scene") — the exit is a thick
-  organic ring with a pearlescent band, a recessed mint channel and beads that bloom, gimbal
-  rings of a second material, a pool of mint light and a contact shadow on the floor under it;
-  two or three large mushrooms stand near the lens to frame it (the dome lost its near layer
-  when the burrow moved onto the rail), and the eyes on the dome wall are round eyes that turn
-  to the hoop, not dark dashes.
-  "The exit remains a nearly featureless white oval with thin white loops" (astra); "plain white
-  tubing while the other scenes' exits have recognizable material and craftsmanship" (sol);
-  "the least crafted object in its dome" (fable) · Files: `src/scenes/burrow.tsx`,
-  `src/scenes/burrow/creatures.ts`, `src/scenes/burrow/build.ts` (mushroom placement in the
-  dome only) · Worker: opus · Frames: burrow:19 burrow:22 burrow:24 · Source: pass 000 astra;
-  pass 001 sol, fable; pass 003 panel 3/3, fable (regression at t=22)
-  Pass 004 adds: the dome wall behind the hoop is dark and its scales too fine to read (scale
-  them with the dome's radius); the floor wants its own surface (a faint cell or vein pattern,
-  a mint glow either side of the thread, a dark blob under every mushroom stem, which needs
-  the mushroom positions from `creatures.ts`); dome eyes open towards the camera over t=19 to 23.
-- **D9 dollhouse · Ground and air** — the garden stops looking like a flat-lit demo at t=8.5:
-  the dunes have real relief (low ridges you can see in silhouette, wind ripples shaded by the
-  sun), every tree, pinwheel, dome and doorway stands in a soft dark pool, far props fade
-  towards the horizon's peach so near, middle and far separate by more than size, and the
-  striped arches round off with a wrap and rim light. At the exit (t=19 to 22) the plinth has
-  a bevelled edge and a plaster grain instead of reading as a printed disc, and the jambs and
-  the swinging leaves throw tight contact shadows on it.
-  "This is still the scene that looks most like a three.js demo. The ground is one flat peach
-  plane with faint contour lines ... nothing separates foreground from far layer except size"
-  (fable, ranked first); "The large plinth reads as a flat printed disc, and the door leaves
-  have little visible contact with it" (astra, sol).
-  Technique: displace the ground mesh with low-frequency ridged noise (props and the baked
-  shadow mask follow the same height function), ripple normals in the sand shader, instanced
-  blob decals, height fog in the scene's own fog chunk, a wrap term on the arches; analytic
-  contact shadows on the plinth from the leaves' `clock.t` transforms · Files:
-  `src/scenes/dollhouse.tsx`, `src/scenes/dollhouse/garden.ts` · Worker: opus · Frames:
-  dollhouse:0 dollhouse:8.5 dollhouse:12 dollhouse:22 · Source: pass 004 panel 3/3
-- **O5 orbit · The street is a surface** — the road nearest the lens is worn setts with a raised
-  crown and wet streaks that reflect the lamp colour; lamp heads are round with a hot core;
-  bushes are smooth and leafy with a moon rim; the arches over the road carry voussoir banding.
-  "The road is a featureless lilac band with two white stripes, and it is the surface nearest
-  the lens for most of the ride" (fable). Files: `src/scenes/orbit.tsx` · Worker: opus ·
-  Frames: orbit:8.5 orbit:15.5 · Source: pass 000 fable; pass 001 fable
-  Pass 003, fable again: the bushes are "large faceted flat-shaded teal blobs", the arches "plain
-  untextured tubes with a visible collar seam"; and as an opportunity, wet-street reflections:
-  stretched specular streaks under each lamp and window in the cobble and road shader.
-  Pass 004 (fable ranked it third, sol fifth): also the towers nearest the lens: recessed
-  windows with a dark inner rim, a mullion and a warm halo on the wall round them, brick
-  courses with relief; arch ribs with stone joints, foot collars and strung lanterns; additive
-  light cones and soft pools under the street lamps.
+- **H7 helix · The lamp by the lens** (panel 3/3 in pass 005; fable ranked it first) — at t=8.5
+  and 15.5 the lamp beside the stair is a finished object that lights its surroundings: a
+  smooth turned post (no facets or shading break), a glass globe with a hot core and a warm
+  limb that keeps a readable round silhouette under bloom, a warm pool on the tread, the carpet,
+  the handrail and the newel beside it that falls off with distance, and a soft contact shadow
+  at its foot. It stands a little further out from the runner so the stair stays the dominant
+  path, and the handrail beside it is a smooth round rail. The grey sawtooth satellite stairs
+  in the void take the sandstone material, tinted teal with distance.
+  "The scene nearest the lens for the longest is the least finished ... the lamp post is a
+  crumpled low-poly column with visible facets and a hard shading break, the globe is a flat
+  cream disc that lights nothing around it" (fable); "The close lamp dominates the climb with a
+  featureless bright globe and a visibly angular shaft" (astra); "move the nearest posts farther
+  outside the stair rail. Reduce their head size and retain a smaller warm glow" (sol).
+  Technique: lathe with 32+ segments; fresnel-rimmed emissive globe, its core well above 1 and
+  the helix's bloom threshold raised to match in `src/director/looks.ts`; an analytic
+  point-light term in the stair, carpet, rail and newel shaders from the nearest lamps (their
+  positions are a function of the helix parameter); more segments and smooth normals on the
+  rail · Files: `src/scenes/helix.tsx`, the `helix` entry in `src/director/looks.ts` · Worker:
+  opus · Frames: helix:8.5 helix:12 helix:15.5 helix:19 · Source: pass 000 fable; pass 001
+  fable; pass 004 astra, sol; pass 005 panel 3/3. Absorbs H3's lamp half and H6.
+- **D11 dollhouse · The exit is the richest thing in the garden** (panel 3/3 in passes 004 and
+  005) — at t=19 to 24 the plinth is a turned piece with a stepped, bull-nosed edge and an
+  inlaid rosette (tile or marquetry with fine joints) instead of a cream disc with printed
+  rings; the coral surround is built of voussoirs with bevelled joints and a raised moulding;
+  the two leaves throw soft shadows onto the plinth that follow their swing, and the surround
+  sits in an occlusion gradient where it meets the plinth. The side doorways, with their
+  dotted and striped frames, no longer look richer than the exit. Nothing else in the garden
+  changes.
+  "The exit is not the most crafted object in its scene. The plinth is a flat cream disc with a
+  few painted rings and no rim profile, the surround is a smooth untextured coral band with one
+  plain keystone, and the open leaves cast no shadow onto the plinth" (fable); "the panel
+  outlines still read mainly as paint and the large plinth remains visually smooth" (astra).
+  D9 (pass 005, reverted for its dunes) had a rounded plinth with grain and leaf contact
+  shadows in commit `1294f26`; take those parts from it.
+  Files: `src/scenes/dollhouse.tsx` · Worker: opus · Frames: dollhouse:19 dollhouse:22
+  dollhouse:24 · Source: pass 001 to 005
+- **B4 burrow · The hoop glows (second try, the hoop alone)** — at t=19 to 24.5 the hoop is the
+  brightest, most finished thing in the dome: it keeps the glossy bubble and bright rim it has
+  now and gains what makes it an object: a rim that glows above the bloom threshold with a
+  fresnel term, a row of mint beads, gimbal rings with real thickness, and a pool of light on
+  the rippled floor beneath it. It fills at least as much of the frame as now. The dome wall,
+  the eyes and the mushrooms are NOT changed by this item.
+  Reverted in pass 005 (commit `d10cb57`), which also brightened the dome wall, opened every
+  eye and added foreground mushrooms: "The dome's brighter, larger wall scales and many fully
+  open white eyes compete with the central hoop" (astra); "it is now a flat disc with thin
+  matte pink gimbal rings and a small beaded rim that does not glow, and it covers less of the
+  frame. It is more detailed up close but weaker as the thing the camera stares at" (fable).
+  That commit's floor pool and bead geometry are reusable; note its bug: a wall material given
+  `new Vector4()` for "no pool" switches the pool on (w defaults to 1).
+  Files: `src/scenes/burrow.tsx`, `src/scenes/burrow/materials.ts` (the floor pool only) ·
+  Worker: fable (short from opus once) · Frames: burrow:19 burrow:22 burrow:24 burrow:24.5 ·
+  Source: pass 000 to 005
+- **O3 orbit · The whale is the event** — at t=19 to 24 the whale and her calf carry glowing
+  constellation markings and a silver-blue rim, swim with a slow tail beat, pass as a large near
+  silhouette across the moon, and the moon throws a shaft behind the hut; lamps have fog halos.
+  Technique: emissive star pattern, fresnel rim, vertex-shader swim, closed-form inscattering for
+  the moon shaft and lamp halos · Files: `src/scenes/orbit/sky.ts` · Worker: opus · Frames:
+  orbit:15.5 orbit:19 orbit:22 · Source: pass 000 panel 3/3; pass 001 sol, fable (opportunity)
+  Pass 003: the moon "becomes a large white glare patch ... swallows the crescent finial"
+  (astra): lower its emission, give the disc a gradient, thin the beam near it. Opportunities:
+  the whale staged across the open sky at t=12 to 19 (astra); rising lanterns that throw moving
+  warm pools on the tower walls (sol).
+  Pass 004: the overhead city still "compresses into a dense field of similarly blue towers and
+  yellow window specks" (astra): dim distant windows with their towers; lantern light shafts
+  between the overhead towers (sol).
+  Pass 005: astra and sol both ask, as their opportunity, for a whale-and-calf reveal staged
+  against a quiet gap of sky at t=12 to 19; fable and sol want the moon's disc clamped ("a
+  clipped white blob") with its glow moved to a wide, dim halo.
+- **D12 dollhouse · Something near the lens, and dunes with a lit side** — the garden reads in
+  layers from its first frame: a few tall flowers and grass blades stand just beside the
+  camera's path and sweep past with parallax, swaying from `clock.t`; one or two low dune
+  ridges cross the middle distance with a sunlit face and a lavender lee, flower drifts
+  following their slopes; far props lose a little contrast. The skyline of hoops and domes
+  stays fully visible above the dunes (it is the scene's silhouette), and the horizon's candy
+  colour stays as it is.
+  Reverted as D9 in pass 005 (commits `1294f26`, `36a4313`): ridges all round the garden hid
+  the hoops ("partially buried, weakening the garden skyline", sol) and the change otherwise
+  read as "almost imperceptible" (fable); the first version's haze washed the horizon out.
+  Still ranked first by astra and sol: "the opening still reads as scattered objects across a
+  pale plane"; fable: "flowers are tiny flat rosettes scattered at one scale with nothing near
+  the camera".
+  Technique: instanced blades and tall flowers placed along the camera track outside the
+  line of flight, bent in the vertex shader; ridges composed for the opening view only, lower
+  than the hoops' feet; a small contrast falloff with distance, not a haze · Files:
+  `src/scenes/dollhouse.tsx`, `src/scenes/dollhouse/garden.ts` · Worker: fable (short from opus
+  once) · Frames: dollhouse:0 dollhouse:5 dollhouse:8.5 dollhouse:12 dollhouse:19 · Source:
+  pass 004 fable; pass 005 panel 3/3
+- **B7 burrow · Mushrooms that hold up close** — the mushrooms nearest the lens (t=8.5, and two
+  or three large ones framing the hoop at t=22, which astra welcomed as "foreground depth")
+  have round caps with no polygon silhouette, radial gills underneath, a slight undulation,
+  soft-edged spots, fibrous stems and a dark foot on the floor; cap colours are chosen (mint,
+  lilac, gold), not drawn from the shared random stream.
+  "The largest caps reveal angular silhouettes and abrupt changes in surface shading ... white
+  spots look painted onto hard shells" (sol); "Their surface craft falls below the surrounding
+  wall scales" (astra) · Files: `src/scenes/burrow/creatures.ts`, `src/scenes/burrow/build.ts`
+  (mushroom placement in the dome) · Worker: opus · Frames: burrow:8.5 burrow:22 · Source:
+  pass 005 panel 3/3 (on the reverted B4, and on t=8.5 as it is now)
+- **O6 orbit · The street, finished** — leftovers of O5: the topiary's leaf pattern is irregular
+  and fades with distance so a bush is a soft dark mass, not "a tiled sphere" (fable,
+  regression at t=15.5); the lamp cones have no visible edges (they read as "hard-edged
+  translucent trapezoids"); the two kerb strips are kerbstones with joints at a lower
+  brightness; ordinary bulbs and kerbs sit a step below the moon gate so "several light
+  sources" no longer "become nearly white simultaneously" (sol).
+  Files: `src/scenes/orbit.tsx` · Worker: opus · Frames: orbit:8.5 orbit:15.5 orbit:22 ·
+  Source: pass 005 sol, fable
 - **H4 helix · A void with depth** — far arcade tiers lose contrast and dissolve towards teal,
   far orbs are smaller and dimmer, and behind the arcade the teal is a lit volume: shafts of
   light, far stairs fading in layers, motes drifting. "The improved foreground carving exposes
@@ -153,6 +177,8 @@ owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
   Not blocked by the rail any longer: it changes the shaft, not the stair, and whoever lands
   the helix on the rail carries it over. Pass 004: astra and sol ask again for amber shafts
   and caustics; fable wants the arcade darker and cooler with distance so the stair stands out.
+  Pass 005: fable again (light shafts from the arcade arches, dust motes); astra and sol ask for
+  caustics on the soffits and newel (the other half of the old H3).
 - **D10 dollhouse · No two rooms alike, and something moves in each** — the doorways hold
   visibly different impossible rooms again (a twisting room of rotating arch layers comes back
   beside the hall, the rotunda and the avenue), and each has one thing in motion from
@@ -170,31 +196,6 @@ owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
   things · Files: `src/scenes/dollhouse/garden.ts`, `src/scenes/dollhouse.tsx` · Worker: opus ·
   Frames: dollhouse:0 dollhouse:8.5 dollhouse:19 (and two frames a second apart) ·
   Source: pass 003 panel 3/3 (opportunity)
-- **H3 helix · Light from the koi and the lamps** — Needs: K7. the amber is back and it lands on things:
-  lamps pool orange on the steps, the newel and the brickwork beside them, arcade orbs glow as
-  warmly as at pass 000, passing koi spill light on nearby stone, and slow teal-and-gold caustics
-  drift across the newel and the coffered soffit.
-  "The arcade's amber glow is weaker than in pass 000 ... the stair lamps no longer throw a
-  visible orange wash on the brickwork" (fable, regression: additive sprites now add in linear
-  light). Technique: raise the emitters well above 1 (orbs and koi are near 0.6, lamps 1.35) and
-  then the helix threshold in `src/director/looks.ts`; analytic point falloff from lamp positions
-  along the helix; caustic pattern from `clock.t` · Files: `src/scenes/helix.tsx`,
-  `src/scenes/helix/koi.ts`, the `helix` entry in `src/director/looks.ts` · Worker: opus ·
-  Frames: helix:0 helix:8.5 helix:12 helix:15.5 · Source: pass 000 astra, sol, fable; pass 001
-  astra (opportunity), fable (regression); pass 002 astra, sol (opportunity)
-- **O3 orbit · The whale is the event** — at t=19 to 24 the whale and her calf carry glowing
-  constellation markings and a silver-blue rim, swim with a slow tail beat, pass as a large near
-  silhouette across the moon, and the moon throws a shaft behind the hut; lamps have fog halos.
-  Technique: emissive star pattern, fresnel rim, vertex-shader swim, closed-form inscattering for
-  the moon shaft and lamp halos · Files: `src/scenes/orbit/sky.ts` · Worker: opus · Frames:
-  orbit:15.5 orbit:19 orbit:22 · Source: pass 000 panel 3/3; pass 001 sol, fable (opportunity)
-  Pass 003: the moon "becomes a large white glare patch ... swallows the crescent finial"
-  (astra): lower its emission, give the disc a gradient, thin the beam near it. Opportunities:
-  the whale staged across the open sky at t=12 to 19 (astra); rising lanterns that throw moving
-  warm pools on the tower walls (sol).
-  Pass 004: the overhead city still "compresses into a dense field of similarly blue towers and
-  yellow window specks" (astra): dim distant windows with their towers; lantern light shafts
-  between the overhead towers (sol).
 - **D6 dollhouse · Flowers with body** — near flowers have curved, folded petals with a darker
   underside, leaves and a shaded foot; drifts are distinct clumps separated by quiet sand, and
   far drifts read as patches, not specks. Rider: the last dashed shadow streaks near the
@@ -223,11 +224,10 @@ owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
   fable (opportunity)
   Pass 003: sleeping eyes read as dark maroon balls or dashes at 15 to 25 units (B5's worker,
   fable): a lid that takes the wall's colour, or a slit of glow.
-- **H6 helix · Round and crisp at the lens** — Needs: K7. at t=8.5 the newel's joints are antialiased lines
-  instead of stair-stepped texels, its silhouette and the handrail are round, satellite stairs
-  carry the main stair's carving, and the foreground globe is a glass shell with a hot core that
-  does not clip. Files: `src/scenes/helix.tsx` · Worker: opus · Frames: helix:8.5 helix:15.5 ·
-  Source: pass 001 fable; H1's worker
+- **O7 orbit · Rooms behind the windows** — the tower windows the camera passes at t=5 to 12 show
+  lit rooms with depth (interior mapping), and now and then a silhouette crosses one, keyed to
+  `clock.t`. Files: `src/scenes/orbit.tsx` · Worker: opus · Frames: orbit:5 orbit:8.5 orbit:12 ·
+  Source: pass 005 fable (opportunity)
 - **K5 all · A portal keeps its own light** — a bright scene seen through the portal of a dark
   one is not veiled by the host's bloom before t=20 (the dollhouse in the burrow's hoop is washed
   towards white today), and the canvas stops paying for multisampling it no longer uses.
@@ -247,6 +247,9 @@ owner's (`loop/DIRECTION.md`, handled in pass 001) and outrank the panel.
   pass can do height fog, soft particle edges, depth of field focused on the exit, and camera
   motion blur computed from `clock.t`.
   Files: `src/director/*` · Worker: fable · Source: prep baseline
+  Pass 005, fable (opportunity): depth of field with a per-scene focus distance from `clock.t`
+  (a near prop early, the exit from t=19), "makes the exit the sharpest thing in the last five
+  seconds".
 
 ## Technique catalogue
 
@@ -341,6 +344,10 @@ mostly five things, none of which the screensaver did at baseline:
 - **O2 orbit · The moon-gate hut is the best thing in town** (pass 004) — gilt leaves pierced
   with a crescent and stars, shingled roof and finial, masonry steps; tower rims set between
   the two earlier strengths, in a commit of their own: `loop/out/pass-004/frames/orbit-22.png`.
+- **O5 orbit · The street is a surface** (pass 005) — a sett road with lamp reflections, stone
+  arches with capitals and festoon bulbs, round lamps with cones, topiary, windows set into
+  the walls; astra and sol raised orbit to 8: `loop/out/pass-005/frames/orbit-8.5.png`,
+  `loop/out/pass-005/orbit.jpg`. Leftovers: O6.
 
 ## Rejected
 
@@ -369,3 +376,13 @@ Items tried and dropped, with the reason, so they are not tried the same way twi
   `56cfd25`, reverted) — whole stair in frame and an airy climb, but the tower read small and
   pale against the arcade, a lamp sat on the lens, the last flight was a flat bridge and the
   arch was seen rolled. Back in the queue as K7's third try with those four things named.
+- **Restoring a pale sheen on the burrow's rib crests** (pass 005, commit `3452fea`, reverted) —
+  two reviewers said it flattens the scales; the pass before, the same two said the scales had
+  cost the ribs their highlight. The panel pushes this dial both ways. Leave the rib and scale
+  balance where pass 004 put it unless a technique gives both at once.
+- **The hoop, the dome wall, the eyes and the foreground mushrooms in one slice** (pass 005,
+  commit `d10cb57`, reverted) — the hoop traded its glossy presence for detail, and the busier
+  dome competed with it. Back as B4 (the hoop alone) and B7 (the mushrooms).
+- **Dunes all round the garden, haze, and the plinth in one slice** (pass 005, commits `1294f26`
+  and `36a4313`, reverted) — ridges hid the skyline's hoops; the rest read as no change. Back
+  as D11 (the exit) and D12 (a near layer and two composed ridges).

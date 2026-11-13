@@ -185,3 +185,42 @@ Learned:
 - The owner pushed `loop` to origin during this pass (`origin/loop` exists). The director still
   does not push.
 
+## Pass 005 (2026-11-13)
+
+Slices:
+- O5 orbit · The street is a surface (opus) kept: astra and sol raised orbit to 8. Fable alone
+  reported the new topiary as a regression (O6).
+- B6 burrow · The ribs carry the light (opus, with a one-line fix B6b) reverted: astra and sol
+  say the crest sheen suppresses the scale relief.
+- B4 burrow · The hoop is a crafted thing (opus) reverted: astra (the dome competes with the
+  hoop) and fable (the hoop lost presence).
+- D9 dollhouse · Ground and air (opus, sent back once for its haze as D9b) reverted: sol's
+  regression (hoops buried behind the dunes) is true in the frames, no score rose and one fell.
+- K7 helix · The helix rides spring, third try (fable) not merged: short at three frames by its
+  own worker's account. Parked for the owner (question 12); branch `t3/helix-spring-keystone`.
+Gate: frame cost worst 3.13 ms (orbit), loop worst 12 ms, seams 0.00–0.31% RMSE, bundle 282 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.7, burrow 7.0, dollhouse 6.3, orbit 7.7. The burrow and
+dollhouse scores were given to the reverted versions (`loop/out/pass-005/reviewed/`); on `loop`
+those scenes are as at pass 004. The helix was not changed this pass.
+Learned:
+- One of five slices kept. The three reverted ones were each several changes in one slice (the
+  hoop with the dome wall, eyes and mushrooms; dunes with haze and plinth), so a complaint about
+  one part took the rest down. A second try is one object or one idea, and names what must not
+  change. Riders in their own commit are not enough when the panel sees one frame.
+- The panel's scores have about a point of noise: the helix rose from 7, 7, 7 to 8, 8, 7 untouched.
+  Do not read a one-point move as evidence. Regression reports are the sharper signal.
+- A reviewer reports a regression for any trade: last pass "the ribs lost their highlight", this
+  pass "the highlight flattens the scales", from the same two. When a dial has been pushed both
+  ways, stop turning it.
+- Detail is not presence. The reverted hoop was more crafted and read weaker, because it lost
+  its bright glossy rim. For an exit, keep what makes it the brightest thing and add to it.
+- A mistake of mine: the revert commit for D9 and my report said it took the dollhouse's largest
+  frame from 504k to 907k triangles. About 290k of that was the orbit, seen through the
+  dollhouse's exit, which grew with O5; D9 itself added about 110k (907k with it, 796k without).
+- The gate's "tris" for a scene includes the next scene from t=12 on. Compare a slice against
+  the same pass's gate without it, not against the previous pass.
+- Frame cost is now 3.13 ms worst; orbit's O5 took about 0.15 ms mid-ride. About 0.85 ms left.
+- A "completed" notice that is one sentence about a background job is a worker pausing; O5 sent
+  three before its report.
+
