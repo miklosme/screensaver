@@ -481,9 +481,9 @@ const SKY_GLSL = /* glsl */ `
   }
 `;
 
-type Detail = "plain" | "strata" | "wall" | "stair" | "column" | "post" | "globe" | "lamp" | "keyhole" | "satellite";
+type Detail = "plain" | "strata" | "wall" | "stair" | "column" | "post" | "globe" | "lamp" | "keyhole" | "satellite" | "rail";
 /** details lit by the stair lamps' warm pools */
-const POOLED: Detail[] = ["stair", "column", "post", "strata"];
+const POOLED: Detail[] = ["stair", "column", "post", "strata", "rail"];
 /** details that carve the surface: they write a height into `hxH` and the normal follows it */
 const BUMPED: Detail[] = ["stair", "column", "post", "keyhole"];
 
@@ -850,6 +850,8 @@ const DETAIL_GLSL: Record<Detail, string> = {
       vec3 glass = mix(vec3(0.22, 0.06, 0.01), vec3(0.72, 0.3, 0.07), smoothstep(0.0, 0.9, ndv));
       diffuseColor.rgb = glass + vec3(2.4, 1.5, 0.75) * core + vec3(0.5, 0.22, 0.06) * pow(1.0 - ndv, 8.0);
     }`,
+  // the hand rail: plain bronze; its sheen comes after the normal is known (RAIL_SHEEN_GLSL)
+  rail: "",
   // the hanging stairs: the same sandstone, cooler and bluer the further off they hang
   satellite: /* glsl */ `
     diffuseColor.rgb *= vec3(1.04, 0.93, 0.8) * (0.93 + 0.07 * sin(vHxW.y * 2.6 + sin(vHxW.x * 0.7 + vHxW.z * 0.9) * 1.5));
@@ -919,11 +921,32 @@ const SATELLITE_VEIL_GLSL = /* glsl */ `
           gl_FragColor.rgb = mix(gl_FragColor.rgb, mix(hxSky(sdir), ${VOID_TEAL} * 1.6, 0.7), veil);
         }`;
 
+/**
+ * The hand rail stays slim beside the lens but swells towards its old girth further off, so the
+ * spiral's outline still carries when the whole tower is a thumbnail in the previous portal.
+ */
+const RAIL_GROW_GLSL = /* glsl */ `#include <begin_vertex>
+        {
+          float rd = distance((modelMatrix * vec4(transformed, 1.0)).xyz, cameraPosition);
+          transformed += objectNormal * ${glf(0.1 - RAIL_R)} * smoothstep(5.0, 24.0, rd);
+        }`;
+/** a warm, thin highlight along the rail that grows with distance, so the bronze reads as a line */
+const RAIL_SHEEN_GLSL = /* glsl */ `
+          {
+            vec3 rv = normalize(vViewPosition);
+            vec3 rl = normalize((viewMatrix * vec4(-0.35, 1.0, -0.6, 0.0)).xyz);
+            float spec = pow(max(dot(normal, normalize(rl + rv)), 0.0), 28.0);
+            float rim = 1.0 - abs(dot(normal, rv));
+            float far = smoothstep(5.0, 24.0, length(vViewPosition));
+            hxGlow += vec3(1.0, 0.64, 0.3) * (0.3 * spec + far * (0.14 + 0.4 * spec + 0.2 * rim * rim));
+          }`;
+
 function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
   mat.onBeforeCompile = (s) => {
     s.uniforms.uHxT = hxTime;
     s.uniforms.uHxLamp = hxLamps;
     s.uniforms.uHxPool = hxPool;
+    if (detail === "rail") s.vertexShader = s.vertexShader.replace("#include <begin_vertex>", RAIL_GROW_GLSL);
     s.vertexShader = s.vertexShader
       .replace(
         "#include <common>",
@@ -1012,7 +1035,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             vec3 grad = sign(det) * (dFdx(hxH) * r1 + dFdy(hxH) * r2);
             normal = normalize(abs(det) * normal - grad);
           }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (POOLED.includes(detail) ? poolGlsl(detail) : "")
-          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : ""),
+          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : "") + (detail === "rail" ? RAIL_SHEEN_GLSL : ""),
       )
       .replace(
         "#include <tonemapping_fragment>",
@@ -1052,7 +1075,7 @@ interface Assets {
   doorFrame: BufferGeometry;
   doorBack: BufferGeometry;
   doorPortal: BufferGeometry;
-  stone: MeshLambertMaterial;
+  railMat: MeshLambertMaterial;
   keyholeMat: MeshLambertMaterial;
   columnMat: MeshLambertMaterial;
   postMat: MeshLambertMaterial;
@@ -1600,7 +1623,7 @@ function getAssets(): Assets {
   points.setAttribute("aPulse", new BufferAttribute(new Float32Array(pu), 3));
 
   // ---- materials ----
-  const stone = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "strata");
+  const railMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "rail");
   const wallMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "wall");
   const stairMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "stair");
   const columnMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "column");
@@ -1687,7 +1710,7 @@ function getAssets(): Assets {
     lantern: new SphereGeometry(0.22, 28, 16),
     sky: new SphereGeometry(1200, 24, 16),
     points, doorFrame, doorBack, doorPortal,
-    stone, keyholeMat, columnMat, postMat, wallMat, stairMat, koi, glow, skyMat, pointsMat,
+    railMat, keyholeMat, columnMat, postMat, wallMat, stairMat, koi, glow, skyMat, pointsMat,
     shafts: shaftGeometry(shafts), shaftMat: shaftMaterial(),
     balusterM: new Float32Array(balusters),
     postM: new Float32Array(posts),
@@ -1720,7 +1743,7 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     sky.renderOrder = -10;
     const column = new Mesh(A.column, A.columnMat);
     const stairs = new Mesh(A.stairs, A.stairMat);
-    const rails = new Mesh(A.rails, A.stone);
+    const rails = new Mesh(A.rails, A.railMat);
     const balusters = instanced(A.baluster, A.postMat, A.balusterM);
     const postMesh = instanced(A.post, A.postMat, A.postM);
     const lanterns = instanced(A.lantern, A.glow, A.lanternM);
