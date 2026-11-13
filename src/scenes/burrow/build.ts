@@ -58,8 +58,8 @@ const smoothstep = (a: number, b: number, x: number) => {
 // ---------------------------------------------------------------------------------------------
 
 /** world size of one scale across, and the pitch of the rings of scales along the flow, in a bore of scale 1 */
-const SCALE_W = 0.16;
-const SCALE_PITCH = 0.1;
+export const SCALE_W = 0.16;
+export const SCALE_PITCH = 0.1;
 
 /** how far round the corridor's profile each of its columns lies, by true arc length, as a fraction */
 const PROFILE_ARC = (() => {
@@ -402,6 +402,64 @@ function buildFloor(ch: Chamber): BufferGeometry {
   geo.setAttribute("hgt", new BufferAttribute(new Float32Array(rows * (cols + 1)), 1));
   geo.setIndex(gridIndex(rows, cols));
   return geo;
+}
+
+/**
+ * What a chamber floor's shader needs to know of the thread (materials.ts, FLOOR): `lead` is, per
+ * vertex, the way to the thread's nearest point in plan (x, z), how far along the thread that point
+ * is, and 1 there, falling to 0 past the thread's far end; `foot` is the radius where the wall meets
+ * this floor, from which the wall's scales are carried across it.
+ */
+function leadTo(geo: BufferGeometry, ch: Chamber, thread: Vector3[]) {
+  const arc = [0];
+  for (let i = 1; i < thread.length; i++) arc.push(arc[i - 1]! + planDist(thread[i]!, thread[i - 1]!));
+  const total = arc[arc.length - 1]!;
+  // only what runs across this floor can be nearest to it
+  const reach = ch.R * 1.25 + 3;
+  const segs: number[] = [];
+  for (let i = 0; i + 1 < thread.length; i++) if (planDist(thread[i]!, ch.c) < reach || planDist(thread[i + 1]!, ch.c) < reach) segs.push(i);
+  const pos = geo.getAttribute("position") as BufferAttribute;
+  const lead = new Float32Array(pos.count * 4);
+  for (let v = 0; v < pos.count; v++) {
+    const px = pos.getX(v);
+    const pz = pos.getZ(v);
+    let best = Infinity;
+    let bx = 30;
+    let bz = 0;
+    let bs = 0;
+    for (const i of segs) {
+      const a = thread[i]!;
+      const b = thread[i + 1]!;
+      const ex = b.x - a.x;
+      const ez = b.z - a.z;
+      const u = Math.min(1, Math.max(0, ((px - a.x) * ex + (pz - a.z) * ez) / (ex * ex + ez * ez + 1e-9)));
+      const dx = a.x + ex * u - px;
+      const dz = a.z + ez * u - pz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < best) {
+        best = d2;
+        bx = dx;
+        bz = dz;
+        bs = arc[i]! + u * (arc[i + 1]! - arc[i]!);
+      }
+    }
+    // past the far end every point is nearest the end itself: no way along the thread is left there
+    let along = 1;
+    if (bs > total - 1e-3 && thread.length > 1) {
+      const a = thread[thread.length - 2]!;
+      const b = thread[thread.length - 1]!;
+      const ex = b.x - a.x;
+      const ez = b.z - a.z;
+      const past = (-(bx * ex + bz * ez)) / Math.hypot(ex, ez);
+      along = 1 - smoothstep(0, 0.6, past);
+    }
+    lead[v * 4] = bx;
+    lead[v * 4 + 1] = bz;
+    lead[v * 4 + 2] = bs;
+    lead[v * 4 + 3] = along;
+  }
+  geo.setAttribute("lead", new BufferAttribute(lead, 4));
+  geo.setAttribute("foot", new BufferAttribute(new Float32Array(pos.count).fill(footRadius(ch)), 1));
 }
 
 /** round tube swept along points; `ref` fixes which side of the tube pattern column 0.5 faces */
@@ -850,6 +908,7 @@ export function buildWorld(stretch: Stretch) {
   const corridors = corridorPts.map(buildCorridor);
   const shells = chambers.map(buildChamber);
   const floors = chambers.map(buildFloor);
+  floors.forEach((g, i) => leadTo(g, chambers[i]!, threadPts));
   const frames: BufferGeometry[] = [];
   const frameOf: Chamber[] = [];
   for (const ch of chambers)
