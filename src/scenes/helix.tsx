@@ -854,14 +854,7 @@ const DETAIL_GLSL: Record<Detail, string> = {
   rail: "",
   // the hanging stairs: the same sandstone, cooler and bluer the further off they hang
   satellite: /* glsl */ `
-    diffuseColor.rgb *= vec3(1.04, 0.93, 0.8) * (0.93 + 0.07 * sin(vHxW.y * 2.6 + sin(vHxW.x * 0.7 + vHxW.z * 0.9) * 1.5));
-    {
-      // the treads survive only as faint joints across the smooth ramp
-      float st = atan(vHxL.z, vHxL.x) * ${glf(24 / TAU)};
-      float sw = fwidth(st) + 1e-4;
-      float jd = abs(fract(st) - 0.5);
-      diffuseColor.rgb *= 1.0 - 0.38 * smoothstep(0.5 - 0.06 - sw, 0.5 - 0.06 + sw, jd) * smoothstep(1.0, 0.25, sw * 8.0);
-    }`,
+    diffuseColor.rgb *= vec3(1.04, 0.93, 0.8) * (0.93 + 0.07 * sin(vHxW.y * 2.6 + sin(vHxW.x * 0.7 + vHxW.z * 0.9) * 1.5));`,
 };
 
 /** the stair lamps' warm pools: inverse-square with a soft wrap, after the carved normal is known */
@@ -901,13 +894,29 @@ const KEYHOLE_LAMPS_GLSL = /* glsl */ `
 const WALL_HAZE_GLSL = /* glsl */ `
         {
           vec3 hv = vHxW - cameraPosition;
-          float hk = smoothstep(32.0, 85.0, length(hv)) * 0.55 + smoothstep(4.0, 40.0, abs(hv.y)) * 0.5;
-          gl_FragColor.rgb = mix(gl_FragColor.rgb, ${VOID_TEAL}, clamp(hk, 0.0, 0.9));
+          float hk = smoothstep(32.0, 85.0, length(hv)) * 0.37 + smoothstep(4.0, 40.0, abs(hv.y)) * 0.33;
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, ${VOID_TEAL}, clamp(hk, 0.0, 0.6));
+        }`;
+
+/** where the hanging stairs' treads melt into a smooth ramp, and where they are gone (metres) */
+const SAT_RAMP: [number, number] = [34, 70];
+/** a hanging stair's tread rise, in its own units (24 treads to a 13.5 pitch) */
+const SAT_RISE = 13.5 / 24;
+
+/** further off, each tread's leading edge drops to meet the one before: the steps become a ramp */
+const SATELLITE_RAMP_GLSL = /* glsl */ `#include <begin_vertex>
+        {
+          vec4 sw = vec4(transformed, 1.0);
+          #ifdef USE_INSTANCING
+            sw = instanceMatrix * sw;
+          #endif
+          float sd = distance((modelMatrix * sw).xyz, cameraPosition);
+          transformed.y -= aTile.x * ${glf(SAT_RISE)} * smoothstep(${glf(SAT_RAMP[0])}, ${glf(SAT_RAMP[1])}, sd);
         }`;
 
 /**
- * The hanging stairs are veiled in mist: cooler with distance, and wherever the surface turns away
- * from the eye it thins into the void, so they read as soft spirals rather than solid shapes.
+ * The hanging stairs sink into the void with distance: cooler first, then veiled into its teal,
+ * thinnest where the surface turns away from the eye. Near ones keep their sandstone.
  */
 const SATELLITE_VEIL_GLSL = /* glsl */ `
         {
@@ -917,7 +926,7 @@ const SATELLITE_VEIL_GLSL = /* glsl */ `
           float far = smoothstep(12.0, 110.0, sd);
           gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * vec3(0.3, 0.78, 0.86) + vec3(0.0, 0.035, 0.045), far * 0.75);
           float edge = 1.0 - abs(dot(normalize(vHxN), sdir));
-          float veil = clamp(0.5 + 0.35 * far + 0.6 * edge * edge, 0.0, 0.93);
+          float veil = 0.14 + smoothstep(${glf(SAT_RAMP[0])}, 130.0, sd) * (0.45 + 0.3 * edge * edge);
           gl_FragColor.rgb = mix(gl_FragColor.rgb, mix(hxSky(sdir), ${VOID_TEAL} * 1.6, 0.7), veil);
         }`;
 
@@ -947,6 +956,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
     s.uniforms.uHxLamp = hxLamps;
     s.uniforms.uHxPool = hxPool;
     if (detail === "rail") s.vertexShader = s.vertexShader.replace("#include <begin_vertex>", RAIL_GROW_GLSL);
+    if (detail === "satellite") s.vertexShader = s.vertexShader.replace("#include <begin_vertex>", SATELLITE_RAMP_GLSL);
     s.vertexShader = s.vertexShader
       .replace(
         "#include <common>",
@@ -1477,61 +1487,41 @@ function getAssets(): Assets {
     }
   }
 
-  // ---- satellite staircase: a smooth spiral ramp round a round core, instanced at wrong angles ----
-  // No treads: at their distance the steps only made a saw-tooth edge. The ramp's section is a
-  // rounded slab swept along the helix with smooth normals, so the mist can thin it at its rims.
-  const satellite = (() => {
-    const N = 48, turns = 9, pitch = 13.5;
+  // Treads, risers and a stepped soffit up close. Further off the vertex shader drops the
+  // leading edge of each tread to meet the one before (SATELLITE_RAMP_GLSL), so a far stair is a
+  // clean spiral with no saw-tooth edge. aTile.x carries that drop: 1 at a leading edge, 0 at a trailing one.
+  const tq = new Quads();
+  {
+    const N = 24, turns = 9, pitch = 13.5, rise = pitch / N, SUB = 2;
     const half = (turns * pitch) / 2;
-    // the slab's section: [radius, height below the walking surface, shade]
-    const sect: [number, number, number][] = [];
-    const RIN = 2.3, ROUT = 7.6, TH = 0.7, RND = 0.33;
-    for (let k = 0; k <= 4; k++) {
-      const a = (k / 4) * (Math.PI / 2);
-      sect.push([ROUT - RND + RND * Math.sin(a), -RND + RND * Math.cos(a), 1]);
-    }
-    for (let k = 0; k <= 4; k++) {
-      const a = Math.PI / 2 + (k / 4) * (Math.PI / 2);
-      sect.push([ROUT - RND + RND * Math.sin(a), -(TH - RND) + RND * Math.cos(a), 0.62]);
-    }
-    sect.push([RIN, -TH, 0.5]);
-    sect.push([RIN, 0, 0.75]);
-    const M = sect.length;
-    const pos: number[] = [], col: number[] = [], idx: number[] = [];
-    const rows = N * turns;
-    for (let i = 0; i <= rows; i++) {
-      const th = (i / N) * TAU;
-      const y0 = -half + (i / N) * pitch;
-      const c = Math.cos(th), sn = Math.sin(th);
-      for (let k = 0; k <= M; k++) {
-        const [r, dy, sh] = sect[k % M]!;
-        pos.push(r * c, y0 + dy, r * sn);
-        const tone = k === 0 || k === M || k === M - 1 ? IVORY : SAND;
-        col.push(tone[0] * sh, tone[1] * sh, tone[2] * sh);
-        if (i < rows && k < M) {
-          const p0 = i * (M + 1) + k, p1 = p0 + M + 1;
-          idx.push(p0, p1, p0 + 1, p0 + 1, p1, p1 + 1);
-        }
+    const pt = (r: number, a: number, y: number): V3 => [r * Math.cos(a), y, r * Math.sin(a)];
+    const lift = (u: number): V3 => [1 - u, 0, 0];
+    for (let i = 0; i < N * turns; i++) {
+      const a0 = (i / N) * TAU, a1 = ((i + 1) / N) * TAU;
+      const top = -half + (i + 1) * rise, bot = top - 0.9;
+      const ctr = pt(5, (a0 + a1) / 2, top - 0.45);
+      for (let k = 0; k < SUB; k++) {
+        const u0 = k / SUB, u1 = (k + 1) / SUB;
+        const b0 = a0 + (a1 - a0) * u0, b1 = a0 + (a1 - a0) * u1;
+        const L: [V3, V3, V3, V3] = [lift(u0), lift(u0), lift(u1), lift(u1)];
+        const s0 = 0.5, s1 = 1;
+        tq.quad(pt(2, b0, top), pt(8, b0, top), pt(8, b1, top), pt(2, b1, top), ctr, IVORY, s0, s1, s1, s0, L);
+        tq.quad(pt(2, b0, bot), pt(8, b0, bot), pt(8, b1, bot), pt(2, b1, bot), ctr, IVORY, s0, s1, s1, s0, L);
+        tq.quad(pt(8, b0, top), pt(8, b1, top), pt(8, b1, bot), pt(8, b0, bot), ctr, SAND, 1, 1, 1, 1, [lift(u0), lift(u1), lift(u1), lift(u0)]);
       }
+      const L0: [V3, V3, V3, V3] = [lift(0), lift(0), lift(0), lift(0)];
+      const L1: [V3, V3, V3, V3] = [lift(1), lift(1), lift(1), lift(1)];
+      tq.quad(pt(2, a0, top), pt(8, a0, top), pt(8, a0, bot), pt(2, a0, bot), ctr, SAND, 0.5, 0.95, 0.7, 0.4, L0);
+      tq.quad(pt(2, a1, top), pt(8, a1, top), pt(8, a1, bot), pt(2, a1, bot), ctr, SAND, 0.5, 0.8, 0.8, 0.5, L1);
     }
-    // the core: a plain round shaft through the middle
-    const base = pos.length / 3;
     const CN = 32;
-    for (let j = 0; j <= 1; j++) {
-      for (let i = 0; i <= CN; i++) {
-        const th = (i / CN) * TAU;
-        pos.push(2.4 * Math.cos(th), (j ? 1 : -1) * (half + 14), 2.4 * Math.sin(th));
-        col.push(IVORY[0] * 0.85, IVORY[1] * 0.85, IVORY[2] * 0.85);
-        if (j === 0 && i < CN) idx.push(base + i, base + CN + 1 + i, base + i + 1, base + i + 1, base + CN + 1 + i, base + CN + 2 + i);
-      }
+    for (let i = 0; i < CN; i++) {
+      const a0 = (i / CN) * TAU, a1 = ((i + 1) / CN) * TAU;
+      const sh = i % 2 ? 0.8 : 0.92;
+      tq.quad(pt(2.4, a0, -half - 14), pt(2.4, a1, -half - 14), pt(2.4, a1, half + 14), pt(2.4, a0, half + 14), [0, 0, 0], IVORY, sh, sh, sh, sh, [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]);
     }
-    const g = new BufferGeometry();
-    g.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
-    g.setAttribute("color", new BufferAttribute(new Float32Array(col), 3));
-    g.setIndex(idx);
-    g.computeVertexNormals();
-    return g;
-  })();
+  }
+  const satellite = tq.build();
   const sat = (x: number, dy: number, z: number, rx: number, rz: number, scale: number, spin: number): Satellite => ({
     pos: new Vector3(x, HEND + dy, z),
     tilt: new Quaternion().setFromEuler(new Euler(rx, 0, rz)),
