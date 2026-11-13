@@ -37,7 +37,7 @@ bun run build    # static build in dist/
   that takes `SceneProps`, ask the rail for its stretch with `season(index)`, build the world
   along `stretch.frame(distance)`, put `portalMaterial` on an exit standing at
   `stretch.frame(stretch.exit)`, set the camera from `stretch.pose(clock.t)` every frame, and
-  register it. The header of `rail.ts` is the full contract; the burrow in commit `6e45aa4` is a worked example.
+  register it. The header of `rail.ts` is the full contract; `burrow.tsx` is the worked example.
 - `src/main.tsx` registers only the three.js classes the scenes write as JSX (`<mesh>`,
   `<group>`, ...) instead of using r3f's `<Canvas>`, which would keep all of three.js in the
   bundle. A new kind of JSX element has to be added to that list.
