@@ -1440,16 +1440,28 @@ const DOOR_GLSL = /* glsl */ `
     }
     return v;
   }
-  /** the dark line where the door meets the plinth, under the stele's foot and under each leaf's edge */
+  /**
+   * The shade where the door meets the plinth. Each leaf, standing 5.6 tall, hides a good share of
+   * the sky from the plinth beside it (an analytic wall occlusion that turns with the leaf), and
+   * stands in a tight dark line of its own; the stele's foot does the same across its width.
+   */
+  float leafShade(vec2 q, vec2 h, vec2 e) {
+    float d = max(segDist(q, h, h + e * P_A) - 0.03, 0.0);
+    // the sky a wall takes from a point d away, its height cut down for its finite width
+    float sky = 0.5 * (1.0 - d / sqrt(d * d + 2.4 * 2.4));
+    float tight = 1.0 - smoothstep(0.0, 0.25, d);
+    return (1.0 - 1.2 * sky) * (1.0 - 0.5 * tight);
+  }
   float doorContact(vec3 p) {
-    // each pool leans a little away from the sun, the way the light under a thing is skewed
+    // the broad pool leans a little away from the sun, the way the light under a thing is skewed
     vec2 q = p.xz + normalize(SUN.xz) * 0.3;
     float d = length(vec2(max(abs(q.x) - ST_A, 0.0), max(abs(q.y) - 0.28, 0.0)));
     float ao = 1.0 - 0.55 * pow(1.0 - smoothstep(0.0, 1.6, d), 2.0);
-    vec2 hR = vec2(P_A, LEAF_Z);
-    vec2 hL = vec2(-P_A, LEAF_Z);
-    ao *= 1.0 - 0.65 * pow(1.0 - smoothstep(0.0, 1.3, segDist(q, hR, hR + leafAxisR().xz * P_A) - 0.04), 2.0);
-    ao *= 1.0 - 0.65 * pow(1.0 - smoothstep(0.0, 1.3, segDist(q, hL, hL + leafAxisL().xz * P_A) - 0.04), 2.0);
+    // and the stele's foot stands in a hard line of shade
+    float d0 = length(vec2(max(abs(p.x) - ST_A + 0.04, 0.0), max(abs(p.z - 0.05) - 0.24, 0.0)));
+    ao *= 1.0 - 0.45 * (1.0 - smoothstep(0.0, 0.12, d0));
+    ao *= leafShade(p.xz, vec2(P_A, LEAF_Z), leafAxisR().xz);
+    ao *= leafShade(p.xz, vec2(-P_A, LEAF_Z), leafAxisL().xz);
     return ao;
   }
 `;
@@ -1536,6 +1548,73 @@ function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: 
           return h;
         }
       #endif
+      #ifdef PLINTH
+        /** a rounded tile edge: 0 down in the joint, 1 on the glaze */
+        float bevelH(float d) { return smoothstep(0.0, 0.06, d); }
+        float diamond(vec2 q, vec2 hw) { return (1.0 - abs(q.x) / hw.x - abs(q.y) / hw.y) * min(hw.x, hw.y) * 0.85; }
+        /**
+         * The inlay round the door, in plan: rgb its colour, w how far p lies inside its tile (the
+         * joint runs where w is near 0). Out from the threshold: a coral boss in a ring of peach
+         * tiles, a sunburst of 24 blue and mint petals with peach lozenges between their tips, a
+         * coral band of 40 tiles, a ring of blue and mint diamonds, a mint fillet and a cream border;
+         * on the tier below, a ring of mint flags.
+         */
+        vec4 inlay(vec2 p) {
+          vec3 cream = ${glPaint("#f3e6cc")};
+          vec3 mint = ${glPaint("#a2dcbf")};
+          vec3 coral = ${glPaint("#f3a488")};
+          vec3 blue = ${glPaint("#a9c6ee")};
+          vec3 peach = ${glPaint("#f7c4a2")};
+          float r = length(p);
+          float a = atan(p.y, p.x);
+          if (r < 0.55) return vec4(coral, 0.55 - r);
+          if (r < 0.95) {
+            float w = TAU / 10.0;
+            float la = (fract(a / w) - 0.5) * w;
+            return vec4(peach, min(min(r - 0.55, 0.95 - r), (0.5 * w - abs(la)) * r));
+          }
+          if (r < 3.4) {
+            float w = TAU / 24.0;
+            float c = floor(a / w);
+            float la = (fract(a / w) - 0.5) * w;
+            float k = clamp((r - 0.95) / 2.45, 0.0, 1.0);
+            float hw = 0.5 * w * r * 0.96 * pow(sin(3.14159 * k), 0.55);
+            float pd = min(hw - abs(la) * r, min(r - 0.95, 3.4 - r) * 1.5);
+            if (pd > 0.0) return vec4(mod(c, 2.0) < 0.5 ? blue : mint, pd);
+            // between two tips, a peach lozenge
+            float lb = (fract(a / w + 0.5) - 0.5) * w;
+            float dd = diamond(vec2(lb * r, r - 3.0), vec2(0.5 * w * 3.0 * 0.62, 0.34));
+            if (dd > 0.0) return vec4(peach, min(dd, -pd));
+            return vec4(cream, min(-pd, -dd));
+          }
+          if (r < 3.52) return vec4(cream, min(r - 3.4, 3.52 - r));
+          if (r < 4.22) {
+            float w = TAU / 40.0;
+            float la = (fract(a / w) - 0.5) * w;
+            float c = floor(a / w);
+            return vec4(coral * (mod(c, 2.0) < 0.5 ? 1.0 : 0.95), min(min(r - 3.52, 4.22 - r), (0.5 * w - abs(la)) * r));
+          }
+          if (r < 4.34) return vec4(cream, min(r - 4.22, 4.34 - r));
+          if (r < 5.3) {
+            float w = TAU / 36.0;
+            float c = floor(a / w);
+            float la = (fract(a / w) - 0.5) * w;
+            float dd = diamond(vec2(la * r, r - 4.82), vec2(0.5 * w * 4.82 * 0.94, 0.44));
+            if (dd > 0.0) return vec4(mod(c, 2.0) < 0.5 ? mint : blue, dd);
+            // a coral dot where four diamonds' points meet
+            float lb = (fract(a / w + 0.5) - 0.5) * w;
+            float dot0 = 0.085 - length(vec2(lb * r, r - 4.82));
+            if (dot0 > 0.0) return vec4(coral, dot0);
+            return vec4(cream, min(min(-dd, -dot0), min(r - 4.34, 5.3 - r)));
+          }
+          if (r < 5.44) return vec4(mint, min(r - 5.3, 5.44 - r));
+          if (r < 6.0) return vec4(cream, r - 5.44);
+          float w = TAU / 64.0;
+          float la = (fract(a / w) - 0.5) * w;
+          float c = floor(a / w);
+          return vec4(mint * (mod(c, 2.0) < 0.5 ? 1.0 : 0.94), min(min(r - 6.08, 7.8 - r), (0.5 * w - abs(la)) * r));
+        }
+      #endif
       void main() {
         vec3 n = normalize(vN);
         vec3 col;
@@ -1583,37 +1662,81 @@ function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: 
           // the crease at the foot of each moulding
           occ = 1.0 - 0.3 * (1.0 - smoothstep(0.0, 0.035, abs(u - 0.3))) - 0.25 * (1.0 - smoothstep(0.0, 0.03, abs(wu - 0.41)));
           occ *= smoothstep(-0.3, 1.1, vOb.y);
+          // Voussoirs: eleven stones over the arch and four up each leg, each a touch different
+          // in tone, their joints V-grooves bevelled into the field and the outer moulding.
+          vec2 o = vOb.xy - vec2(0.0, P_HS);
+          float jd;
+          vec2 away;
+          vec2 stone;
+          if (o.y > 0.0) {
+            float phi = atan(o.y, o.x);
+            float w = PI / 11.0;
+            float k = (phi - PI * 0.5) / w + 0.5;
+            float lk = fract(k);
+            jd = min(lk, 1.0 - lk) * w * length(o);
+            away = vec2(-sin(phi), cos(phi)) * (lk < 0.5 ? 1.0 : -1.0);
+            stone = vec2(floor(k), 0.0);
+          } else {
+            float k = -o.y / 1.05;
+            float lk = fract(k);
+            jd = min(lk, 1.0 - lk) * 1.05;
+            away = vec2(0.0, lk < 0.5 ? -1.0 : 1.0);
+            stone = vec2(floor(k), sign(o.x));
+          }
+          float onField = smoothstep(0.29, 0.33, u) * smoothstep(-0.2, 0.3, vNo.z);
+          float fj = fwidth(jd) + 1e-4;
+          float slope = 0.8 * (1.0 - smoothstep(0.0, 0.075, jd)) * onField * (1.0 - smoothstep(0.02, 0.05, fj));
+          n = normalize(n - vec3(away * slope, 0.0));
+          col *= 0.955 + 0.09 * hash12(stone + 7.3) * onField;
+          float joint = (1.0 - smoothstep(0.006, 0.006 + fj * 1.5, jd)) * onField;
+          occ *= 1.0 - 0.5 * joint;
+          // the raised moulding round the outside: its crown a paler coral, its foot in shade
+          float crown = 1.0 - smoothstep(0.03, 0.09, abs(wu - 0.14));
+          col = mix(col, ${glPaint("#f7b39c")}, 0.75 * crown * step(0.33, u));
+          occ *= 1.0 - 0.3 * (1.0 - smoothstep(0.0, 0.05, abs(wu - 0.45))) * step(0.33, u);
           sun = doorSun(vW, false);
+          extra = KEY * col * 0.45 * slope * smoothstep(0.6, 0.95, dot(n, SUN));
         #endif
         #ifdef PLINTH
           if (dot(n, cameraPosition - vW) < 0.0) n = -n;
           float r = length(vW.xz);
           float y = vW.y - ${HERO_Y.toFixed(4)};
+          // the inlay lies on the drum's top and on the tier's tread, not on the turned edges
+          float top = smoothstep(0.96, 0.995, n.y) * (r < 5.9 ? step(0.295, y) : step(6.05, r) * step(r, 7.86));
+          vec4 t0 = inlay(vW.xz);
+          col = t0.rgb;
+          // past a few pixels a joint is finer than the screen: it fades to the tile's own colour
           float fr = fwidth(r) + 1e-4;
-          float top = smoothstep(0.85, 0.95, n.y);
-          vec3 cream = ${glPaint("#f3e6cc")};
-          vec3 mint = ${glPaint("#a2dcbf")};
-          vec3 coral = ${glPaint("#f3a488")};
-          col = r < 6.43 ? cream : mint;
-          // a quiet inlay of rings round the door: a double mint line, a ring of beads, a coral band
-          float line = (1.0 - smoothstep(0.03, 0.03 + fr, abs(r - 5.62))) + (1.0 - smoothstep(0.014, 0.014 + fr, abs(r - 5.8)));
-          col = mix(col, mint, clamp(line, 0.0, 1.0) * top);
-          float ang = atan(vW.z, vW.x);
-          float cell = (fract(ang / TAU * 40.0) - 0.5) * TAU / 40.0 * r;
-          float bead = 1.0 - smoothstep(0.06, 0.06 + fr, length(vec2(cell, r - 4.95)));
-          col = mix(col, mod(floor(ang / TAU * 40.0), 2.0) < 0.5 ? mint : coral, bead * top);
-          float band = smoothstep(4.18 - fr, 4.18, r) - smoothstep(4.36, 4.36 + fr, r);
-          col = mix(col, coral, band * top);
-          col = mix(col, cream, (1.0 - smoothstep(0.015, 0.015 + fr, abs(r - 4.27))) * top);
-          col = mix(col, cream, (1.0 - smoothstep(0.02, 0.02 + fr, abs(r - 7.72))) * top * step(6.43, r));
-          // terrazzo: a faint mottle and a scatter of specks
-          vec2 g = vW.xz * 34.0;
-          float speck = step(0.9, hash12(floor(g))) * (1.0 - smoothstep(0.2, 0.25, length(fract(g) - 0.5))) * (1.0 - smoothstep(0.1, 0.35, fwidth(g.x)));
-          col *= (0.97 + 0.05 * vnoise(vW.xz * 1.7)) * (1.0 - 0.1 * speck);
-          // the sides are in their own shade where they meet the tier below
-          occ = r < 6.43 ? mix(0.62, 1.0, smoothstep(0.1, 0.29, y)) : mix(0.5, 1.0, smoothstep(-0.5, 0.1, y));
+          float near = (1.0 - smoothstep(0.008, 0.035, fr)) * top;
+          float fw = fwidth(t0.w) + 1e-4;
+          float grout = (1.0 - smoothstep(0.016 - fw, 0.016 + fw, t0.w)) * near;
+          // each tile is glazed, its edges rounded down into the joint
+          // (only near a joint: out on the glaze the tile is flat, and the two extra looks are saved)
+          if (near > 0.0 && t0.w < 0.07) {
+            float e = 0.008;
+            float h0 = bevelH(t0.w);
+            vec2 g = vec2(bevelH(inlay(vW.xz + vec2(e, 0.0)).w) - h0, bevelH(inlay(vW.xz + vec2(0.0, e)).w) - h0) / e;
+            g = clamp(g, -1.6, 1.6) * near;
+            n = normalize(n + vec3(-g.x, 0.0, -g.y) * 0.5 * top);
+          }
+          col = mix(col, ${glPaint("#dccab0")}, grout);
+          // a little cloud in the glaze, and the odd speck
+          col *= 0.975 + 0.05 * vnoise(vW.xz * 2.3) * top;
+          if (top < 0.5) col = r < 6.05 ? ${glPaint("#f3e6cc")} : ${glPaint("#a2dcbf")};
+          // shade in the quirk under each bull-nose and where the drum stands on the tier
+          occ = 1.0;
+          if (top < 0.5) {
+            occ *= r < 6.05 ? mix(0.4, 1.0, smoothstep(0.115, 0.2, y)) : mix(0.5, 1.0, smoothstep(-0.2, 0.06, y));
+            occ *= mix(0.6, 1.0, smoothstep(-0.25, 0.4, n.y + 0.2));
+          } else if (r > 6.0) {
+            occ *= mix(0.7, 1.0, smoothstep(0.0, 0.35, r - 6.05));
+          }
+          occ *= 1.0 - 0.35 * grout;
           occ *= doorContact(vW);
           sun = doorSun(vW, true);
+          // the glaze catches the sun on the rounded edges of the tiles turned to us
+          vec3 v = normalize(cameraPosition - vW);
+          extra = KEY * 0.32 * pow(max(dot(n, normalize(v + SUN)), 0.0), 18.0) * near * (1.0 - grout);
         #endif
         #ifdef BRASS
           col = ${glPaint("#e8b84a")};
@@ -1695,13 +1818,30 @@ function surroundGeometry() {
   return g;
 }
 
-/** the plinth, turned: a cream drum with a bevelled rim on a broad mint tier that sinks into the sand */
+/**
+ * The plinth, turned: a cream drum whose edge is a bull-nose over a shadowed quirk, a narrow cream
+ * step with a smaller bull-nose of its own, then a broad mint tier, rounded too, that sinks into
+ * the sand. Points repeated at a quirk keep its crease crisp.
+ */
 function plinthGeometry() {
-  const P: [number, number][] = [
-    [0, 0.3], [6.08, 0.3], [6.22, 0.293], [6.32, 0.273], [6.385, 0.235], [6.41, 0.18], [6.42, 0.13], [6.47, 0.12],
-    [7.94, 0.12], [8.07, 0.113], [8.16, 0.092], [8.215, 0.055], [8.24, 0.0], [8.42, -0.6],
-  ];
-  return new LatheGeometry(P.map(([r, y]) => new Vector2(r, y)), 180);
+  const P: [number, number][] = [[0, 0.3]];
+  const nose = (cx: number, cy: number, rad: number, n: number) => {
+    for (let i = 0; i <= n; i++) {
+      const a = Math.PI / 2 - (Math.PI * i) / n;
+      P.push([cx + rad * Math.cos(a), cy + rad * Math.sin(a)]);
+    }
+  };
+  P.push([5.9, 0.3]);
+  nose(5.9, 0.215, 0.085, 14);
+  // the quirk under the nose, then the step: its tread sits under the drum's nose, in its shade
+  P.push([5.855, 0.128], [5.855, 0.128], [5.855, 0.112], [5.855, 0.112], [6.0, 0.112]);
+  nose(6.0, 0.08, 0.032, 8);
+  P.push([6.0, 0.048], [5.985, 0.046], [5.985, 0.046], [5.985, 0.04], [5.985, 0.04], [6.08, 0.04]);
+  // the tier
+  P.push([7.8, 0.04]);
+  nose(7.8, 0.0, 0.04, 8);
+  P.push([7.8, -0.04], [7.95, -0.06], [8.25, -0.6]);
+  return new LatheGeometry(P.map(([r, y]) => new Vector2(r, y)), 240);
 }
 
 /** the brass on one leaf (in its space: hinge at x = 0, the leaf towards -x): three hinges and a knob on each face */
@@ -1744,21 +1884,46 @@ function hardwareGeometry() {
   return merged;
 }
 
-/** the keystone over the arch */
+/**
+ * The keystone over the arch, with relief: a raised, bevelled coral panel on its face, and on that
+ * a turned cream boss. The panel is apart so that it can take its own paint.
+ */
 function keystoneGeometry() {
-  const k = new Shape();
   const y0 = P_HS + P_A - 0.1;
   const y1 = ST_HS + ST_A - 0.08;
   // its sides run towards the arch's centre, as a real keystone's do
   const spread = (y: number) => 0.3 * ((y - P_HS) / (y0 - P_HS));
-  k.moveTo(-spread(y0), y0);
-  k.lineTo(spread(y0), y0);
-  k.lineTo(spread(y1), y1);
-  k.lineTo(-spread(y1), y1);
-  k.lineTo(-spread(y0), y0);
-  const g = new ExtrudeGeometry(k, { depth: 0.16, bevelEnabled: true, bevelSize: 0.06, bevelThickness: 0.06, bevelSegments: 3 });
-  g.translate(0, 0, 0.04);
-  return g;
+  const trapezoid = (ya: number, yb: number, k: number) => {
+    const t = new Shape();
+    t.moveTo(-spread(ya) * k, ya);
+    t.lineTo(spread(ya) * k, ya);
+    t.lineTo(spread(yb) * k, yb);
+    t.lineTo(-spread(yb) * k, yb);
+    t.lineTo(-spread(ya) * k, ya);
+    return t;
+  };
+  const body = new ExtrudeGeometry(trapezoid(y0, y1, 1), { depth: 0.16, bevelEnabled: true, bevelSize: 0.06, bevelThickness: 0.06, bevelSegments: 3 });
+  body.translate(0, 0, 0.04);
+  const FACE = 0.04 + 0.16 + 0.06;
+  const panel = new ExtrudeGeometry(trapezoid(y0 + 0.22, y1 - 0.24, 0.62), {
+    depth: 0.03,
+    bevelEnabled: true,
+    bevelSize: 0.035,
+    bevelThickness: 0.035,
+    bevelSegments: 3,
+  });
+  panel.translate(0, 0, FACE - 0.03);
+  const boss = new LatheGeometry(
+    [[0, 0.1], [0.05, 0.098], [0.1, 0.085], [0.135, 0.06], [0.15, 0.04], [0.16, 0.035], [0.18, 0.02], [0.19, 0.0]].map(([r, y]) => new Vector2(r, y)),
+    32,
+  ).toNonIndexed();
+  boss.rotateX(Math.PI / 2);
+  boss.translate(0, y0 + 0.78, FACE + 0.03);
+  for (const p of [body, boss]) p.deleteAttribute("uv");
+  const stone = mergeGeometries([body, boss]);
+  body.dispose();
+  boss.dispose();
+  return { stone, panel };
 }
 
 function makeSkyMaterial() {
@@ -1856,7 +2021,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     });
     steleBack.translate(0, 0, -0.13);
     const surround = surroundGeometry();
-    const keystone = keystoneGeometry();
+    const { stone: keystone, panel: keyPanel } = keystoneGeometry();
     const portal = new ShapeGeometry(archPath(new Shape(), P_A + 0.03, P_HS, 0), 40);
     // one door leaf (the right-hand one, hinge at x = 0 of its own space, leaf towards -x)
     const ls = new Shape();
@@ -1895,6 +2060,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       steleBack,
       surround,
       keystone,
+      keyPanel,
       portal,
       leaf,
       hardware,
@@ -1941,6 +2107,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       interiors: DOORS.map((d, i) => makeInteriorMaterial(d.pal, ROOMS[i]!, mulberry32(907 + i * 31)(), aimOf(d, track))),
       steleBack: lambert("#f4b49c", "frame", "", FRAME_AO),
       trim: lambert("#f5e0cc", "plain"),
+      keyPanel: lambert("#f5a68c", "plain"),
       // the underside of a crown is in its own shade
       crown: lambert("#ffffff", "crown", PATTERNS.crown, "smoothstep(-1.1, 0.15, vOb.y)"),
       dome: lambert("#ffffff", "dome", PATTERNS.dome, "smoothstep(0.1, 0.55, vOb.y)"),
@@ -2249,6 +2416,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
           <mesh geometry={geo.steleBack} material={mat.steleBack} />
           <mesh geometry={geo.surround} material={mat.surround} />
           <mesh geometry={geo.keystone} material={mat.trim} />
+          <mesh geometry={geo.keyPanel} material={mat.keyPanel} />
           <mesh geometry={geo.portal} material={portalMaterial} position={[0, 0, -0.02]} />
           <group ref={leafR} position={[P_A, 0, 0.1]}>
             <mesh geometry={geo.leaf} material={mat.leaf} />
