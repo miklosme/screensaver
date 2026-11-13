@@ -4,7 +4,7 @@ import * as THREE from "three";
 import { RAIL, createRide } from "./rail";
 import { TIMING, type SceneProps } from "./types";
 import { createSky } from "./orbit/sky";
-import { mergeGeometries, toCreasedNormals } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { mergeGeometries, mergeVertices, toCreasedNormals } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 /**
  * ORBIT — the inside-out world.
@@ -115,6 +115,56 @@ const LAYER_GLSL = /* glsl */ `
   gl_FragColor.rgb *= mix(vec3(1.0), vec3(1.08, 1.05, 1.0), smoothstep(50.0, 90.0, vFogDepth))
     * mix(vec3(1.0), vec3(0.8, 0.82, 0.92), smoothstep(100.0, 230.0, vFogDepth));
 `;
+
+/**
+ * Wet street: each light near the camera is mirrored in the ground as a streak stretched towards
+ * the eye. Everything is in unrolled (s, z) ground coordinates; the lights (s, z, height, weight)
+ * and the eye's foot and height are chosen per frame from the camera pose (`pickReflections`).
+ */
+const REFL_N = 12;
+const WET_GLSL = /* glsl */ `
+uniform vec4 uRL[${REFL_N}];   // mirror point (s, z), unit direction towards the eye
+uniform vec3 uRW[${REFL_N}];   // 1 / half-width, 1 / reach towards the eye, 1 / reach back to the lamp
+uniform vec3 uRC[${REFL_N}];   // colour times weight
+uniform int uRN;
+uniform vec3 uEyeG;
+float wrapC(float x) { return x - ${C.toFixed(3)} * floor(x / ${C.toFixed(3)} + 0.5); }
+/** reflected light at ground point g (unrolled), before the roughness mask; zero past its reach */
+vec3 wetSheen(vec2 g) {
+  vec3 acc = vec3(0.0);
+  vec2 ge = vec2(wrapC(g.x - uEyeG.x), g.y - uEyeG.y);
+  float dEye = dot(ge, ge);
+  if (dEye > ${(48 * 48).toFixed(1)}) return acc;
+  for (int i = 0; i < ${REFL_N}; i++) {
+    if (i >= uRN) break;
+    vec4 L = uRL[i];
+    vec3 W = uRW[i];
+    vec2 q = vec2(wrapC(g.x - L.x), g.y - L.y);
+    float a = dot(q, L.zw) * (dot(q, L.zw) > 0.0 ? W.y : W.z);
+    float b = (q.y * L.z - q.x * L.w) * W.x;
+    acc += uRC[i] * exp(-(a * a + b * b));
+  }
+  return acc * (1.0 - smoothstep(${(30 * 30).toFixed(1)}, ${(48 * 48).toFixed(1)}, dEye));
+}
+float hashW(vec2 p) { return fract(sin(dot(p, vec2(12.99, 78.23))) * 43758.5); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hashW(i), hashW(i + vec2(1.0, 0.0)), f.x), mix(hashW(i + vec2(0.0, 1.0)), hashW(i + vec2(1.0, 1.0)), f.x), f.y);
+}`;
+
+/** a height field h tilts a view-space normal; scale-true, from screen derivatives */
+const BUMP_GLSL = /* glsl */ `
+vec3 bumpV(vec3 surfPos, vec3 n, float h, float face) {
+  vec3 dpx = dFdx(surfPos);
+  vec3 dpy = dFdy(surfPos);
+  vec3 r1 = cross(dpy, n);
+  vec3 r2 = cross(n, dpx);
+  float det = dot(dpx, r1) * face;
+  vec3 g = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  return normalize(abs(det) * n - g);
+}`;
 
 /** overlapping round shingles in cell units (rows run up `sv.y`): x is the tone, y a height for a bump */
 const SHINGLE_GLSL = /* glsl */ `
@@ -236,9 +286,55 @@ function withAir(
  */
 function windowAir(mat: THREE.Material) {
   mat.onBeforeCompile = (sh) => {
-    sh.fragmentShader = sh.fragmentShader.replace(
-      "#include <fog_fragment>",
-      `vec3 unfogged = gl_FragColor.rgb;
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        {
+          float ww = length(instanceMatrix[0].xyz);
+          float wh = length(instanceMatrix[1].xyz);
+          // beyond the reach of its halo a window shrinks to the opening and its sill
+          vec3 wc = (modelMatrix * instanceMatrix * vec4(0.0, 0.5, 0.0, 1.0)).xyz;
+          if (distance(wc, cameraPosition) > 52.0) transformed.xy = clamp(transformed.xy, vec2(-0.5 - 0.08 / ww, -0.1 / wh), vec2(0.5 + 0.08 / ww, 1.0));
+          vWq = vec4(transformed.x * ww, transformed.y * wh, ww, wh);
+        }`,
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying vec4 vWq;")
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        // the opening, in wall units: a round-headed arch, set into the wall
+        vec2 Q = vWq.xy;
+        float hw = vWq.z * 0.5;
+        float yc = vWq.w - hw;
+        float dw = Q.y > yc ? length(Q - vec2(0.0, yc)) - hw : max(abs(Q.x) - hw, -Q.y);
+        float pxw = fwidth(dw) + 1e-4;
+        float detail = 1.0 - smoothstep(0.012, 0.05, pxw);
+        float wIn = 1.0 - smoothstep(-pxw, pxw, dw);
+        vec3 lit = diffuseColor.rgb;
+        // glass: brightest low in the middle, a dark reveal round the edge, a mullion and a transom
+        float glow = 0.82 + 0.4 * (1.0 - smoothstep(0.0, vWq.w, length((Q - vec2(0.0, yc * 0.45)) * vec2(1.6, 1.0))));
+        float reveal = smoothstep(-0.075, -0.03, dw);
+        float bars = max(1.0 - smoothstep(0.016, 0.016 + pxw, abs(Q.x)), 1.0 - smoothstep(0.016, 0.016 + pxw, abs(Q.y - yc)));
+        vec3 frameCol = lit * 0.06 + vec3(0.025, 0.02, 0.05);
+        vec3 c = lit * mix(1.0, glow, detail);
+        c = mix(c, frameCol, detail * max(reveal * 0.85, bars * step(dw, 0.0)));
+        diffuseColor.rgb = c;
+        // a lit sill under the opening, and the glow the window throws on the brick round it
+        float sill = (1.0 - smoothstep(-pxw, pxw, max(abs(Q.x) - hw - 0.07, abs(Q.y + 0.045) - 0.045))) * (1.0 - wIn);
+        float edgeQ = max(abs(vWq.x / vWq.z) / 1.3, max((vWq.y / vWq.w - 0.525) / 0.925, 0.0));
+        vec3 wHalo = lit * (0.42 * exp(-max(dw, 0.0) / 0.13) + 0.08 * exp(-max(dw, 0.0) / 0.3)) * (1.0 - wIn) * (1.0 - smoothstep(0.35, 0.9, edgeQ));
+        wHalo *= 1.0 + 0.6 * smoothstep(0.2, -0.3, Q.y);
+        vec3 sillCol = lit * 0.28 + vec3(0.04, 0.035, 0.07);
+        if (wIn + sill < 0.002 && dot(wHalo, vec3(1.0)) < 0.004) discard;
+        diffuseColor.rgb = mix(diffuseColor.rgb, sillCol, sill * detail);
+        wIn = max(wIn, sill * detail);`,
+      )
+      .replace(
+        "#include <fog_fragment>",
+        `vec3 unfogged = gl_FragColor.rgb;
       #include <fog_fragment>
       #ifdef USE_FOG
       {
@@ -246,9 +342,12 @@ function windowAir(mat: THREE.Material) {
         float e = ${EXT_GLSL};
         vec3 c = mix(gl_FragColor.rgb, unfogged, 0.5);
         gl_FragColor.rgb = mix(c, vec3(dot(c, vec3(0.3, 0.5, 0.2))), 0.25 * e) * (1.0 + 0.15 * e);
+        // the halo is light on near brick: it goes with distance, so the far town keeps its points
+        wHalo *= (1.0 - smoothstep(0.05, 0.35, e)) * (1.0 - fogFactor);
       }
-      #endif`,
-    );
+      #endif
+      gl_FragColor = vec4(gl_FragColor.rgb * wIn + wHalo, wIn);`,
+      );
   };
   mat.customProgramCacheKey = () => "orbit-window";
 }
@@ -435,6 +534,9 @@ function buildWorld() {
   // Occupancy has its own stream so the town's layout (drawn from `rnd`) stays as it was.
   const occRnd = mulberry32(7741);
   const doorPools: { s: number; z: number }[] = [];
+  /** lights that can be mirrored in the wet street: unrolled foot (s, z), height, colour */
+  const reflLights: { s: number; z: number; h: number; c: THREE.Color; far: number }[] = [];
+  let nearRoad = false;
 
   const addWindow = (b: { s: number; z: number; rad: number; H: number }, phi: number, y: number, w: number, hh: number, c: THREE.Color, mul: number) => {
     const rr = b.rad * (1 - 0.12 * (y / b.H)) + 0.05;
@@ -446,6 +548,9 @@ function buildWorld() {
     lm.makeBasis(bx, by, bz).setPosition(cp * rr, y, sp * rr);
     frame(b.s, b.z, 0, fm).multiply(lm);
     windows.pushMatrix(fm, c, mul);
+    if (nearRoad && y < 4.5) {
+      reflLights.push({ s: b.s + cp * (rr + 0.3), z: b.z + sp * (rr + 0.3), h: y + hh * 0.5, c: c.clone().multiplyScalar(mul * (y < 0.5 ? 0.7 : 0.5)), far: 1.7 });
+    }
   };
 
   for (let attempt = 0; attempt < 9000 && buildings.length < 760; attempt++) {
@@ -476,6 +581,7 @@ function buildWorld() {
     if (!ok) continue;
     const b = { s, z, rad, H };
     buildings.push(b);
+    nearRoad = nearMain(s, z, rad + 12);
 
     if (hueRoll < 0.16) col.setHSL(0.68, 0.3, 0.5 + rnd() * 0.12);
     else col.setHSL(0.62 + hueRoll * 0.12, 0.32 + rnd() * 0.2, 0.2 + rnd() * 0.14);
@@ -566,12 +672,17 @@ function buildWorld() {
   const posts = new Inst();
   const bulbs = new Inst();
   const lanterns: { s: number; z: number; cyan: boolean }[] = [];
+  const cones = new Inst();
   const addLantern = (s: number, z: number, cyan: boolean) => {
     if (nearMain(s, z, 3.8)) return;
     lanterns.push({ s, z, cyan });
     posts.add(s, z, 0, 0, 0, 0, 1, 1, 1);
     bulbs.add(s, z, 0, 0, 2.9, 0, 1, 1.25, 1, cyan ? CYAN : GOLD, 1.6);
     addPoint(s, z, 2.9, 3.4, cyan ? CYAN : GOLD, 0.75);
+    if (!cyan) {
+      reflLights.push({ s, z, h: 2.9, c: GOLD.clone(), far: 1 });
+      cones.add(s, z, 0, 0, 0, 0, 1, 1, 1);
+    }
   };
   // along the camera road, alternating sides
   {
@@ -641,7 +752,12 @@ function buildWorld() {
     pillars.add(v.x, v.z, alpha, -5.4, 0, 0, 1, 1, 1, stone);
     addPoint(v.x, v.z, 7.35, 3.0, GOLD, 0.9);
     arcadeLamps.push({ s: v.x, z: v.z });
+    reflLights.push({ s: v.x, z: v.z, h: 7.35, c: GOLD.clone(), far: 1 });
     bulbs.add(v.x, v.z, 0, 0, 7.35, 0, 1, 1.3, 1, GOLD, 1.6);
+    // a string of small festoon bulbs hung under the rib
+    for (const a of [0.55, 1.0, 2.14, 2.59]) {
+      bulbs.add(v.x, v.z, alpha, Math.cos(a) * 4.72, 2.6 + Math.sin(a) * 4.72, 0, 0.42, 0.5, 0.42, GOLD, 1.9);
+    }
   }
 
   // ---------------------------------------------------------------- ground texture
@@ -790,6 +906,7 @@ function buildWorld() {
   {
     const pos: number[] = [];
     const colr: number[] = [];
+    const rd: number[] = [];
     const idx: number[] = [];
     const kerb = new THREE.Color("#8a8ce6");
     const edge = new THREE.Color("#252a68");
@@ -809,6 +926,7 @@ function buildWorld() {
         const z = v.z - (t.x / len) * offs[k]!;
         toWorld(s, z, 0.07, wp);
         pos.push(wp.x, wp.y, wp.z);
+        rd.push(u * pathLen, offs[k]!, s, z);
         let warm = 0;
         let cool = 0;
         for (const l of lanterns) {
@@ -833,6 +951,7 @@ function buildWorld() {
     }
     roadGeo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
     roadGeo.setAttribute("color", new THREE.Float32BufferAttribute(colr, 3));
+    roadGeo.setAttribute("aRd", new THREE.Float32BufferAttribute(rd, 4));
     roadGeo.setIndex(idx);
   }
 
@@ -957,7 +1076,7 @@ function buildWorld() {
     groundGeo.setIndex(idx);
   }
 
-  const bodyGeo = new THREE.CylinderGeometry(0.88, 1, 1, 12, 1, true).translate(0, 0.5, 0);
+  const bodyGeo = new THREE.CylinderGeometry(0.88, 1, 1, 24, 1, true).translate(0, 0.5, 0);
   {
     const p = bodyGeo.getAttribute("position");
     const c = new Float32Array(p.count * 3);
@@ -980,20 +1099,44 @@ function buildWorld() {
     lathe([[1.02, 0], [1.24, 0.38], [1.1, 0.82], [0.58, 1.25], [0.14, 1.62], [0, 2.2]], 12),
     lathe([[1.28, 0], [0.9, 0.26], [0.5, 0.9], [0.22, 1.8], [0.06, 2.8], [0, 3.4]], 12),
   ];
+  // a quad with room round the opening for its halo on the brick; the arched opening, its
+  // reveal, mullion, transom and sill are cut in the shader
   const windowGeo = new THREE.BufferGeometry();
   windowGeo.setAttribute(
     "position",
-    new THREE.Float32BufferAttribute(
-      [-0.5, 0, 0, 0.5, 0, 0, 0.5, 0.62, 0, 0.2, 1, 0, -0.2, 1, 0, -0.5, 0.62, 0],
-      3,
-    ),
+    new THREE.Float32BufferAttribute([-1.3, -0.4, 0, 1.3, -0.4, 0, 1.3, 1.45, 0, -1.3, 1.45, 0], 3),
   );
-  windowGeo.setIndex([0, 1, 2, 0, 2, 5, 5, 2, 3, 5, 3, 4]);
-  const treeGeo = new THREE.IcosahedronGeometry(1, 1);
-  const postGeo = new THREE.CylinderGeometry(0.06, 0.1, 2.75, 5, 1, true).translate(0, 1.375, 0);
-  const bulbGeo = new THREE.IcosahedronGeometry(0.28, 1);
-  const archGeo = new THREE.TorusGeometry(5.4, 0.36, 6, 22, Math.PI);
-  const pillarGeo = new THREE.CylinderGeometry(0.42, 0.52, 2.6, 8, 1, true).translate(0, 1.3, 0);
+  windowGeo.setIndex([0, 1, 2, 0, 2, 3]);
+  // topiary: a smooth, gently lumpy ball (welded so its normals are smooth)
+  const treeGeo = (() => {
+    const g0 = new THREE.IcosahedronGeometry(1, 4);
+    g0.deleteAttribute("normal");
+    g0.deleteAttribute("uv");
+    const g = mergeVertices(g0);
+    const p = g.getAttribute("position");
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i);
+      const y = p.getY(i);
+      const z = p.getZ(i);
+      const k = 1 + 0.045 * Math.sin(3.1 * x + 1.3) * Math.sin(2.7 * y + 0.4) * Math.sin(3.3 * z + 2.1) + 0.025 * Math.sin(6.3 * x + 5.1 * z + 3.7 * y);
+      p.setXYZ(i, x * k, y * k, z * k);
+    }
+    g.computeVertexNormals();
+    return g;
+  })();
+  const postGeo = new THREE.CylinderGeometry(0.06, 0.1, 2.75, 8, 1, true).translate(0, 1.375, 0);
+  const bulbGeo = new THREE.SphereGeometry(0.28, 16, 10);
+  // a soft cone of light under each street lamp, from the head to the cobbles
+  const coneGeo = new THREE.CylinderGeometry(0.2, 1.75, 2.8, 20, 3, true).translate(0, 1.42, 0);
+  const archGeo = new THREE.TorusGeometry(5.4, 0.36, 16, 72, Math.PI);
+  // pillar: plinth, shaft and a moulded capital whose collar swallows the foot of the rib
+  const pillarGeo = lathe(
+    [
+      [0.001, 0], [0.66, 0], [0.66, 0.16], [0.58, 0.22], [0.56, 0.3], [0.5, 0.36], [0.46, 0.5], [0.42, 2.1],
+      [0.46, 2.18], [0.5, 2.24], [0.48, 2.3], [0.55, 2.38], [0.6, 2.5], [0.6, 2.62], [0.52, 2.68], [0.44, 2.86], [0.4, 3.0], [0.001, 3.02],
+    ],
+    32,
+  );
 
   const pointsGeo = new THREE.BufferGeometry();
   pointsGeo.setAttribute("position", new THREE.Float32BufferAttribute(pPos, 3));
@@ -1095,6 +1238,13 @@ function buildWorld() {
   const moonGeo = new THREE.CircleGeometry(R + 2, 64);
 
   // ---------------------------------------------------------------- materials
+  const reflU = {
+    uRL: { value: Array.from({ length: REFL_N }, () => new THREE.Vector4()) },
+    uRW: { value: Array.from({ length: REFL_N }, () => new THREE.Vector3()) },
+    uRC: { value: Array.from({ length: REFL_N }, () => new THREE.Vector3()) },
+    uRN: { value: 0 },
+    uEyeG: { value: new THREE.Vector3(0, 0, 4) },
+  };
   const groundMat = new THREE.MeshLambertMaterial({
     map: groundTex,
     emissiveMap: groundTex,
@@ -1103,11 +1253,12 @@ function buildWorld() {
   });
   // Cobbles: fans of setts in the unrolled ground coordinates, fading out where they would shimmer.
   withAir(groundMat, "ground", 0.8, (sh) => {
+    Object.assign(sh.uniforms, reflU);
     sh.vertexShader = sh.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec2 vGs;")
       .replace("#include <begin_vertex>", `#include <begin_vertex>\nvGs = uv * vec2(${C.toFixed(3)}, ${(2 * ZH).toFixed(1)});`);
     sh.fragmentShader = sh.fragmentShader
-      .replace("#include <common>", "#include <common>\nvarying vec2 vGs;")
+      .replace("#include <common>", `#include <common>\nvarying vec2 vGs;\n${WET_GLSL}`)
       .replace(
         "#include <emissivemap_fragment>",
         /* glsl */ `#include <emissivemap_fragment>
@@ -1123,12 +1274,61 @@ function buildWorld() {
           float cob = mix(1.0, (0.7 + 0.4 * smoothstep(0.02, 0.2, mortar)) * (0.92 + 0.24 * sett), fade);
           diffuseColor.rgb *= cob;
           totalEmissiveRadiance *= cob;
+          // wet setts: polished tops mirror the lamps, the mortar and the dry patches do not
+          // (not under the plaza, which is drawn over the cobbles)
+          vec2 gz = vec2(vGs.x, vGs.y - ${ZH.toFixed(1)});
+          vec2 gp = vec2(wrapC(gz.x), gz.y - ${HUT_Z.toFixed(1)});
+          vec3 ws = dot(gp, gp) < ${((PLAZA_R - 0.5) ** 2).toFixed(1)} ? vec3(0.0) : wetSheen(gz);
+          if (ws.r + ws.g > 1e-3) {
+            float puddle = smoothstep(0.3, 0.8, vnoise(vGs * vec2(0.22, 0.3) + 7.0));
+            float wet = mix(0.25, 1.0, puddle) * mix(0.7, smoothstep(0.03, 0.14, mortar) * (0.5 + 0.5 * sett), fade);
+            totalEmissiveRadiance += ws * wet * 2.2;
+          }
         }`,
       );
   });
   const overlay = { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -6, side: THREE.DoubleSide };
   const roadMat = new THREE.MeshBasicMaterial({ vertexColors: true, ...overlay });
-  withAir(roadMat, "road", 0.8);
+  // The carriageway: worn setts in courses across the road, a raised crown, grain, and the wet
+  // shine of every lamp and window near the camera. The luminous kerbs stay as they were.
+  withAir(roadMat, "road", 0.8, (sh) => {
+    Object.assign(sh.uniforms, reflU);
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nattribute vec4 aRd;\nvarying vec4 vRd;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRd = aRd;");
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>\nvarying vec4 vRd;\n${WET_GLSL}`)
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        {
+          float off = vRd.y;
+          float d = vRd.x;
+          float inner = 1.0 - smoothstep(2.32, 2.42, abs(off));
+          vec2 cell = vec2(0.36, 0.25);
+          vec2 p = vec2(off, d) / cell;
+          p.x += 0.5 * mod(floor(p.y), 2.0) + 0.17 * mod(floor(p.y), 3.0);
+          vec2 id = floor(p);
+          vec2 f = fract(p);
+          vec2 e = min(f, 1.0 - f) * cell;
+          float ed = min(e.x, e.y);
+          vec2 fw = fwidth(p) * cell;
+          float px = max(fw.x, fw.y);
+          float fade = 1.0 - smoothstep(0.025, 0.1, px);
+          float mortar = 1.0 - smoothstep(0.012, 0.03 + px, ed);
+          float tone = hashW(id);
+          float dome = smoothstep(0.0, 0.08, ed);
+          float grain = vnoise(vec2(off, d) * vec2(23.0, 17.0));
+          float crown = 1.0 - (off / 2.4) * (off / 2.4);
+          float m = (0.74 + 0.36 * tone) * mix(0.8, 1.04, dome) * (1.0 - 0.6 * mortar);
+          m = mix(1.0, m, fade) * (0.9 + 0.2 * mix(0.5, grain, 1.0 - smoothstep(0.02, 0.06, px)));
+          diffuseColor.rgb *= mix(1.0, m * (0.78 + 0.32 * crown), inner);
+          float puddle = smoothstep(0.3, 0.8, vnoise(vec2(off * 0.7, d * 0.16) + 3.0));
+          float wet = mix(0.35, 1.0, puddle) * mix(0.75, (1.0 - mortar) * (0.45 + 0.55 * tone) * mix(0.8, 1.1, dome), fade);
+          diffuseColor.rgb += wetSheen(vRd.zw) * wet * mix(1.4, 2.4, inner);
+        }`,
+      );
+  });
   const lampUniform = { value: lightTex };
   const plazaMat = new THREE.MeshBasicMaterial({ map: plazaTex, ...overlay });
   // the cyan ring of plaza lamps lights the paving under it
@@ -1165,7 +1365,7 @@ function buildWorld() {
         }`,
       );
     sh.fragmentShader = sh.fragmentShader
-      .replace("#include <common>", `#include <common>\nvarying vec3 vTw;\nvarying vec3 vLp;\n${LAMP_PARS}`)
+      .replace("#include <common>", `#include <common>\nvarying vec3 vTw;\nvarying vec3 vLp;\n${LAMP_PARS}\n${BUMP_GLSL}`)
       .replace(
         "#include <emissivemap_fragment>",
         `#include <emissivemap_fragment>
@@ -1174,9 +1374,11 @@ function buildWorld() {
           totalEmissiveRadiance += (diffuseColor.rgb * 1.8 + 0.05) * L;
         }`,
       )
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = bumpV(-vViewPosition, normal, brickH, faceDirection);")
       .replace(
         "#include <color_fragment>",
         /* glsl */ `#include <color_fragment>
+        float brickH = 0.0;
         {
           float h = vTw.y;
           float px = fwidth(h) + 1e-4;
@@ -1187,7 +1389,7 @@ function buildWorld() {
           float fx = fract(bx);
           float joint = 1.0 - smoothstep(0.03, 0.03 + px, min(min(fy, 1.0 - fy) * 0.42, min(fx, 1.0 - fx) * 0.5));
           float tone = fract(sin(dot(vec2(floor(bx), row), vec2(12.99, 78.23))) * 43758.5);
-          float m = (0.9 + 0.22 * tone) * (1.0 - 0.25 * joint);
+          float m = (0.9 + 0.22 * tone) * (1.0 - 0.25 * joint) * (1.0 + 0.14 * smoothstep(0.62, 0.92, fy) * (1.0 - joint));
           // mouldings: the windows sit on rows 2.35 apart, starting at 2.0
           float course = 1.0 - smoothstep(0.09, 0.09 + px, abs(fract((h - 1.62) / 2.35 + 0.5) - 0.5) * 2.35);
           float crown = smoothstep(vTw.z - 0.75, vTw.z - 0.7, h);
@@ -1198,6 +1400,7 @@ function buildWorld() {
             fade *= 1.0 - 0.9 * smoothstep(0.0, 0.55, ${EXT_GLSL});
           #endif
           diffuseColor.rgb *= mix(1.0, m, fade);
+          brickH = (-0.014 * joint + 0.03 * course * step(1.0, h)) * fade;
           diffuseColor.rgb *= mix(0.3, 1.0, smoothstep(0.0, 2.2, h)); // contact shade at the foot
           #ifdef USE_FOG
             // overhead, a tower brightens towards its tip: it stands out of the darker street it hangs from
@@ -1223,16 +1426,196 @@ function buildWorld() {
       }`,
     );
   }, true);
-  const windowMat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+  // premultiplied: the opening covers the wall, the halo adds light to it
+  const windowMat = new THREE.MeshBasicMaterial({
+    side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.OneMinusSrcAlphaFactor,
+    blendSrcAlpha: THREE.ZeroFactor,
+    blendDstAlpha: THREE.OneFactor,
+  });
   windowAir(windowMat);
   const treeMat = new THREE.MeshLambertMaterial({ emissive: "#03141a" });
-  withAir(treeMat, "tree", 0.85);
+  // Topiary: clipped leaf scales over a smooth ball, lit from above, with a warm rim where a lamp is near.
+  withAir(treeMat, "tree", 0.85, (sh) => {
+    sh.uniforms.uLamp = lampUniform;
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vLo;\nvarying vec3 vLp;\nvarying vec2 vSc;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        vLo = position;
+        vSc = vec2(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz));
+        {
+          mat4 iw = modelMatrix * instanceMatrix;
+          vLp = (iw * vec4(transformed, 1.0)).xyz + normalize(mat3(iw) * vec3(position.x, 0.0, position.z)) * 1.6;
+        }`,
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>\nvarying vec3 vLo;\nvarying vec3 vLp;\nvarying vec2 vSc;\n${LAMP_PARS}\n${BUMP_GLSL}\n${SHINGLE_GLSL}`)
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        float leafH = 0.0;
+        {
+          vec3 n = normalize(vLo);
+          float th = acos(clamp(n.y, -1.0, 1.0));
+          float sn = sin(th);
+          // leaves about 0.17 across whatever the bush's size; fewer round the crown so they keep their shape
+          float N = floor(vSc.x * 36.0) * exp2(clamp(floor(log2(sn * 1.3 + 1e-3)), -3.0, 0.0));
+          vec2 sv = vec2((atan(n.z, n.x) * 0.159155 + 0.5) * N, (3.14159 - th) * vSc.y * 6.0);
+          vec2 sh = shingle(sv);
+          float fade = 1.0 - smoothstep(0.15, 0.7, length(fwidth(sv)));
+          #ifdef USE_FOG
+            fade *= 1.0 - smoothstep(0.0, 0.4, ${EXT_GLSL});
+          #endif
+          diffuseColor.rgb *= mix(1.0, 0.4 + 0.75 * sh.x, fade);
+          leafH = 0.03 * sh.y * fade;
+          diffuseColor.rgb *= mix(0.32, 1.5, smoothstep(-0.8, 0.95, n.y));
+        }`,
+      )
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = bumpV(-vViewPosition, normal, leafH, faceDirection);")
+      .replace(
+        "#include <lights_fragment_end>",
+        `#include <lights_fragment_end>
+        {
+          vec3 Lw = lampAt(vLp);
+          float g = 1.0 - clamp(abs(dot(normal, normalize(vViewPosition))), 0.0, 1.0);
+          totalEmissiveRadiance += Lw * (diffuseColor.rgb * 1.2 + 0.7 * g * g) + vec3(1.0, 0.62, 0.3) * 0.1 * g * g * g;
+        }`,
+      );
+  });
   const postMat = new THREE.MeshLambertMaterial({ color: "#3a3f78" });
   withAir(postMat, "post", 0.85);
   const bulbMat = new THREE.MeshBasicMaterial();
-  withAir(bulbMat, "bulb", 0.6);
+  // a round glass head: white-hot where it faces the eye, its own colour falling off to the limb
+  withAir(bulbMat, "bulb", 0.6, (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vNv;\nvarying vec3 vVv;")
+      .replace(
+        "#include <project_vertex>",
+        "#include <project_vertex>\nvNv = normalMatrix * (mat3(instanceMatrix) * normal);\nvVv = -mvPosition.xyz;",
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vNv;\nvarying vec3 vVv;")
+      .replace(
+        "#include <color_fragment>",
+        `#include <color_fragment>
+        {
+          float ndv = clamp(abs(dot(normalize(vNv), normalize(vVv))), 0.0, 1.0);
+          diffuseColor.rgb *= 0.3 + 1.6 * ndv * ndv;
+          diffuseColor.rgb += vec3(1.0, 0.9, 0.75) * 1.6 * smoothstep(0.55, 0.95, ndv) * dot(diffuseColor.rgb, vec3(0.3));
+        }`,
+      );
+  });
   const stoneMat = new THREE.MeshLambertMaterial({ emissive: "#0c0f33" });
-  withAir(stoneMat, "stone", 0.85);
+  stoneMat.defines = { USE_UV: "" };
+  // Arch ribs: dressed voussoirs with a raised keystone, warm on the underside where the lamps hang.
+  withAir(stoneMat, "arch", 0.85, (sh) => {
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>\n${BUMP_GLSL}`)
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        float stoneH = 0.0;
+        float under = 0.0;
+        {
+          float a = vUv.x * 19.0;
+          float k = floor(a);
+          float f = fract(a);
+          float pxa = fwidth(a) + 1e-4;
+          float joint = 1.0 - smoothstep(0.0, 0.04 + pxa, min(f, 1.0 - f));
+          float key = 1.0 - step(0.5, abs(k - 9.0));
+          float tone = fract(sin(k * 12.99) * 43758.5);
+          float rnd = cos(vUv.y * 6.2832);
+          // a moulded band along each face of the rib
+          float band = 1.0 - smoothstep(0.02, 0.05, abs(abs(fract(vUv.y + 0.25) - 0.5) - 0.25));
+          diffuseColor.rgb *= (0.86 + 0.22 * tone) * (1.0 - 0.45 * joint) * (1.0 + 0.18 * key) * (1.0 + 0.12 * band);
+          stoneH = -0.02 * joint + 0.03 * key * (1.0 - joint) + 0.012 * band;
+          under = smoothstep(0.1, -0.9, rnd);
+          diffuseColor.rgb *= mix(1.0, 0.75, under);
+        }`,
+      )
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = bumpV(-vViewPosition, normal, stoneH, faceDirection);")
+      .replace(
+        "#include <lights_fragment_end>",
+        `#include <lights_fragment_end>
+        {
+          // the lamp under the crown and the festoon bulbs warm the soffit
+          float x = vUv.x;
+          float w = exp(-pow((x - 0.5) / 0.07, 2.0)) * 1.2
+            + exp(-pow((x - 0.175) / 0.04, 2.0)) + exp(-pow((x - 0.318) / 0.04, 2.0))
+            + exp(-pow((x - 0.682) / 0.04, 2.0)) + exp(-pow((x - 0.825) / 0.04, 2.0));
+          totalEmissiveRadiance += vec3(1.0, 0.6, 0.26) * (diffuseColor.rgb * 1.4 + 0.04) * w * (0.25 + 0.75 * under);
+        }`,
+      );
+  }, true);
+  const pillarMat = new THREE.MeshLambertMaterial({ emissive: "#0c0f33" });
+  // Piers: ashlar courses, a dark contact at the foot and a shaded collar under the capital.
+  withAir(pillarMat, "pillar", 0.85, (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec2 vPy;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvPy = vec2(position.y, atan(position.z, position.x));");
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", `#include <common>\nvarying vec2 vPy;\n${BUMP_GLSL}`)
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+        float pierH = 0.0;
+        {
+          float y = vPy.x;
+          float row = floor(y / 0.38);
+          float fy = fract(y / 0.38);
+          float bx = vPy.y * 1.2732 + 0.5 * mod(row, 2.0);
+          float px = fwidth(y / 0.38) + 1e-4;
+          float shaft = step(0.5, y) * step(y, 2.1);
+          float joint = shaft * (1.0 - smoothstep(0.0, 0.05 + px, min(min(fy, 1.0 - fy), min(fract(bx), 1.0 - fract(bx)) * 0.6)));
+          float tone = fract(sin(dot(vec2(floor(bx), row), vec2(12.99, 78.23))) * 43758.5);
+          diffuseColor.rgb *= (0.88 + 0.2 * tone * shaft) * (1.0 - 0.4 * joint);
+          diffuseColor.rgb *= mix(0.4, 1.0, smoothstep(0.0, 0.5, y));             // on the cobbles
+          diffuseColor.rgb *= 1.0 - 0.45 * smoothstep(1.8, 2.2, y) * (1.0 - smoothstep(2.2, 2.32, y)); // under the collar
+          diffuseColor.rgb *= 1.0 - 0.35 * smoothstep(2.62, 2.75, y);             // the rib's seat, in shade
+          pierH = -0.015 * joint;
+        }`,
+      )
+      .replace("#include <normal_fragment_maps>", "#include <normal_fragment_maps>\nnormal = bumpV(-vViewPosition, normal, pierH, faceDirection);");
+  }, true);
+  // the soft cone a street lamp throws down onto the cobbles
+  const coneMat = new THREE.ShaderMaterial({
+    uniforms: { uCol: { value: new THREE.Color("#ffb860") } },
+    vertexShader: /* glsl */ `
+      varying vec3 vN;
+      varying vec3 vV;
+      varying float vY;
+      void main() {
+        vec4 mv = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+        vN = normalize(normalMatrix * (mat3(instanceMatrix) * normal));
+        vV = -mv.xyz;
+        vY = position.y / 2.84;
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uCol;
+      varying vec3 vN;
+      varying vec3 vV;
+      varying float vY;
+      void main() {
+        float d = length(vV);
+        float ndv = abs(dot(normalize(vN), vV / d));
+        float a = ndv * ndv * (0.35 + 0.65 * vY * vY) * smoothstep(0.0, 0.25, vY) * smoothstep(1.0, 0.9, vY);
+        a *= smoothstep(1.5, 5.0, d) * (1.0 - smoothstep(25.0, 140.0, d));
+        gl_FragColor = vec4(uCol * a * 0.26, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+    blending: THREE.AdditiveBlending,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
   const hutMat = new THREE.MeshLambertMaterial({ color: "#c9cdf2", emissive: "#1c2256" });
   // Hut: an ashlar wall darkening into its footing, a gold bead under the eave, a shingled bell.
   hutShader(
@@ -1443,20 +1826,80 @@ function buildWorld() {
     path,
     pathLen,
     sky,
-    inst: { bodies, domes, windows, trees, posts, bulbs, arches, pillars },
+    inst: { bodies, domes, windows, trees, posts, bulbs, arches, pillars, cones },
+    reflLights,
+    reflU,
     geo: {
-      groundGeo, bodyGeo, domeGeos, windowGeo, treeGeo, postGeo, bulbGeo, archGeo, pillarGeo, pointsGeo,
+      groundGeo, bodyGeo, domeGeos, windowGeo, treeGeo, postGeo, bulbGeo, archGeo, pillarGeo, pointsGeo, coneGeo,
       roadGeo, plazaGeo, hutGeo, porchGeo, frameGeo, portalGeo, leafGeoL, leafGeoR, trimGeoL, trimGeoR, stepGeo, roundWinGeo,
       winFrameGeo, beamGeo, beamGeo2, finialGeo, finialGeo2, crescentGeo, moonGeo,
     },
     mat: {
-      groundMat, bodyMat, domeMat, windowMat, treeMat, postMat, bulbMat, stoneMat, hutMat, porchMat, stepMat, goldMat, leafMat,
+      groundMat, bodyMat, domeMat, windowMat, treeMat, postMat, bulbMat, stoneMat, pillarMat, coneMat, hutMat, porchMat, stepMat, goldMat, leafMat,
       roadMat, plazaMat, roundWinMat, beamMat, beamMat2, finialMat, pointsMat, moonMat,
     },
   };
 }
 
 type World = ReturnType<typeof buildWorld>;
+
+/**
+ * Chooses the lights the wet street mirrors for a camera pose: the REFL_N nearest (those behind
+ * the camera count as further away). Each fades out as it nears the distance of the first light
+ * left out, so the choice changes without a pop as the camera moves.
+ */
+function createReflectionPicker({ reflLights, reflU }: World) {
+  const n = reflLights.length;
+  const score = new Float32Array(n);
+  const best = new Int32Array(REFL_N + 1);
+  return (eye: THREE.Vector3, look: THREE.Vector3) => {
+    const es = Math.atan2(eye.x, -eye.y) * R;
+    const ez = eye.z;
+    let fs = wrapS(Math.atan2(look.x, -look.y) * R - es);
+    let fz = look.z - ez;
+    const fl = Math.hypot(fs, fz) || 1;
+    fs /= fl;
+    fz /= fl;
+    const eh = Math.max(0.5, R - Math.hypot(eye.x, eye.y));
+    reflU.uEyeG.value.set(es, ez, eh);
+    let m = 0;
+    for (let i = 0; i < n; i++) {
+      const l = reflLights[i]!;
+      const ds = wrapS(l.s - es);
+      const dz = l.z - ez;
+      const d = (Math.hypot(ds, dz) + 2.5 * Math.max(0, -(ds * fs + dz * fz))) * l.far;
+      score[i] = d;
+      if (d > 52) continue;
+      // insert into the sorted short list
+      if (m > REFL_N && d >= score[best[REFL_N]!]!) continue;
+      let j = Math.min(m, REFL_N);
+      while (j > 0 && score[best[j - 1]!]! > d) {
+        best[j] = best[j - 1]!;
+        j--;
+      }
+      best[j] = i;
+      if (m <= REFL_N) m++;
+    }
+    const far = m > REFL_N ? Math.min(52, score[best[REFL_N]!]!) : 52;
+    const band = Math.max(2, Math.min(10, far * 0.4));
+    const count = Math.min(m, REFL_N);
+    reflU.uRN.value = count;
+    for (let k = 0; k < count; k++) {
+      const l = reflLights[best[k]!]!;
+      const w = smooth((far - score[best[k]!]!) / band);
+      // The mirror image sits where the line from the eye to the lamp's reflection meets the
+      // street; the streak runs back from there to the lamp's foot and a little on towards the eye.
+      const fs = wrapS(es - l.s);
+      const fz2 = ez - l.z;
+      const D = Math.hypot(fs, fz2) + 1e-3;
+      const kk = l.h / (l.h + eh);
+      const dX = D * (1 - kk);
+      reflU.uRL.value[k]!.set(l.s + fs * kk, l.z + fz2 * kk, fs / D, fz2 / D);
+      reflU.uRW.value[k]!.set(1 / ((0.14 + 0.01 * dX + 0.025 * l.h) * 1.15), 1 / (0.6 + 0.12 * dX), 1 / (0.4 + D * kk));
+      reflU.uRC.value[k]!.set(l.c.r * w, l.c.g * w, l.c.b * w);
+    }
+  };
+}
 let cachedWorld: World | null = null;
 /** geometry / textures / layout are built once and shared by every (re)mount of the scene */
 const getWorld = () => (cachedWorld ??= buildWorld());
@@ -1488,7 +1931,8 @@ function buildObjects(w: World, portalMaterial: THREE.Material) {
   addInst(inst.posts, geo.postGeo, mat.postMat);
   addInst(inst.bulbs, geo.bulbGeo, mat.bulbMat);
   addInst(inst.arches, geo.archGeo, mat.stoneMat);
-  addInst(inst.pillars, geo.pillarGeo, mat.stoneMat);
+  addInst(inst.pillars, geo.pillarGeo, mat.pillarMat);
+  addInst(inst.cones, geo.coneGeo, mat.coneMat);
   const points = new THREE.Points(geo.pointsGeo, mat.pointsMat);
   points.frustumCulled = false;
   root.add(points, w.sky.root);
@@ -1632,6 +2076,7 @@ export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
     [objs],
   );
   const track = useMemo(() => createTrack(world), [world]);
+  const pickReflections = useMemo(() => createReflectionPicker(world), [world]);
   const tmp = useMemo(newPose, []);
   const forward = useMemo(() => new THREE.Vector3(), []);
 
@@ -1645,6 +2090,7 @@ export default function Orbit({ clock, camera, portalMaterial }: SceneProps) {
     camera.near = 0.05;
     camera.far = 800;
 
+    pickReflections(tmp.pos, tmp.look);
     objs.lamp.position.copy(tmp.pos).lerp(tmp.look, 0.3).addScaledVector(camera.up, 2.5);
 
     world.sky.update(t, tmp.pos, forward.subVectors(tmp.look, tmp.pos).normalize());
