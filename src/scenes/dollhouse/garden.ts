@@ -1,14 +1,20 @@
 import {
   BufferAttribute,
+  type Camera,
   Color,
   DoubleSide,
   DynamicDrawUsage,
+  Frustum,
   Group,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
   Matrix3,
+  Matrix4,
   Mesh,
+  type Object3D,
+  type Scene,
   ShaderMaterial,
+  Sphere,
   Vector3,
   type Material,
 } from "three";
@@ -83,8 +89,12 @@ export interface Garden {
   drifts: { x: number; z: number; r: number; hue: RGB }[];
   /** foot of each pinwheel stalk, and the height of its hub (the stalk's shadow is baked with the scene's) */
   pinwheels: { x: number; z: number; size: number; top: number }[];
-  /** `eye` the camera's position, `at` a point it looks towards: the flowers drawn are those in view */
-  update(t: number, eye: { x: number; y: number; z: number }, at: { x: number; y: number; z: number }): void;
+  /**
+   * Sets the clock. The flowers drawn are chosen as the scene is rendered, from the camera it is
+   * rendered with (the director sets its aspect after the scenes' frame callbacks); `camera` is
+   * used instead only while the garden is not in a scene.
+   */
+  update(t: number, camera: Camera): void;
   dispose(): void;
 }
 
@@ -216,6 +226,23 @@ const HEAD_Y = 0.96;
 /** the distances over which a flower hands over to its few-triangle self; grass is gone a little past them */
 const LOD_NEAR = 8.5;
 const LOD_FAR = 12.5;
+/** each flower hands over across a stride this long, somewhere between LOD_NEAR and LOD_FAR */
+const LOD_STRIDE = 1.5;
+/** the few-triangle flowers dissolve over this stretch, before the CPU stops drawing them */
+const OUT_NEAR = 56;
+const OUT_FAR = 63;
+/**
+ * GLSL: whether this fragment of an instance is kept, for a coverage of `keep` (0 .. 1).
+ *
+ * A dither fixed to the screen and offset by the instance's own seed, so that one flower's two
+ * versions, given complementary coverage (`h < x` and `h >= x`), share its pixels between them
+ * without a gap or an overlap, and neighbouring flowers do not dissolve in the same pattern. It
+ * depends on nothing but the pixel and the instance, so a frozen frame repeats exactly.
+ */
+const DITHER = /* glsl */ `
+  float ditherAt(float seed) {
+    return fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + seed);
+  }`;
 
 interface FlowerKind {
   petals: number;
@@ -364,13 +391,21 @@ export function createGarden(o: GardenOptions): Garden {
   const pinwheels: Garden["pinwheels"] = [];
   const materials: ShaderMaterial[] = [];
   const geometries: InstancedBufferGeometry[] = [];
+  type Placed = { x: number; y: number; z: number; s: number };
   const pools: {
     g: InstancedBufferGeometry;
-    list: { x: number; z: number }[];
+    list: Placed[];
     d0: number;
     d1: number;
     attrs: { a: InstancedBufferAttribute; from: Float32Array }[];
   }[] = [];
+  /**
+   * How far an instance of a list may reach from its foot, in multiples of its size: `r` to the
+   * side, `h` up. It covers everything the shader can do to it (the head, the petals, the furthest
+   * sway of the breeze, a shadow thrown along the sun), so a cluster is only left out once nothing
+   * of it can be in the picture.
+   */
+  const reach = new Map<object, { r: number; h: number }>();
   const add = (g: InstancedBufferGeometry, m: ShaderMaterial) => {
     if (!m.uniforms.uT) m.uniforms.uT = { value: 0 };
     const mesh = new Mesh(g, m as Material);
@@ -502,16 +537,22 @@ export function createGarden(o: GardenOptions): Garden {
         varying vec3 vW;
         varying vec3 vN;
         varying vec3 vUP;
+        flat varying vec2 vKeep;
+        flat varying float vSeed;
         void main() {
-          // near the eye the full flower; past ${LOD_NEAR} m the few-triangle one; between, one
-          // shrinks into the sand as the other grows out of it
-          // each flower hands over at a distance of its own, the two overlapping for a stride, so
-          // the change never sweeps across a bed as a line and nothing shrinks
+          // near the eye the full flower; past ${LOD_NEAR} m the few-triangle one. Each flower hands
+          // over at a distance of its own, so the change never sweeps across a bed as a line, and
+          // across a stride, dissolving from one version into the other through a dither in which
+          // the two take complementary pixels (see ditherAt), so they never show at once
           float dist = length(cameraPosition - aPlace.xyz);
-          float swap = ${LOD_NEAR.toFixed(1)} + ${(LOD_FAR - LOD_NEAR).toFixed(1)} * fract(aLook.w * 7.13);
-          float grow = uFar > 1.5 ? 1.0 - smoothstep(${(LOD_FAR - 3).toFixed(1)}, ${(LOD_FAR + 2).toFixed(1)}, dist)
-                     : uFar > 0.5 ? step(swap - 0.5, dist) : step(dist, swap + 0.5);
-          if (grow <= 0.0) {
+          float swap = ${(LOD_NEAR + LOD_STRIDE / 2).toFixed(2)} + ${(LOD_FAR - LOD_NEAR - LOD_STRIDE).toFixed(2)} * fract(aLook.w * 7.13);
+          float x = smoothstep(swap - ${(LOD_STRIDE / 2).toFixed(2)}, swap + ${(LOD_STRIDE / 2).toFixed(2)}, dist);
+          // the few-triangle flower dissolves again far off, before it stops being drawn
+          float out_ = 1.0 - smoothstep(${OUT_NEAR.toFixed(1)}, ${OUT_FAR.toFixed(1)}, dist);
+          float grow = uFar > 1.5 ? 1.0 - smoothstep(${(LOD_FAR - 3).toFixed(1)}, ${(LOD_FAR + 2).toFixed(1)}, dist) : 1.0;
+          // the dither keeps a fragment where vKeep.x <= h < vKeep.y
+          vKeep = uFar > 1.5 ? vec2(0.0, 1.0) : uFar > 0.5 ? vec2(0.0, x * out_) : vec2(x, 1.0);
+          if (grow <= 0.0 || vKeep.x >= vKeep.y) {
             gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             return;
           }
@@ -529,6 +570,7 @@ export function createGarden(o: GardenOptions): Garden {
           vW = aPlace.xyz + p * aPlace.w * grow;
           vN = normalize(n);
           vUP = vec3(aUV, aPart);
+          vSeed = fract(aLook.w * 0.6180339);
           vCol = aPart < 0.5 ? ${glScreen("#3f9468")} * (0.45 + 0.6 * position.y)
                : aPart < 1.5 ? aLook.rgb
                : aPart < 2.5 ? ${glScreen("#5c2a50")}
@@ -541,9 +583,16 @@ export function createGarden(o: GardenOptions): Garden {
         varying vec3 vW;
         varying vec3 vN;
         varying vec3 vUP;
+        flat varying vec2 vKeep;
+        flat varying float vSeed;
         const vec3 SUN = vec3(${o.sun.x.toFixed(4)}, ${o.sun.y.toFixed(4)}, ${o.sun.z.toFixed(4)});
         ${o.fogGlsl}
+        ${DITHER}
         void main() {
+          if (vKeep.x > 0.0 || vKeep.y < 1.0) {
+            float h = ditherAt(vSeed);
+            if (h < vKeep.x || h >= vKeep.y) discard;
+          }
           vec3 n = normalize(vN) * (gl_FrontFacing ? 1.0 : -1.0);
           vec3 col = vCol;
           float part = vUP.z;
@@ -602,10 +651,15 @@ export function createGarden(o: GardenOptions): Garden {
     kinds.forEach((g, i) => {
       const list = byKind[i]!;
       const src = plantAttrs(list);
-      pool(g, nearMat, list, 0, LOD_FAR + 1, src);
-      pool(flowerGeometry(FLOWER_KINDS[i]!, true), farMat, list, LOD_NEAR - 1, 64, src);
+      // each drawn wherever its shader gives it any coverage, with a margin
+      pool(g, nearMat, list, 0, LOD_FAR + 0.25, src);
+      pool(flowerGeometry(FLOWER_KINDS[i]!, true), farMat, list, LOD_NEAR - 0.25, OUT_FAR + 0.25, src);
+      // a head, its petals, and the breeze bending the stem at most 0.16 * 1.4 of its height
+      reach.set(list, { r: 0.12 + 0.25 + 0.5 + 0.05, h: 1.2 });
     });
-    pool(tuftGeo, grassMat, tufts, 0, LOD_FAR + 2, plantAttrs(tufts));
+    pool(tuftGeo, grassMat, tufts, 0, LOD_FAR + 2.25, plantAttrs(tufts));
+    // blades lean out 0.55 at most, and the breeze bends them less than the flowers
+    reach.set(tufts, { r: 0.04 + 0.55 + 0.16 + 0.05, h: 1.05 });
 
     // the shadows: a dark pool at each foot, and a soft one where the sun throws the head
     const dg = new InstancedBufferGeometry();
@@ -643,7 +697,7 @@ export function createGarden(o: GardenOptions): Garden {
         void main() {
           vec3 c = aDec.xyz;
           float d;
-          // only near the eye: further off the bed's own broad shadow is enough
+          // only near the eye, fading out with distance: further off the bed's own broad shadow is enough
           float fade = 1.0 - smoothstep(${(LOD_FAR - 5).toFixed(1)}, ${(LOD_FAR + 2).toFixed(1)}, length(cameraPosition - c));
           if (fade <= 0.0 || aDec2.z <= 0.0) {
             gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -674,7 +728,10 @@ export function createGarden(o: GardenOptions): Garden {
     const decalMat = o.contactMaterial(DECAL_VS);
     if (!decalMat.uniforms.uT) decalMat.uniforms.uT = { value: 0 };
     materials.push(decalMat);
-    pool(dg, decalMat, all.map(([f]) => f), 0, LOD_FAR + 3, { aDec: dec, aDec2: dec2 });
+    const decals = all.map(([f]) => f);
+    pool(dg, decalMat, decals, 0, LOD_FAR + 2.25, { aDec: dec, aDec2: dec2 });
+    // the head's shadow is thrown along the sun, and is 0.95 across
+    reach.set(decals, { r: Math.hypot(o.sun.x, o.sun.z) / o.sun.y * HEAD_Y + 0.12 + 0.25 + 0.5 + 0.05, h: 0.1 });
     if (import.meta.env.DEV) console.debug(`dollhouse: ${byKind.map((l) => l.length).join(" + ")} flowers, ${tufts.length} tufts`);
   }
 
@@ -885,35 +942,67 @@ export function createGarden(o: GardenOptions): Garden {
     );
   }
 
-  // pools drawn from one list are chosen in one pass over it
-  const poolGroups = new Map<object, typeof pools>();
-  for (const p of pools) poolGroups.set(p.list, [...(poolGroups.get(p.list) ?? []), p]);
-  let last: number[] = [];
+  // pools drawn from one list are chosen in one pass over it, cluster by cluster: the instances
+  // of a list are gathered into cells a few metres across, each bounded by a sphere round all it
+  // can reach, and a cell outside the camera's frustum is passed over whole
+  const CELL = 3;
+  const groups = [...new Set(pools.map((p) => p.list))].map((list) => {
+    const { r, h } = reach.get(list) ?? { r: 1, h: 1 };
+    const byCell = new Map<string, number[]>();
+    list.forEach((f, i) => {
+      const key = `${Math.floor(f.x / CELL)},${Math.floor(f.z / CELL)}`;
+      const cell = byCell.get(key);
+      if (cell) cell.push(i);
+      else byCell.set(key, [i]);
+    });
+    const cells = [...byCell.values()].map((members) => {
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      for (const i of members) {
+        const f = list[i]!;
+        lo[0] = Math.min(lo[0]!, f.x - f.s * r);
+        hi[0] = Math.max(hi[0]!, f.x + f.s * r);
+        lo[1] = Math.min(lo[1]!, f.y - 0.05);
+        hi[1] = Math.max(hi[1]!, f.y + f.s * h);
+        lo[2] = Math.min(lo[2]!, f.z - f.s * r);
+        hi[2] = Math.max(hi[2]!, f.z + f.s * r);
+      }
+      const c = new Vector3((lo[0]! + hi[0]!) / 2, (lo[1]! + hi[1]!) / 2, (lo[2]! + hi[2]!) / 2);
+      return { sphere: new Sphere(c, Math.hypot(hi[0]! - c.x, hi[1]! - c.y, hi[2]! - c.z)), members: Uint32Array.from(members) };
+    });
+    return { list, cells, pools: pools.filter((p) => p.list === list), counts: new Uint32Array(pools.length) };
+  });
+  const frustum = new Frustum();
+  const view = new Matrix4();
+  const last = new Float64Array(16).fill(NaN);
+  const eye = new Vector3();
+  let hooked = false;
 
-  return {
-    root,
-    drifts,
-    pinwheels,
-    update(t, eye, at) {
-      for (const m of materials) m.uniforms.uT!.value = t;
-      // what is in view: a cone round the line of sight a little wider than the widest view
-      if (eye.x === last[0] && eye.y === last[1] && eye.z === last[2] && at.x === last[3] && at.z === last[4]) return;
-      last = [eye.x, eye.y, eye.z, at.x, at.z];
-      let fx = at.x - eye.x;
-      let fz = at.z - eye.z;
-      const fl = Math.sqrt(fx * fx + fz * fz) || 1;
-      fx /= fl;
-      fz /= fl;
-      const ey = (eye.y - 1) * (eye.y - 1);
-      for (const group of poolGroups.values()) {
-        const list = group[0]!.list;
-        const counts = group.map(() => 0);
-        for (let i = 0; i < list.length; i++) {
+  /** copies the instances in `camera`'s frustum, and within each pool's distances, to the front of the pools' buffers */
+  const select = (camera: Camera) => {
+    camera.updateMatrixWorld();
+    view.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    let same = true;
+    for (let i = 0; i < 16; i++) {
+      if (view.elements[i] !== last[i]) same = false;
+      last[i] = view.elements[i]!;
+    }
+    if (same) return;
+    frustum.setFromProjectionMatrix(view);
+    eye.setFromMatrixPosition(camera.matrixWorld);
+    for (const { list, cells, pools: group, counts } of groups) {
+      counts.fill(0);
+      for (const cell of cells) {
+        if (!frustum.intersectsSphere(cell.sphere)) continue;
+        const members = cell.members;
+        for (let j = 0; j < members.length; j++) {
+          const i = members[j]!;
           const f = list[i]!;
+          // the distance the shaders measure: from the eye to the foot
           const dx = f.x - eye.x;
+          const dy = f.y - eye.y;
           const dz = f.z - eye.z;
-          const d = Math.sqrt(dx * dx + dz * dz + ey);
-          if (dx * fx + dz * fz < 0.5 * d - 2.5) continue;
+          const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
           for (let k = 0; k < group.length; k++) {
             const p = group[k]!;
             if (d < p.d0 || d >= p.d1) continue;
@@ -928,15 +1017,38 @@ export function createGarden(o: GardenOptions): Garden {
             counts[k] = n + 1;
           }
         }
-        group.forEach((p, k) => {
-          const n = counts[k]!;
-          p.g.instanceCount = n;
-          for (const { a } of p.attrs) {
-            a.clearUpdateRanges();
-            a.addUpdateRange(0, Math.max(1, n) * 4);
-            a.needsUpdate = true;
-          }
-        });
+      }
+      for (let k = 0; k < group.length; k++) {
+        const p = group[k]!;
+        const n = counts[k]!;
+        p.g.instanceCount = n;
+        for (const { a } of p.attrs) {
+          a.clearUpdateRanges();
+          a.addUpdateRange(0, Math.max(1, n) * 4);
+          a.needsUpdate = true;
+        }
+      }
+    }
+  };
+
+  return {
+    root,
+    drifts,
+    pinwheels,
+    update(t, camera) {
+      for (const m of materials) m.uniforms.uT!.value = t;
+      if (!hooked) {
+        let top: Object3D = root;
+        while (top.parent) top = top.parent;
+        if ((top as Scene).isScene) {
+          const before = top.onBeforeRender;
+          // three calls a scene's own hook with (renderer, scene, camera, target)
+          top.onBeforeRender = function (this: Object3D, ...args: Parameters<Object3D["onBeforeRender"]>) {
+            before.apply(this, args);
+            select(args[2]);
+          };
+          hooked = true;
+        } else select(camera);
       }
     },
     dispose() {

@@ -2385,7 +2385,6 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     cam.look.lerp(LEAD_DIR, 1 - free).add(camera.position);
     camera.up.set(0, 1, 0);
     camera.lookAt(cam.look);
-    garden.update(t, camera.position, cam.look);
     // a breath of roll while orbiting
     camera.rotateZ(Math.sin((t / 25) * Math.PI * 2) * 0.02 * free * (1 - smoothstep(20, RAIL.settle, t)));
     const fov = 50 + 8 * smoothstep(16, 23.5, t);
@@ -2393,6 +2392,8 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       camera.fov = fov;
       camera.updateProjectionMatrix();
     }
+    // once the camera is placed, rolled and zoomed: the flowers drawn are those in its picture
+    garden.update(t, camera);
     // double doors swing open towards us
     const k = smoothstep(13.2, 18.5, t);
     const open = k * 1.95;
