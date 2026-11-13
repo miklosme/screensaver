@@ -63,6 +63,10 @@ const HORIZON = new Color().setRGB(...onScreen("#f6c9ae"));
 // dunes fade to peach
 const FOG_NEAR = 95;
 const FOG_FAR = 430;
+/** aerial perspective (see FOG_GLSL): where it starts, how fast it thickens, how far it goes before the haze */
+const AIR_NEAR = 30;
+const AIR_LEN = 120;
+const AIR_MAX = 0.42;
 const SUN_DIR = new Vector3(0.45, 0.6, 0.75).normalize();
 
 // One sun: a warm key, a cool lavender fill from the sky and a little warm bounce off the sand.
@@ -116,12 +120,24 @@ const smoothstep = (a: number, b: number, x: number) => {
   return k * k * (3 - 2 * k);
 };
 
-/** Dunes: almost flat in the garden around the two hero doors, rolling further out. */
+/**
+ * Dunes: a few low hummocks in the garden around the two hero doors (none under the stele's
+ * plinth), then two crossing sets of wind-built ridges with sharp crests whose silhouettes overlap,
+ * rolling into the big far dunes. The camera's track stays inside the low garden.
+ */
+const crest = (u: number) => 1 - Math.sqrt(Math.sin(Math.PI * u) ** 2 + 0.03);
 function ground(x: number, z: number) {
   const d = Math.hypot(x, z - 18);
+  const m0 = smoothstep(9, 15, Math.hypot(x, z)) * (1 - smoothstep(24, 34, d));
   const m1 = smoothstep(26, 90, d);
+  const mr = smoothstep(27, 58, d);
   const m2 = smoothstep(90, 260, d);
+  const u1 = (x * 0.8 + z * 0.6) / 30 + 0.45 * Math.sin(z * 0.045 + 0.7) + 0.25 * Math.sin(x * 0.031);
+  const u2 = (z * 0.87 - x * 0.5) / 47 + 0.35 * Math.sin(x * 0.037 + 1.9);
+  const ridge = (3.4 + 1.4 * Math.sin(x * 0.019 - z * 0.023)) * crest(u1) + (2.6 + 1.2 * Math.sin(z * 0.017 + 2.4)) * crest(u2);
   return (
+    m0 * 0.32 * (Math.sin(x * 0.42 + 0.8) * Math.sin(z * 0.36 + 2.1) + 0.6 * Math.sin((x - z) * 0.27)) +
+    mr * ridge +
     m1 * (4.2 * Math.sin(x * 0.035 + 1.3) * Math.cos(z * 0.03 + 0.4) + 2.8 * Math.sin((x + z) * 0.021 + 0.5) + 1.4 * Math.sin(x * 0.08 - z * 0.06)) +
     m2 * (16 * Math.sin(x * 0.012 + 2.0) * Math.sin(z * 0.013 + 1.0) + 7)
   );
@@ -129,11 +145,19 @@ function ground(x: number, z: number) {
 
 /** `ground` in GLSL */
 const GROUND_GLSL = /* glsl */ `
+  float crest(float u) { float s = sin(3.14159265 * u); return 1.0 - sqrt(s * s + 0.03); }
   float groundAt(vec2 p) {
     float d = length(p - vec2(0.0, 18.0));
+    float m0 = smoothstep(9.0, 15.0, length(p)) * (1.0 - smoothstep(24.0, 34.0, d));
     float m1 = smoothstep(26.0, 90.0, d);
+    float mr = smoothstep(27.0, 58.0, d);
     float m2 = smoothstep(90.0, 260.0, d);
-    return m1 * (4.2 * sin(p.x * 0.035 + 1.3) * cos(p.y * 0.03 + 0.4) + 2.8 * sin((p.x + p.y) * 0.021 + 0.5) + 1.4 * sin(p.x * 0.08 - p.y * 0.06)) +
+    float u1 = (p.x * 0.8 + p.y * 0.6) / 30.0 + 0.45 * sin(p.y * 0.045 + 0.7) + 0.25 * sin(p.x * 0.031);
+    float u2 = (p.y * 0.87 - p.x * 0.5) / 47.0 + 0.35 * sin(p.x * 0.037 + 1.9);
+    float ridge = (3.4 + 1.4 * sin(p.x * 0.019 - p.y * 0.023)) * crest(u1) + (2.6 + 1.2 * sin(p.y * 0.017 + 2.4)) * crest(u2);
+    return m0 * 0.32 * (sin(p.x * 0.42 + 0.8) * sin(p.y * 0.36 + 2.1) + 0.6 * sin((p.x - p.y) * 0.27)) +
+      mr * ridge +
+      m1 * (4.2 * sin(p.x * 0.035 + 1.3) * cos(p.y * 0.03 + 0.4) + 2.8 * sin((p.x + p.y) * 0.021 + 0.5) + 1.4 * sin(p.x * 0.08 - p.y * 0.06)) +
       m2 * (16.0 * sin(p.x * 0.012 + 2.0) * sin(p.y * 0.013 + 1.0) + 7.0);
   }
 `;
@@ -276,6 +300,15 @@ const SUN_GLSL = /* glsl */ `
     float up = n.y * 0.5 + 0.5;
     return FILL * (0.72 + 0.28 * up) + BOUNCE * (1.0 - up) + KEY * (w * w * lit);
   }
+  /**
+   * The sand's light: sunLight, the same where the sand lies flat, but turning from the sun faster,
+   * so that a ridge has a lit face and a lee face going lavender
+   */
+  vec3 sandLight(vec3 n, float lit) {
+    float w = clamp(${(SUN_DIR.y * 0.5 + 0.5).toFixed(4)} + (dot(n, SUN) - SUN.y) * 0.8, 0.0, 1.0);
+    float up = n.y * 0.5 + 0.5;
+    return FILL * (0.72 + 0.28 * up) + BOUNCE * (1.0 - up) + KEY * (w * w * lit);
+  }
   /** a prop of albedo a, lit (see paint()) */
   vec3 propLight(vec3 a, vec3 n, float lit) {
     float w = clamp(dot(n, SUN) * 0.5 + 0.5, 0.0, 1.0);
@@ -292,8 +325,10 @@ const SUN_GLSL = /* glsl */ `
  * of each instance, so that no two trees, domes or hoops need be alike. `glsl` may read vOb
  * (object position) and vSeed (0..1 per instance), and mixes `second(colour)` into diffuseColor
  * where its pattern goes. `ao` is a float expression of vOb: 0 where the prop meets the ground.
+ * `rim` (0 .. 1) rounds a prop off: a soft core shadow along its terminator and a rim of sky light
+ * round its silhouette. The haze is the scene's own (FOG_GLSL), not three's.
  */
-function sunlit(mat: MeshLambertMaterial, key: string, glsl = "", ao = "1.0") {
+function sunlit(mat: MeshLambertMaterial, key: string, glsl = "", ao = "1.0", rim = 0) {
   mat.onBeforeCompile = (s) => {
     s.vertexShader = s.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec3 vOb;\nvarying float vSeed;")
@@ -323,6 +358,7 @@ function sunlit(mat: MeshLambertMaterial, key: string, glsl = "", ao = "1.0") {
           f = f * f * (3.0 - 2.0 * f);
           return mix(mix(pHash(i), pHash(i + vec2(1.0, 0.0)), f.x), mix(pHash(i + vec2(0.0, 1.0)), pHash(i + 1.0), f.x), f.y);
         }
+        ${FOG_GLSL}
         vec3 second(vec3 c) { return mix(${glPaint("#f5ecd9")}, ${glPaint("#f3a488")}, step(0.58, c.g / c.r) * step(c.g, c.r) * step(c.b, c.g)); }`,
       )
       .replace("#include <color_fragment>", "#include <color_fragment>\n" + glsl)
@@ -330,7 +366,24 @@ function sunlit(mat: MeshLambertMaterial, key: string, glsl = "", ao = "1.0") {
         "vec3 outgoingLight = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse + totalEmissiveRadiance;",
         /* glsl */ `vec3 nW = normalize(inverseTransformDirection(normal, viewMatrix));
         float occ = clamp(${ao}, 0.0, 1.0);
-        vec3 outgoingLight = propLight(diffuseColor.rgb, nW, occ) * mix(0.62, 1.0, occ) + totalEmissiveRadiance;`,
+        vec3 outgoingLight = propLight(diffuseColor.rgb, nW, occ) * mix(0.62, 1.0, occ) + totalEmissiveRadiance;
+        ${
+          rim > 0
+            ? /* glsl */ `
+        {
+          float ns = dot(nW, SUN);
+          outgoingLight *= 1.0 - ${(0.22 * rim).toFixed(3)} * (1.0 - smoothstep(-0.45, 0.25, ns)) * smoothstep(-1.0, -0.45, ns);
+          float edge = pow(1.0 - abs(dot(normal, normalize(vViewPosition))), 3.0);
+          outgoingLight += ${glScreen("#cfe0f6")} * ${(0.5 * rim).toFixed(3)} * edge * mix(0.4, 1.0, occ) * (0.6 + 0.4 * nW.y);
+        }`
+            : ""
+        }`,
+      )
+      .replace(
+        "#include <fog_fragment>",
+        /* glsl */ `#ifdef USE_FOG
+          gl_FragColor.rgb = applyFog(gl_FragColor.rgb, vFogDepth);
+        #endif`,
       );
   };
   mat.customProgramCacheKey = () => "dollhouse-" + key;
@@ -458,6 +511,8 @@ const PAPER = /* glsl */ `
 
 const WHITE = new Color(1, 1, 1);
 const TREES = 220;
+/** the terrain grid's cells along each side (2 TERRAIN_N^2 triangles) */
+const TERRAIN_N = 192;
 const CONTACTS = 560;
 const TINTS = 160;
 const FRAME_COLORS = ["#f4ead4", "#f6b598", "#a2dcbf", "#a6cbee"];
@@ -512,8 +567,16 @@ function aimOf(d: DoorDef, path: Vector3[]) {
 }
 
 // ───────────────────────────── shaders ─────────────────────────────
+/**
+ * Air: past the garden things grey a little and drift towards the horizon's peach, so the middle
+ * and far layers separate from the near one by value and saturation; then the haze closes in.
+ */
 const FOG_GLSL = /* glsl */ `
+  float airAt(float d) { return ${AIR_MAX.toFixed(2)} * (1.0 - exp(-max(d - ${AIR_NEAR.toFixed(1)}, 0.0) / ${AIR_LEN.toFixed(1)})); }
   vec3 applyFog(vec3 c, float d) {
+    float a = airAt(d);
+    c = mix(c, vec3(dot(c, vec3(0.3, 0.59, 0.11))), a * 0.6);
+    c = mix(c, ${gl3(HORIZON.toArray())}, a);
     float f = smoothstep(${FOG_NEAR.toFixed(1)}, ${FOG_FAR.toFixed(1)}, d);
     return mix(c, ${gl3(HORIZON.toArray())}, f);
   }
@@ -566,19 +629,21 @@ const SAND_GLSL = /* glsl */ `
   }
   /** the ground normal n tilted by wind ripples: long asymmetric ones, and a fine patchy set */
   vec3 rippleNormal(vec3 n, vec3 w, float d) {
+    // both sets have faded out by here
+    if (d > 90.0) return n;
     vec2 p = w.xz;
     vec2 q = p + vec2(sin(p.y * 0.11 + 1.7 * sin(p.x * 0.07)), sin(p.x * 0.09 + 1.3 * sin(p.y * 0.13))) * 3.5;
     vec2 W1 = vec2(0.62, 0.78);
     float c1 = dot(q, W1) / 0.95 + 0.7 * sin(q.x * 0.31 + 2.0 * sin(q.y * 0.23));
     float s1 = fract(c1);
     float slope1 = 1.25 - 6.25 * (smoothstep(0.72, 0.82, s1) - smoothstep(0.93, 1.0, s1));
-    float aa1 = (1.0 - smoothstep(0.12, 0.4, fwidth(c1))) * (1.0 - smoothstep(20.0, 60.0, d)) * (0.7 + 0.3 * sin(q.x * 0.13 - q.y * 0.07));
+    float aa1 = (1.0 - smoothstep(0.12, 0.4, fwidth(c1))) * (1.0 - smoothstep(30.0, 90.0, d)) * (0.7 + 0.3 * sin(q.x * 0.13 - q.y * 0.07));
     vec2 W2 = vec2(0.42, 0.91);
     float c2 = (dot(q, W2) + 0.25 * sin(p.x * 1.3 + 1.6 * sin(p.y * 0.9))) / 0.26;
     float s2 = fract(c2);
     float slope2 = 1.25 - 6.25 * (smoothstep(0.72, 0.84, s2) - smoothstep(0.92, 1.0, s2));
     float aa2 = (1.0 - smoothstep(0.12, 0.4, fwidth(c2))) * (1.0 - smoothstep(6.0, 26.0, d)) * smoothstep(0.3, 0.65, vnoise(p * 0.21 + 3.0));
-    vec2 g = W1 * slope1 * 0.05 * aa1 + W2 * slope2 * 0.045 * aa2;
+    vec2 g = W1 * slope1 * 0.058 * aa1 + W2 * slope2 * 0.05 * aa2;
     return normalize(n - vec3(g.x, 0.0, g.y));
   }
 `;
@@ -1059,9 +1124,11 @@ function makeTerrainMaterial(shadow: DataTexture) {
       ${SHADOW_MAP_GLSL}
       void main() {
         vec3 n = rippleNormal(normalize(vN), vW, vD);
-        float shade = castShade(vW);
-        vec3 col = sandAlbedo(vW, vD) * sunLight(n, 1.0 - shade);
+        // far shadows go paler and, seen grazing over a crest, never close into a thin dark line
+        float shade = castShade(vW) * (1.0 - 0.5 * smoothstep(12.0, 55.0, vD));
+        vec3 col = sandAlbedo(vW, vD) * sandLight(n, 1.0 - shade);
         // a few grains catch the sun as the eye moves past
+        if (vD < 16.0) {
         vec2 g = vW.xz * 9.0;
         vec2 cell = floor(g);
         float h = hash12(cell);
@@ -1071,6 +1138,7 @@ function makeTerrainMaterial(shadow: DataTexture) {
         float dotm = 1.0 - smoothstep(0.06, 0.16, length(g - at));
         float spark = (1.0 - shade) * step(0.965, h) * glint * dotm * (1.0 - smoothstep(4.0, 16.0, vD)) * (1.0 - smoothstep(0.08, 0.16, fwidth(g.x)));
         col += vec3(1.0, 0.95, 0.85) * spark * 4.0 * max(0.0, dot(n, SUN));
+        }
         gl_FragColor = vec4(applyFog(col, vD), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -1089,6 +1157,7 @@ function makeTerrainMaterial(shadow: DataTexture) {
  * a drift of flowers, which is what lets a drift read as a patch of colour from far away.
  */
 const SHADOW_FRAG = /* glsl */ `
+  ${FOG_GLSL}
   varying vec3 vW;
   varying float vA;
   varying vec2 vQ;
@@ -1099,18 +1168,19 @@ const SHADOW_FRAG = /* glsl */ `
   void main() {
     vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
     n *= sign(n.y);
-    vec3 k = sunLight(n, 0.0) / sunLight(n, 1.0);
+    vec3 k = sandLight(n, 0.0) / sandLight(n, 1.0);
     float a = vA;
     #ifdef CONTACT
       float r = length(vQ) * 2.0;
-      a *= pow(1.0 - smoothstep(0.0, 1.0, r), 1.5);
+      a *= min(0.85, 0.65 * pow(1.0 - smoothstep(0.0, 1.0, r), 1.5) + 0.45 * pow(1.0 - smoothstep(0.0, 0.42, r), 2.0));
       k *= 0.6;
     #endif
     #ifdef TINT
       a *= 1.0 - smoothstep(0.3, 1.0, length(vQ) * 2.0);
       k = vTint;
     #endif
-    a *= 1.0 - smoothstep(${FOG_NEAR.toFixed(1)}, ${FOG_FAR.toFixed(1)}, length(cameraPosition - vW));
+    float dist = length(cameraPosition - vW);
+    a *= (1.0 - smoothstep(${FOG_NEAR.toFixed(1)}, ${FOG_FAR.toFixed(1)}, dist)) * (1.0 - airAt(dist));
     gl_FragColor = vec4(mix(vec3(1.0), k, a), 1.0);
     #include <colorspace_fragment>
   }
@@ -1140,12 +1210,18 @@ function makeShadowMaterial(kind: "CAST" | "FLAT" | "CONTACT" | "TINT", vertexSh
         varying vec3 vTint;
       #endif
       const vec3 SUN = ${glv(SUN_DIR)};
+      ${GROUND_GLSL}
       void main() {
         mat4 m = modelMatrix;
         #ifdef USE_INSTANCING
           m = m * instanceMatrix;
         #endif
         vec4 w = m * vec4(position, 1.0);
+        #if defined(CONTACT) || defined(TINT)
+          // laid on the dune point by point, a little higher the bigger the pool, so that no chord
+          // between two of its points dips under a ridge's crest
+          w.y = groundAt(w.xz) + 0.04 + 0.008 * length(m[0].xyz);
+        #endif
         vW = w.xyz;
         vQ = position.xz;
         #if defined(TINT)
@@ -1450,6 +1526,14 @@ const DOOR_GLSL = /* glsl */ `
     vec2 hL = vec2(-P_A, LEAF_Z);
     ao *= 1.0 - 0.65 * pow(1.0 - smoothstep(0.0, 1.3, segDist(q, hR, hR + leafAxisR().xz * P_A) - 0.04), 2.0);
     ao *= 1.0 - 0.65 * pow(1.0 - smoothstep(0.0, 1.3, segDist(q, hL, hL + leafAxisL().xz * P_A) - 0.04), 2.0);
+    // and tight against each foot: the two legs of the surround, and each leaf's bottom edge as it swings
+    vec2 j = vec2(abs(p.x) - (P_A + ST_A) * 0.5, p.z - 0.05);
+    float dj = length(max(abs(j) - vec2((ST_A - P_A) * 0.5, 0.22), 0.0));
+    ao *= 1.0 - 0.5 * pow(1.0 - smoothstep(0.0, 0.2, dj), 2.0);
+    float dR = segDist(p.xz, hR, hR + leafAxisR().xz * P_A) - 0.05;
+    float dL = segDist(p.xz, hL, hL + leafAxisL().xz * P_A) - 0.05;
+    ao *= 1.0 - 0.55 * pow(1.0 - smoothstep(0.0, 0.17, dR), 2.0);
+    ao *= 1.0 - 0.55 * pow(1.0 - smoothstep(0.0, 0.17, dL), 2.0);
     return ao;
   }
 `;
@@ -1610,6 +1694,19 @@ function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: 
           vec2 g = vW.xz * 34.0;
           float speck = step(0.9, hash12(floor(g))) * (1.0 - smoothstep(0.2, 0.25, length(fract(g) - 0.5))) * (1.0 - smoothstep(0.1, 0.35, fwidth(g.x)));
           col *= (0.97 + 0.05 * vnoise(vW.xz * 1.7)) * (1.0 - 0.1 * speck);
+          // painted plaster: brush strokes laid round the drum (two seams of the angle, each hidden
+          // where the other is used) and a fine tooth, worked out only where they can be seen
+          float fs = 1.0 - smoothstep(0.3, 0.8, fr * 34.0);
+          if (fs > 0.0) {
+            vec2 tq = vW.xz * 140.0;
+            float ft = 1.0 - smoothstep(0.25, 0.7, fwidth(tq.x));
+            float a1 = atan(vW.z, vW.x);
+            float a2 = atan(-vW.z, -vW.x);
+            float k = smoothstep(-0.4, 0.4, vW.x / max(r, 1e-3));
+            float stroke = mix(vnoise(vec2(a2 * r * 2.6 + 17.0, r * 34.0)), vnoise(vec2(a1 * r * 2.6, r * 34.0)), k);
+            float tooth = ft > 0.0 ? vnoise(tq) : 0.5;
+            col *= 1.0 + 0.07 * (stroke - 0.5) * fs + 0.1 * (tooth - 0.5) * ft;
+          }
           // the sides are in their own shade where they meet the tier below
           occ = r < 6.43 ? mix(0.62, 1.0, smoothstep(0.1, 0.29, y)) : mix(0.5, 1.0, smoothstep(-0.5, 0.1, y));
           occ *= doorContact(vW);
@@ -1697,11 +1794,17 @@ function surroundGeometry() {
 
 /** the plinth, turned: a cream drum with a bevelled rim on a broad mint tier that sinks into the sand */
 function plinthGeometry() {
+  /** a quarter round of radius rr about (cx, cy), from its top to its outer side */
+  const round = (cx: number, cy: number, rr: number, n: number): [number, number][] =>
+    Array.from({ length: n + 1 }, (_, i) => [cx + rr * Math.sin((i / n) * Math.PI * 0.5), cy + rr * Math.cos((i / n) * Math.PI * 0.5)]);
   const P: [number, number][] = [
-    [0, 0.3], [6.08, 0.3], [6.22, 0.293], [6.32, 0.273], [6.385, 0.235], [6.41, 0.18], [6.42, 0.13], [6.47, 0.12],
-    [7.94, 0.12], [8.07, 0.113], [8.16, 0.092], [8.215, 0.055], [8.24, 0.0], [8.42, -0.6],
+    [0, 0.3], [3, 0.3], [6.25, 0.3],
+    // the drum's rim: a fat bullnose and a little cove down onto the tier
+    ...round(6.25, 0.14, 0.16, 10), [6.415, 0.128], [6.44, 0.121],
+    // the tier: a thinner bullnose, then under the sand
+    [6.47, 0.12], [7.9, 0.12], ...round(7.98, 0.03, 0.09, 6), [8.09, -0.04], [8.3, -0.6],
   ];
-  return new LatheGeometry(P.map(([r, y]) => new Vector2(r, y)), 180);
+  return new LatheGeometry(P.map(([r, y]) => new Vector2(r, y)), 320);
 }
 
 /** the brass on one leaf (in its space: hinge at x = 0, the leaf towards -x): three hinges and a knob on each face */
@@ -1833,11 +1936,35 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
   const geo = useMemo(() => {
     // terrain
-    const terrain = new PlaneGeometry(720, 720, 160, 160);
+    // a grid warped like the shadow mask, so its vertices crowd round the garden (about 0.55 m apart
+    // there, 2 m on the near ridges) and thin out towards the haze: the ridges' crests hold their
+    // shape in silhouette
+    const terrain = new PlaneGeometry(2, 2, TERRAIN_N, TERRAIN_N);
     terrain.rotateX(-Math.PI / 2);
     const pos = terrain.attributes.position!;
-    for (let i = 0; i < pos.count; i++) pos.setY(i, ground(pos.getX(i), pos.getZ(i)));
+    for (let i = 0; i < pos.count; i++) {
+      const x = shFrom(pos.getX(i));
+      const z = SH_CZ + shFrom(pos.getZ(i));
+      pos.setXYZ(i, x, ground(x, z), z);
+    }
     terrain.computeVertexNormals();
+    // triangles ordered from the garden outwards: the camera never leaves the garden, so the
+    // ground draws nearly front to back and a ridge hidden behind a nearer one costs no shading
+    {
+      const idx = terrain.index!.array;
+      const tris = Array.from({ length: idx.length / 3 }, (_, k) => {
+        let x = 0;
+        let z = 0;
+        for (let j = 0; j < 3; j++) {
+          x += pos.getX(idx[k * 3 + j]!);
+          z += pos.getZ(idx[k * 3 + j]!);
+        }
+        return { k, d: Math.hypot(x / 3, z / 3 - SH_CZ) };
+      }).sort((a, b) => a.d - b.d);
+      const sorted = new Uint32Array(idx.length);
+      tris.forEach((t, i) => sorted.set([idx[t.k * 3]!, idx[t.k * 3 + 1]!, idx[t.k * 3 + 2]!], i * 3));
+      terrain.setIndex(new BufferAttribute(sorted, 1));
+    }
 
     // thin doorway
     const frame = frameGeometry(D_A, D_HS, 0.42, 0.26);
@@ -1881,7 +2008,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     const trunk = new CylinderGeometry(0.05, 0.09, 1, 6);
     trunk.translate(0, 0.5, 0);
     const ball = new SphereGeometry(1, 14, 9);
-    const contact = new PlaneGeometry(1, 1);
+    const contact = new PlaneGeometry(1, 1, 6, 6);
     contact.rotateX(-Math.PI / 2);
     const bigBall = new SphereGeometry(1, 32, 16);
     const loop = new TorusGeometry(1, 0.11, 10, 40, Math.PI);
@@ -1924,8 +2051,8 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     const open = { value: 0 };
     const track = cam.curve.getSpacedPoints(240);
     /** `c` is the colour on screen of its sunny side; "#ffffff" leaves the albedo to the instance colours */
-    const lambert = (c: string, key: string, glsl = "", ao = "1.0") =>
-      sunlit(new MeshLambertMaterial({ color: c === "#ffffff" ? c : painted(c) }), key, glsl, ao);
+    const lambert = (c: string, key: string, glsl = "", ao = "1.0", rim = 0) =>
+      sunlit(new MeshLambertMaterial({ color: c === "#ffffff" ? c : painted(c) }), key, glsl, ao, rim);
     const FRAME_AO = "smoothstep(-0.3, 1.1, vOb.y)";
     return {
       terrain: makeTerrainMaterial(shadowMap),
@@ -1942,10 +2069,10 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       steleBack: lambert("#f4b49c", "frame", "", FRAME_AO),
       trim: lambert("#f5e0cc", "plain"),
       // the underside of a crown is in its own shade
-      crown: lambert("#ffffff", "crown", PATTERNS.crown, "smoothstep(-1.1, 0.15, vOb.y)"),
-      dome: lambert("#ffffff", "dome", PATTERNS.dome, "smoothstep(0.1, 0.55, vOb.y)"),
+      crown: lambert("#ffffff", "crown", PATTERNS.crown, "smoothstep(-1.1, 0.15, vOb.y)", 0.5),
+      dome: lambert("#ffffff", "dome", PATTERNS.dome, "smoothstep(0.1, 0.55, vOb.y)", 0.5),
       // a hoop is dark at its feet and all along its underside, the inner half of the tube
-      loop: Object.assign(lambert("#ffffff", "loop", PATTERNS.loop, "smoothstep(0.0, 0.4, vOb.y) * smoothstep(0.93, 1.05, length(vOb.xy))"), {
+      loop: Object.assign(lambert("#ffffff", "loop", PATTERNS.loop, "smoothstep(0.0, 0.4, vOb.y) * smoothstep(0.93, 1.05, length(vOb.xy))", 1), {
         defines: { USE_UV: "" },
       }),
       stone: lambert("#ffffff", "stone", PATTERNS.stone),
@@ -2065,13 +2192,16 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       const tall = 0.7 + rnd() * 0.9;
       const ci = Math.floor(rnd() * domeCols.length);
       if (!clear(x, z, s + 8)) continue;
-      o.position.set(x, ground(x, z) - s * 0.25, z);
+      // on a ridge, the dome sinks to the lowest sand under its rim, so that none of it floats
+      let gy = ground(x, z);
+      for (let k = 0; k < 8; k++) gy = Math.min(gy, ground(x + Math.cos(k * 0.785) * s * 0.85, z + Math.sin(k * 0.785) * s * 0.85));
+      o.position.set(x, gy - s * 0.25, z);
       o.rotation.set(0, rnd() * 6, 0);
       o.scale.set(s, s * tall, s);
       o.updateMatrix();
       Dm.setMatrixAt(n, o.matrix);
       Dm.setColorAt(n, c.setRGB(...domeCols[ci]!));
-      casters.push(ellipsoidCaster(x, ground(x, z) - s * 0.25, z, s, s * tall, s));
+      casters.push(ellipsoidCaster(x, gy - s * 0.25, z, s, s * tall, s));
       contact(x, z, s * 1.22, s * 1.22, 0, 0.6);
       n++;
     }
@@ -2092,14 +2222,16 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       const ci = Math.floor(rnd() * loopCols.length);
       const fat = 0.8 + rnd() * 1.6;
       if (!clear(x, z, s + 5)) continue;
-      o.position.set(x, ground(x, z) - s * 0.12, z);
+      // both feet in the sand, whatever the ridge between them does
+      const gy = Math.min(ground(x + Math.cos(rot) * s, z - Math.sin(rot) * s), ground(x - Math.cos(rot) * s, z + Math.sin(rot) * s));
+      o.position.set(x, gy - s * 0.12, z);
       o.rotation.set(0, rot, 0);
       const tall = 0.8 + rnd() * 0.7;
       o.scale.set(s, s * tall, s * fat);
       o.updateMatrix();
       L.setMatrixAt(n, o.matrix);
       L.setColorAt(n, c.setRGB(...loopCols[ci]!));
-      casters.push(hoopCaster(x, ground(x, z) - s * 0.12, z, rot, s, s * tall, s * fat, 0.11));
+      casters.push(hoopCaster(x, gy - s * 0.12, z, rot, s, s * tall, s * fat, 0.11));
       // both feet
       for (const side of [-1, 1]) contact(x + Math.cos(rot) * s * side, z - Math.sin(rot) * s * side, 0.5 * s * 0.22 * fat + 0.5, 0.5 * s * 0.22 * fat + 0.5, rot, 0.7);
       n++;
