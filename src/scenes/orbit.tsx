@@ -3,7 +3,7 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { RAIL, createRide } from "./rail";
 import { TIMING, type SceneProps } from "./types";
-import { createSky } from "./orbit/sky";
+import { beamMaterial, createSky, moonMaterial } from "./orbit/sky";
 import { mergeGeometries, mergeVertices, toCreasedNormals } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 /**
@@ -1740,16 +1740,8 @@ function buildWorld() {
     true,
   );
   const roundWinMat = new THREE.MeshBasicMaterial({ color: new THREE.Color("#ffb347").multiplyScalar(1.6), side: THREE.DoubleSide });
-  const beamMat = new THREE.MeshBasicMaterial({
-    color: "#7fefff",
-    transparent: true,
-    opacity: 0.55,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-  const beamMat2 = beamMat.clone();
-  beamMat2.opacity = 0.07;
+  const beamMat = beamMaterial(0.55, R);
+  const beamMat2 = beamMaterial(0.07, R);
   const finialMat = new THREE.MeshBasicMaterial({ color: new THREE.Color("#8ff2ff").multiplyScalar(1.5) });
 
   const pointsMat = new THREE.ShaderMaterial({
@@ -1790,35 +1782,7 @@ function buildWorld() {
   });
 
   const fogC = new THREE.Color(FOG_COLOR);
-  const moonMat = new THREE.ShaderMaterial({
-    uniforms: { uFog: { value: fogC } },
-    vertexShader: /* glsl */ `
-      varying vec2 vP;
-      void main() {
-        vP = position.xy / ${R.toFixed(1)};
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      uniform vec3 uFog;
-      varying vec2 vP;
-      void main() {
-        float r = length(vP);
-        float disc = smoothstep(0.335, 0.32, r);
-        float shade = mix(0.72, 1.0, smoothstep(-0.35, 0.3, vP.x * 0.6 + vP.y));
-        float halo = exp(-max(r - 0.32, 0.0) * 5.5);
-        float rings = 0.5 + 0.5 * cos(r * 60.0);
-        vec3 col = uFog * (1.0 + 0.25 * rings * smoothstep(0.34, 0.5, r));
-        col += vec3(0.16, 0.42, 0.62) * halo * (1.0 - disc);
-        col = mix(col, vec3(0.80, 0.95, 1.0) * shade * 1.15, disc);
-        gl_FragColor = vec4(col, 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `,
-    fog: false,
-    side: THREE.DoubleSide,
-  });
+  const moonMat = moonMaterial({ R, fogColor: fogC });
 
   const sky = createSky({ R, fogColor: fogC, fogNear: FOG_NEAR, fogFar: FOG_FAR }, pointsMat);
 
