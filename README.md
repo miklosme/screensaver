@@ -29,16 +29,15 @@ bun run build    # static build in dist/
   playing order picks its season (`index % 4`), and its 25 s are the last 5 s of the season before
   followed by its own 20, so the scene that is leaving and the one arriving ride the same piece
   of track with the same bank and speed, and the portal between them is a true window. The rail
-  owns position, heading, bank and speed; a scene builds its world around its stretch. The helix
-  rides spring this way (its stair is the season's one climbing turn) and the burrow rides
-  summer. Dollhouse and orbit still have their own tracks and meet the rail in the legacy seam
-  state the same file describes: dead straight along the view axis, without rotating, at one
-  common speed.
+  owns position, heading, bank and speed; a scene builds its world around its stretch. The burrow
+  rides summer this way. Helix, dollhouse and orbit still have their own tracks and meet the rail
+  in the legacy seam state the same file describes: dead straight along the view axis, without
+  rotating, at one common speed.
 - Scenes are listed in `src/scenes/index.ts` and loop in that order. To add one, write a component
   that takes `SceneProps`, ask the rail for its stretch with `season(index)`, build the world
   along `stretch.frame(distance)`, put `portalMaterial` on an exit standing at
   `stretch.frame(stretch.exit)`, set the camera from `stretch.pose(clock.t)` every frame, and
-  register it. The header of `rail.ts` is the full contract; `burrow.tsx` and `helix.tsx` are worked examples.
+  register it. The header of `rail.ts` is the full contract; the burrow in commit `6e45aa4` is a worked example.
 - `src/main.tsx` registers only the three.js classes the scenes write as JSX (`<mesh>`,
   `<group>`, ...) instead of using r3f's `<Canvas>`, which would keep all of three.js in the
   bundle. A new kind of JSX element has to be added to that list.
