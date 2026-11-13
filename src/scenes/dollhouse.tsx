@@ -1465,18 +1465,24 @@ const DOOR_GLSL = /* glsl */ `
     return v;
   }
   /**
-   * The shade where the door meets the plinth. Each leaf, standing 5.6 tall, hides a good share of
-   * the sky from the plinth beside it (an analytic wall occlusion that turns with the leaf), and
-   * stands in a tight dark line of its own; the stele's foot does the same across its width.
+   * The shade where the door meets the plinth, turning with the leaves. In x, the soft part: each
+   * leaf, standing 5.6 tall, hides a good share of the sky from the plinth beside it (an analytic
+   * wall occlusion), and the stele's foot does the same across its width. In y, the core: hard
+   * against a foot no light gets in at all, sun or sky, and that is a dark line of its own.
    */
-  float leafShade(vec2 q, vec2 h, vec2 e) {
-    float d = max(segDist(q, h, h + e * P_A) - 0.03, 0.0);
+  vec2 leafShade(vec2 q, vec2 h, vec2 e, float side) {
+    // the leaf's middle plane stands a little off its hinge pin
+    vec2 a = h + vec2(-e.y, e.x) * (side * 0.025);
+    float sd = segDist(q, a, a + e * P_A);
+    float d = max(sd - 0.03, 0.0);
     // the sky a wall takes from a point d away, its height cut down for its finite width
     float sky = 0.5 * (1.0 - d / sqrt(d * d + 2.4 * 2.4));
     float tight = 1.0 - smoothstep(0.0, 0.25, d);
-    return (1.0 - 1.2 * sky) * (1.0 - 0.5 * tight);
+    float d1 = max(sd - 0.045, 0.0);
+    float core = (1.0 - 0.55 * (1.0 - smoothstep(0.0, 0.1, d1))) * (1.0 - 0.22 * (1.0 - smoothstep(0.0, 0.55, d1)));
+    return vec2((1.0 - 1.2 * sky) * (1.0 - 0.5 * tight), core);
   }
-  float doorContact(vec3 p) {
+  vec2 doorContact(vec3 p) {
     // the broad pool leans a little away from the sun, the way the light under a thing is skewed
     vec2 q = p.xz + normalize(SUN.xz) * 0.3;
     float d = length(vec2(max(abs(q.x) - ST_A, 0.0), max(abs(q.y) - 0.28, 0.0)));
@@ -1484,9 +1490,10 @@ const DOOR_GLSL = /* glsl */ `
     // and the stele's foot stands in a hard line of shade
     float d0 = length(vec2(max(abs(p.x) - ST_A + 0.04, 0.0), max(abs(p.z - 0.05) - 0.24, 0.0)));
     ao *= 1.0 - 0.45 * (1.0 - smoothstep(0.0, 0.12, d0));
-    ao *= leafShade(p.xz, vec2(P_A, LEAF_Z), leafAxisR().xz);
-    ao *= leafShade(p.xz, vec2(-P_A, LEAF_Z), leafAxisL().xz);
-    return ao;
+    vec2 c = vec2(ao, 1.0 - 0.4 * (1.0 - smoothstep(0.0, 0.07, d0)));
+    c *= leafShade(p.xz, vec2(P_A, 0.1), leafAxisR().xz, -1.0);
+    c *= leafShade(p.xz, vec2(-P_A, 0.1), leafAxisL().xz, 1.0);
+    return c;
   }
 `;
 
@@ -1546,30 +1553,59 @@ function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: 
       ${NOISE_GLSL}
       ${DOOR_GLSL}
       #ifdef LEAF
-        /** negative inside a panel: two inset panels and an arched one, framed by stiles and rails */
-        float panelSd(vec2 p) {
-          float lo = sdBox(p, vec2(-P_A * 0.5, 1.135), vec2(P_A * 0.5 - 0.27, 0.815));
-          float up = sdBox(p, vec2(-P_A * 0.5, 2.85), vec2(P_A * 0.5 - 0.27, 0.37));
-          float arch = max(length(p - vec2(-P_A, P_HS)) - (P_A - 0.27), max(P_HS + 0.3 - p.y, max(p.x + 0.27, -P_A + 0.27 - p.x)));
-          return min(min(lo, up), arch);
+        float sq(float x) { return x * x; }
+        /**
+         * How far p lies inside the nearest of a leaf's three panels (two fielded ones and an arched
+         * one; negative out on the stiles and rails), and in g the way that distance grows. Inside a
+         * panel g turns at the diagonals, which is what mitres its mouldings.
+         */
+        float panel(vec2 p, float aa, out vec2 g) {
+          vec2 q = p - vec2(-P_A * 0.5, p.y < 2.215 ? 1.135 : 2.85);
+          vec2 d = abs(q) - vec2(P_A * 0.5 - 0.27, p.y < 2.215 ? 0.815 : 0.37);
+          vec2 sg = vec2(q.x < 0.0 ? -1.0 : 1.0, q.y < 0.0 ? -1.0 : 1.0);
+          float sd;
+          if (max(d.x, d.y) < 0.0) {
+            sd = max(d.x, d.y);
+            g = normalize(mix(vec2(0.0, -sg.y), vec2(-sg.x, 0.0), smoothstep(-aa, aa, d.x - d.y)));
+          } else {
+            vec2 m = max(d, 0.0);
+            sd = length(m);
+            g = -sg * m / sd;
+          }
+          if (p.y > 3.2) {
+            vec2 o = p - vec2(-P_A, P_HS);
+            float lo = length(o);
+            float a = lo - (P_A - 0.27);
+            vec2 ga = -o / lo;
+            float b = P_HS + 0.3 - p.y;
+            ga = mix(ga, vec2(0.0, 1.0), smoothstep(-aa, aa, b - a));
+            a = max(a, b);
+            b = -P_A + 0.27 - p.x;
+            ga = mix(ga, vec2(1.0, 0.0), smoothstep(-aa, aa, b - a));
+            a = max(a, b);
+            if (a < sd) { sd = a; g = normalize(ga); }
+          }
+          return -sd;
         }
-        /** the arched panels of the two leaves make one sunburst: its rays, 0 / 1 */
-        float rays(vec2 p) {
-          float ang = atan(p.y - P_HS, p.x + P_A) / (PI * 0.5) * 7.0;
-          return smoothstep(-0.25, 0.25, sin(ang * PI));
+        /**
+         * The joinery across a panel's edge, as a height over s (the distance into the panel): a
+         * half-round bead planted on the frame, a quirk sunk behind it, then a flat chamfer up to
+         * the raised field.
+         */
+        float moulding(float s) {
+          return 0.03 * sq(max(1.0 - sq((s + 0.065) / 0.052), 0.0))
+            - 0.034 * smoothstep(-0.02, 0.03, s)
+            + 0.05 * clamp((s - 0.045) / 0.15, 0.0, 1.0);
         }
-        float relief(vec2 p) {
-          float s = -panelSd(p);
-          // a bevel down into each panel, then its field raised again
-          float h = -0.032 * smoothstep(0.0, 0.05, s) + 0.02 * smoothstep(0.09, 0.17, s);
-          h += 0.007 * rays(p) * smoothstep(0.17, 0.2, s) * step(P_HS, p.y);
-          // a bead along the lock rail
-          float onRail = step(-P_A + 0.27, p.x) * step(p.x, -0.27);
-          h += 0.014 * (1.0 - smoothstep(0.012, 0.04, abs(p.y - 2.215))) * onRail;
-          // the edges are rounded off
-          h -= 0.02 * (1.0 - smoothstep(0.0, 0.06, p.x + P_A));
-          h -= 0.016 * (1.0 - smoothstep(0.0, 0.05, -p.x));
-          return h;
+        /** the bead along the lock rail, over the distance from its middle */
+        float railBead(float d) { return 0.02 * sq(max(1.0 - sq(d / 0.045), 0.0)); }
+        /** the leaf's two long edges are rounded off */
+        float edges(float x) { return -0.02 * (1.0 - smoothstep(0.0, 0.06, x + P_A)) - 0.016 * (1.0 - smoothstep(0.0, 0.05, -x)); }
+        /** the brass on a leaf, in its plane: negative on a hinge strap or under the knob */
+        float brassSd(vec2 p) {
+          vec2 q = vec2(p.x, p.y - (p.y < 1.175 ? 0.6 : p.y < 2.325 ? 1.75 : 2.9));
+          float strap = min(sdBox(q, vec2(-0.31, 0.0), vec2(0.31, 0.0475)), length(q + vec2(0.62, 0.0)) - 0.075);
+          return min(strap, length(p - vec2(-P_A + 0.3, 2.215)) - 0.1);
         }
       #endif
       #ifdef PLINTH
@@ -1644,31 +1680,97 @@ function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: 
         vec3 col;
         float sun = 1.0;
         float occ = 1.0;
+        // occ takes the sun and a share of the sky; dim is the shade nothing reaches into
+        float dim = 1.0;
         vec3 extra = vec3(0.0);
         #ifdef LEAF
           vec2 p = vOb.xy;
           // the two broad faces carry the relief; the leaf's thin edge does not
           float face = vNo.z > 0.5 ? 1.0 : vNo.z < -0.5 ? -1.0 : 0.0;
-          float s = -panelSd(p);
-          float fw = fwidth(s) + 1e-4;
-          if (face != 0.0) {
-            float e = 0.004;
-            float h0 = relief(p);
-            vec3 nO = normalize(vec3(-(relief(p + vec2(e, 0.0)) - h0) / e, -(relief(p + vec2(0.0, e)) - h0) / e, face));
-            n = normalize(vBx * nO.x + vBy * nO.y + vBz * nO.z);
-          }
           float f2 = face * face;
+          vec2 fp = fwidth(p);
+          vec2 gs;
+          float s = panel(p, 0.7 * max(fp.x, fp.y), gs);
+          // a pixel's width measured across the moulding
+          float fw = dot(abs(gs), fp) + 1e-4;
+          // The sun in the leaf's own frame (it turns as the leaf swings): L is where it stands in
+          // the plane of the leaf, and facing how squarely it looks at this face.
+          vec3 sT = vec3(dot(SUN, vBx), dot(SUN, vBy), dot(SUN, vBz) * face);
+          vec2 L = normalize(sT.xy);
+          float facing = smoothstep(-0.3, 0.6, sT.z);
+          // The slope of the relief, each profile averaged over the pixel's footprint: a moulding
+          // finer than a pixel fades to flat rather than to noise.
+          float w = max(0.6 * fw, 0.003);
+          vec2 gh = (moulding(s + w) - moulding(s - w)) / (2.0 * w) * gs;
+          vec2 rv = p - vec2(clamp(p.x, -P_A + 0.3, -0.3), 2.215);
+          float rd = length(rv);
+          float frd = fwidth(rd) + 1e-4;
+          float rw = max(0.6 * frd, 0.003);
+          gh += (railBead(rd + rw) - railBead(rd - rw)) / (2.0 * rw) * rv / max(rd, 1e-4);
+          float xw = max(0.6 * fp.x, 0.003);
+          gh.x += (edges(p.x + xw) - edges(p.x - xw)) / (2.0 * xw);
+          // the arched panels of the two leaves make one sunburst, its rays pleated like a fan
+          vec2 o = p - vec2(-P_A, P_HS);
+          float ang = atan(o.y, o.x) * (14.0 / PI);
+          float fan = sin(ang * PI);
+          float rays = smoothstep(-0.25, 0.25, fan);
+          float field = smoothstep(0.195 - fw, 0.195 + fw, s);
+          float burst = field * step(P_HS, p.y);
+          gh += 0.16 * fan * burst * (1.0 - smoothstep(0.25, 0.8, fwidth(ang))) * normalize(vec2(-o.y, o.x));
+          gh *= f2;
+          n = normalize(vBx * (-1.6 * gh.x) + vBy * (-1.6 * gh.y) + n);
+          // how far this slope leans to the sun (+) or from it (-): the bevel that catches the
+          // light and the one that falls into shade
+          float lean = clamp(-dot(gh, L) * 2.2, -1.0, 1.0);
+
+          // Painted wood. The grain runs up the stiles and the panels and along the rails, and the
+          // paint has sunk into the joints where a rail is tenoned into a stile.
+          float inX = step(-P_A + 0.27, p.x) * step(p.x, -0.27);
+          float onRail = inX * step(s, 0.0) * (1.0 - step(P_HS + 0.3, p.y));
+          vec2 gp = onRail > 0.5 ? p.yx : p.xy;
+          float fg = fwidth(gp.x) + 1e-4;
+          float grain = vnoise(vec2(gp.x * 38.0, gp.y * 1.6));
+          float fine = sin(gp.x * 210.0 + 5.0 * vnoise(vec2(gp.x * 9.0, gp.y * 0.7 + 3.0))) * (1.0 - smoothstep(0.004, 0.012, fg));
+          float jd = min(abs(p.x + 0.27), abs(p.x + P_A - 0.27));
+          float joint = (1.0 - smoothstep(0.004, 0.004 + fp.x * 1.5, jd)) * step(s, -0.125) * step(p.y, P_HS + 0.3) * (1.0 - smoothstep(0.004, 0.02, fp.x));
+
           col = ${glPaint("#4c84d8")};
-          col = mix(col, ${glPaint("#6c9de6")}, smoothstep(0.15, 0.19, s) * f2);
-          col = mix(col, ${glPaint("#8fb6ee")}, 0.6 * rays(p) * smoothstep(0.17, 0.21, s) * step(P_HS, p.y) * f2);
-          // a cream pinstripe round every panel
-          col = mix(col, ${glPaint("#f5ecd9")}, f2 * (1.0 - smoothstep(0.007, 0.007 + fw * 1.5, abs(s + 0.065))));
-          col = mix(col, ${glPaint("#f5ecd9")}, f2 * (1.0 - smoothstep(0.005, 0.005 + fw * 1.5, abs(p.y - 2.215))) * step(-P_A + 0.27, p.x) * step(p.x, -0.27));
-          // brushed paint over the grain of the wood
-          col *= 0.965 + 0.06 * vnoise(vec2(p.x * 38.0, p.y * 1.6));
-          // dark in the bottom of each groove
-          occ = 1.0 - 0.4 * f2 * (smoothstep(-0.005, 0.02, s) - smoothstep(0.03, 0.09, s));
-          occ *= mix(0.72, 1.0, smoothstep(0.0, 0.6, p.y));
+          col = mix(col, ${glPaint("#6c9de6")}, (0.4 * smoothstep(0.03, 0.05, s) + 0.6 * field) * f2);
+          col = mix(col, ${glPaint("#8fb6ee")}, 0.5 * rays * burst * f2);
+          col *= 0.955 + 0.07 * grain + 0.022 * fine;
+          col *= 1.0 - 0.16 * joint * f2;
+          // the cream line stays, now on the crown of each bead: round every panel, and along the lock rail
+          // (a line finer than a pixel is held at a pixel's weight, so the outlines carry from the approach)
+          float crown = 1.0 - smoothstep(0.008 + fw * 0.3, 0.008 + fw * 1.8, abs(s + 0.065));
+          crown = max(crown, 1.0 - smoothstep(0.006 + frd * 0.3, 0.006 + frd * 1.8, rd));
+          col = mix(col, ${glPaint("#f7efdc")}, f2 * crown);
+
+          // Shade: in the quirk behind each bead and at the bead's foot on the frame, deeper on
+          // the side turned from the sun; under the brass; and where the leaf stands on the plinth.
+          float quirk = smoothstep(-0.03 - fw, -0.005, s) * (1.0 - smoothstep(0.03, 0.075 + fw, s));
+          float foot = (1.0 - smoothstep(0.0, 0.03 + fw, abs(s + 0.118))) + (1.0 - smoothstep(0.0, 0.02 + frd, abs(rd - 0.046)));
+          float fade = 1.0 - smoothstep(0.03, 0.09, fw);
+          float groove = f2 * fade * (1.0 - crown) * (quirk * (0.4 - 0.16 * lean) + foot * (0.13 - 0.1 * lean));
+          occ = 1.0 - groove;
+          dim = 1.0 - 0.45 * groove;
+          // each hinge and knob stands in a tight dark line, and throws a small shadow down the leaf
+          float bd = brassSd(p);
+          float bs = brassSd(p + L * 0.06);
+          float soft = 0.015 + fwidth(bd);
+          float under = f2 * (1.0 - smoothstep(0.0, 0.03 + soft, bd));
+          float shadow = f2 * (1.0 - smoothstep(-0.02, soft, bs));
+          sun = 1.0 - shadow * 0.85;
+          occ *= 1.0 - 0.3 * max(under, shadow);
+          dim *= (1.0 - 0.32 * under) * (1.0 - 0.32 * shadow);
+          // the foot of the leaf, hard against the plinth
+          occ *= mix(0.74, 1.0, smoothstep(0.0, 0.6, p.y));
+          dim *= mix(0.6, 1.0, smoothstep(0.0, 0.09, p.y)) * mix(0.86, 1.0, smoothstep(0.0, 0.5, p.y));
+
+          // the relief in the light: a slope leaning to the sun is brighter, one leaning away is
+          // in its own shade, and the gloss of the paint glints on the edges that look at the sun
+          col *= 1.0 + lean * (lean > 0.0 ? 0.42 : 0.38) * mix(0.6, 1.0, facing);
+          vec3 v = normalize(cameraPosition - vW);
+          extra = KEY * (col * 0.3 * max(lean, 0.0) * facing + 0.2 * pow(max(dot(n, normalize(v + SUN)), 0.0), 26.0) * f2);
         #endif
         #ifdef SURROUND
           float u = vProf.x;
@@ -1686,6 +1788,7 @@ function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: 
           // the crease at the foot of each moulding
           occ = 1.0 - 0.3 * (1.0 - smoothstep(0.0, 0.035, abs(u - 0.3))) - 0.25 * (1.0 - smoothstep(0.0, 0.03, abs(wu - 0.41)));
           occ *= smoothstep(-0.3, 1.1, vOb.y);
+          dim = mix(0.62, 1.0, smoothstep(0.0, 0.1, vOb.y));
           // Voussoirs: eleven stones over the arch and four up each leg, each a touch different
           // in tone, their joints V-grooves bevelled into the field and the outer moulding.
           vec2 o = vOb.xy - vec2(0.0, P_HS);
@@ -1719,7 +1822,11 @@ function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: 
           col = mix(col, ${glPaint("#f7b39c")}, 0.75 * crown * step(0.33, u));
           occ *= 1.0 - 0.3 * (1.0 - smoothstep(0.0, 0.05, abs(wu - 0.45))) * step(0.33, u);
           sun = doorSun(vW, false);
-          extra = KEY * col * 0.45 * slope * smoothstep(0.6, 0.95, dot(n, SUN));
+          // each joint's chamfer: bright on the stone whose edge is turned to the sun, shaded on the other
+          float cham = (1.0 - smoothstep(0.012, 0.05, abs(jd - 0.03))) * onField * (1.0 - smoothstep(0.02, 0.05, fj));
+          float leanJ = -dot(away, normalize(SUN.xy));
+          col *= 1.0 + cham * (leanJ > 0.0 ? 0.26 : 0.2) * leanJ;
+          extra = KEY * col * (0.45 * slope * smoothstep(0.6, 0.95, dot(n, SUN)) + 0.22 * cham * max(leanJ, 0.0));
         #endif
         #ifdef PLINTH
           if (dot(n, cameraPosition - vW) < 0.0) n = -n;
@@ -1756,7 +1863,9 @@ function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: 
             occ *= mix(0.7, 1.0, smoothstep(0.0, 0.35, r - 6.05));
           }
           occ *= 1.0 - 0.35 * grout;
-          occ *= doorContact(vW);
+          vec2 contact = doorContact(vW);
+          occ *= contact.x;
+          dim = contact.y;
           sun = doorSun(vW, true);
           // the glaze catches the sun on the rounded edges of the tiles turned to us
           vec3 v = normalize(cameraPosition - vW);
@@ -1764,10 +1873,27 @@ function makeDoorMaterial(kind: "LEAF" | "SURROUND" | "PLINTH" | "BRASS", open: 
         #endif
         #ifdef BRASS
           col = ${glPaint("#e8b84a")};
+          // A hinge strap is a flat box: its face is crowned here, and its round end domed, so
+          // that the brass has an edge to catch the sun on and one to lose it on.
+          vec2 hq = vec2(vOb.x, vOb.y - (vOb.y < 1.175 ? 0.6 : vOb.y < 2.325 ? 1.75 : 2.9));
+          vec2 hv = hq - vec2(clamp(hq.x, -0.62, -0.06), 0.0);
+          float rim = 0.0;
+          if (abs(vNo.z) > 0.9 && vOb.x > -1.0) {
+            float hr = mix(0.0475, 0.075, smoothstep(-0.56, -0.62, hq.x));
+            float k = length(hv) / hr;
+            n = normalize(n + (vBx * hv.x + vBy * hv.y) / hr * (0.5 + 0.9 * k * k));
+            rim = smoothstep(0.72, 1.0, k);
+          } else if (abs(vNo.z) < 0.5 && vOb.x < -0.06 && vOb.x > -1.0) {
+            // a strap's thin edge is in the shade of its own crown
+            rim = 1.0;
+          }
+          // polished metal mirrors what is round it: the sky above, the warm sand below
+          col *= mix(0.74, 1.1, smoothstep(-0.7, 0.75, n.y)) * (1.0 - 0.3 * rim);
           vec3 v = normalize(cameraPosition - vW);
-          extra = KEY * pow(max(dot(n, normalize(v + SUN)), 0.0), 60.0) * 1.6 + ${glScreen("#f4ead0")} * 0.25 * pow(1.0 - max(dot(n, v), 0.0), 3.0);
+          float nh = max(dot(n, normalize(v + SUN)), 0.0);
+          extra = KEY * (pow(nh, 60.0) * 1.6 + pow(nh, 9.0) * 0.22) + ${glScreen("#f4ead0")} * 0.25 * pow(1.0 - max(dot(n, v), 0.0), 3.0) * (1.0 - rim);
         #endif
-        vec3 lit = propLight(col, n, sun * occ) * mix(0.62, 1.0, occ) + extra * sun;
+        vec3 lit = (propLight(col, n, sun * occ) * mix(0.62, 1.0, occ) + extra * sun) * dim;
         gl_FragColor = vec4(applyFog(lit, length(cameraPosition - vW)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
