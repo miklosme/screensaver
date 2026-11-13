@@ -292,3 +292,34 @@ Learned:
 - Triangles are up (helix 1410k, burrow 1046k) with frame cost flat at about 3.1 ms; bundle is
   299 kB of 400 and has grown about 8 kB a pass.
 
+## Pass 008 (2026-11-13)
+
+Slices (each two-commit slice was merged as two merges):
+- H4 helix · A shaft with depth, second try (fable): both commits kept, no regressions.
+- D14 dollhouse · Flowers hold in motion and on any screen, and D14b smooth petals (opus): both
+  kept, no regressions.
+- B8 burrow · A floor that is alive (opus) kept. Fable alone reported the lost plum sheen (B11).
+- O6 orbit · Kerbstones (opus, sent back once as O6b) kept. Fable alone reported thin edge
+  lines in the opening (O10).
+- O6 orbit · Topiary (opus) reverted: all three saw rocks.
+Gate: frame cost worst 3.13 ms (orbit), loop worst 16 ms, seams 0.00–0.31% RMSE, bundle 306 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.7, burrow 7.0, dollhouse 6.7, orbit 7.7. The orbit score was
+given to the version with the reverted topiary (`loop/out/pass-008/reviewed/`).
+Learned:
+- Six of seven merges kept: the best pass so far. What was different: commits that apply alone
+  and are merged alone; briefs that name what must not change and why (with the reverted
+  frames); proofs asked for things frames cannot show (aspect ratios, a strip of frames a
+  tenth of a second apart, a difference image over what must not change).
+- The send-back that worked (kerbs) stated what must be true in named frames and left the how
+  open. Use that form.
+- I merged the topiary although its worker and I both saw "pebbles"; all three reviewers saw
+  rocks. Third time a doubt I wrote down myself became the panel's regression (helix opening,
+  whale, bushes). When my own note says it may read as X, send it back or drop it.
+- Workers measuring on a shared GPU now build their own interleaved harnesses; H4's is at
+  `/tmp/claude-1000/-home-miklosme--t3-worktrees-screensaver-t3-89a75432-6fc8f410f4fc216b/b6679c30-d482-4191-8fd3-468ce8598f7b/scratchpad/tools/abperf.ts`
+  (it may be gone). K6 should bring one into `scripts/look.ts`.
+- The fable reviewer scores a point lower than the others on most scenes and asks each pass for
+  things that exist (bloom, wet-cobble reflections, interior parallax): question 11.
+- Loop worst frame was 16 ms this pass (budget 20); p99 7.2 ms. Bundle 306 kB of 400.
+
