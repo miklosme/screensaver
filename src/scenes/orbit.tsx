@@ -1003,7 +1003,7 @@ function buildWorld() {
     const colr: number[] = [];
     const rd: number[] = [];
     const idx: number[] = [];
-    const kerb = new THREE.Color("#8a8ce6");
+    const kerb = new THREE.Color("#5b5a82");
     const edge = new THREE.Color("#252a68");
     const mid = new THREE.Color("#3a3f8c");
     const cols = [kerb, kerb, edge, mid, edge, kerb, kerb];
@@ -1033,7 +1033,12 @@ function buildWorld() {
           else warm += g;
         }
         const c = cols[k]!;
-        colr.push(c.r + warm * 0.5 + cool * 0.05, c.g + warm * 0.2 + cool * 0.3, c.b + warm * 0.04 + cool * 0.4);
+        if (c === kerb) {
+          // kerb stone: the lamp pools light it, rather than adding to it
+          colr.push(c.r * (0.8 + warm * 3.2 + cool * 0.6) + warm * 0.05, c.g * (0.8 + warm * 2.1 + cool * 1.6) + warm * 0.02, c.b * (0.8 + warm * 1.1 + cool * 2.2));
+        } else {
+          colr.push(c.r + warm * 0.5 + cool * 0.05, c.g + warm * 0.2 + cool * 0.3, c.b + warm * 0.04 + cool * 0.4);
+        }
       }
       rows++;
     }
@@ -1379,14 +1384,17 @@ function buildWorld() {
   const overlay = { polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -6, side: THREE.DoubleSide };
   const roadMat = new THREE.MeshBasicMaterial({ vertexColors: true, ...overlay });
   // The carriageway: worn setts in courses across the road, a raised crown, grain, and the wet
-  // shine of every lamp and window near the camera. The luminous kerbs stay as they were.
+  // shine of every lamp and window near the camera. Along each side a kerb of dressed stone blocks,
+  // bevelled on both arrises, lit by the lamp pools and wet like the setts, with a thin luminous line
+  // on its inner lip so the road still reads as a ribbon from afar.
   withAir(roadMat, "road", 0.8, (sh) => {
     Object.assign(sh.uniforms, reflU);
     sh.vertexShader = sh.vertexShader
-      .replace("#include <common>", "#include <common>\nattribute vec4 aRd;\nvarying vec4 vRd;")
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRd = aRd;");
+      .replace("#include <common>", "#include <common>\nattribute vec4 aRd;\nvarying vec4 vRd;\nvarying vec3 vKc;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRd = aRd;")
+      .replace("#include <project_vertex>", "#include <project_vertex>\nvKc = gl_Position.xyw;");
     sh.fragmentShader = sh.fragmentShader
-      .replace("#include <common>", `#include <common>\nvarying vec4 vRd;\n${WET_GLSL}`)
+      .replace("#include <common>", `#include <common>\nvarying vec4 vRd;\nvarying vec3 vKc;\n${WET_GLSL}`)
       .replace(
         "#include <color_fragment>",
         /* glsl */ `#include <color_fragment>
@@ -1414,7 +1422,46 @@ function buildWorld() {
           diffuseColor.rgb *= mix(1.0, m * (0.78 + 0.32 * crown), inner);
           float puddle = smoothstep(0.3, 0.8, vnoise(vec2(off * 0.7, d * 0.16) + 3.0));
           float wet = mix(0.35, 1.0, puddle) * mix(0.75, (1.0 - mortar) * (0.45 + 0.55 * tone) * mix(0.8, 1.1, dome), fade);
-          diffuseColor.rgb += wetSheen(vRd.zw) * wet * mix(1.4, 2.4, inner);
+          // the kerb: kx runs across it from the road's edge (0) to the verge (1)
+          float kx = clamp((abs(off) - 2.4) / 0.45, 0.0, 1.0);
+          float kpx = fwidth(abs(off)) / 0.45;
+          float kb = d / 0.85 + (off > 0.0 ? 0.37 : 0.0);
+          float kf = fract(kb);
+          float kpd = fwidth(kb);
+          float kFade = 1.0 - smoothstep(0.08, 0.3, max(kpx, kpd * 0.53));
+          float kJoint = (1.0 - smoothstep(0.018, 0.018 + kpd, min(kf, 1.0 - kf))) * kFade;
+          float kTone = hashW(vec2(floor(kb), sign(off)));
+          float bevIn = 1.0 - smoothstep(0.02, 0.17 + kpx, kx);
+          float bevOut = smoothstep(0.86 - kpx, 0.99, kx);
+          float kTop = (1.0 - bevIn) * (1.0 - bevOut);
+          float kGrain = vnoise(vec2(off, d) * vec2(31.0, 13.0));
+          float ks = mix(1.0, (0.82 + 0.3 * kTone) * (0.9 + 0.2 * kGrain) * (kTop + 1.25 * bevIn + 0.55 * bevOut) * (1.0 - 0.65 * kJoint), kFade);
+          // from far off the stones merge into a soft lavender band
+          vec3 kFar = vec3(0.24, 0.24, 0.55) + diffuseColor.rgb * 0.5;
+          vec3 kc = mix(diffuseColor.rgb * ks, kFar, smoothstep(0.12, 0.5, kpx));
+          // Beyond a few metres the luminous lip holds a width on screen (6 px of a 1080-line frame,
+          // whatever the resolution) and brightens, and once the kerb is only a few pixels wide it
+          // floods it: the two edges draw the road through the town from afar and in the portal
+          // thumbnail, while a kerb near the lens and wide on screen stays stone. Both ramp smoothly,
+          // so there is no band.
+          float kRes = 540.0 * fwidth(vKc.y / vKc.z);
+          float kpx1 = kpx / max(kRes, 1e-4);
+          float kNear = smoothstep(4.5, 11.0, 1.0 / gl_FragCoord.w) * smoothstep(0.025, 0.06, kpx1);
+          vec3 kLit = vec3(0.26, 0.27, 0.8) + max(diffuseColor.rgb - vec3(0.084, 0.082, 0.178), 0.0) * 1.5;
+          kc = mix(kc, kLit, smoothstep(0.035, 0.15, kpx1) * kNear);
+          // a gutter of shade along the foot of the kerb, on the road side
+          float gutter = smoothstep(2.12, 2.4, abs(off)) * inner;
+          diffuseColor.rgb *= 1.0 - 0.45 * gutter;
+          diffuseColor.rgb = mix(diffuseColor.rgb, kc, 1.0 - inner);
+          // the luminous lip: at the lens thin and never thinner than a pixel, a little dimmer when
+          // it has to widen; beyond, a held line on the inner arris
+          float lwN = max(0.05, kpx * 1.5);
+          float lw = mix(lwN, clamp(kpx1 * 6.0, 0.05, 1.0), kNear);
+          float lc = max(0.07, lw * 0.5);
+          float lip = (1.0 - smoothstep(lw * 0.5 - kpx * 0.5, lw * 0.5 + kpx * 0.5, abs(kx - lc))) * mix(sqrt(0.05 / lwN), 1.0, kNear) * (1.0 - inner);
+          diffuseColor.rgb += mix(vec3(0.55, 0.55, 1.1), vec3(0.6, 0.62, 1.3), kNear) * lip;
+          float kWet = mix(0.6, kTop * (1.0 - kJoint) * (0.6 + 0.5 * kTone), kFade);
+          diffuseColor.rgb += wetSheen(vRd.zw) * mix(kWet * 1.5, wet * 2.4, inner);
         }`,
       );
   });
