@@ -63,10 +63,14 @@ const HORIZON = new Color().setRGB(...onScreen("#f6c9ae"));
 // dunes fade to peach
 const FOG_NEAR = 95;
 const FOG_FAR = 430;
-/** aerial perspective (see FOG_GLSL): where it starts, how fast it thickens, how far it goes before the haze */
-const AIR_NEAR = 30;
-const AIR_LEN = 120;
-const AIR_MAX = 0.42;
+/**
+ * aerial perspective (see FOG_GLSL): where it starts, how fast it thickens, how far it goes before
+ * the haze. Light enough that the props along the horizon keep their stripes and candy colour; it
+ * is the far dunes that it lifts.
+ */
+const AIR_NEAR = 70;
+const AIR_LEN = 160;
+const AIR_MAX = 0.24;
 const SUN_DIR = new Vector3(0.45, 0.6, 0.75).normalize();
 
 // One sun: a warm key, a cool lavender fill from the sky and a little warm bounce off the sand.
@@ -568,14 +572,14 @@ function aimOf(d: DoorDef, path: Vector3[]) {
 
 // ───────────────────────────── shaders ─────────────────────────────
 /**
- * Air: past the garden things grey a little and drift towards the horizon's peach, so the middle
- * and far layers separate from the near one by value and saturation; then the haze closes in.
+ * Air: past the garden things lighten and warm towards the horizon's peach (greying only a little),
+ * so the middle and far layers separate from the near one by value; then the haze closes in.
  */
 const FOG_GLSL = /* glsl */ `
   float airAt(float d) { return ${AIR_MAX.toFixed(2)} * (1.0 - exp(-max(d - ${AIR_NEAR.toFixed(1)}, 0.0) / ${AIR_LEN.toFixed(1)})); }
   vec3 applyFog(vec3 c, float d) {
     float a = airAt(d);
-    c = mix(c, vec3(dot(c, vec3(0.3, 0.59, 0.11))), a * 0.6);
+    c = mix(c, vec3(dot(c, vec3(0.3, 0.59, 0.11))), a * 0.15);
     c = mix(c, ${gl3(HORIZON.toArray())}, a);
     float f = smoothstep(${FOG_NEAR.toFixed(1)}, ${FOG_FAR.toFixed(1)}, d);
     return mix(c, ${gl3(HORIZON.toArray())}, f);
@@ -610,13 +614,18 @@ const SAND_GLSL = /* glsl */ `
     vec3 cream = ${glSand("#f4e3d0")};
     vec3 mint = ${glSand("#a8dcc0")};
     vec3 teal = ${glSand("#78c8b2")};
+    // the garden's low hummocks (groundAt's first term) are left out of the colour: they would
+    // otherwise bend the bands into a broad cream patch
+    float hd = length(w.xz - vec2(0.0, 18.0));
+    float hm = smoothstep(9.0, 15.0, length(w.xz)) * (1.0 - smoothstep(24.0, 34.0, hd));
+    float hc = hgt - hm * 0.32 * (sin(w.x * 0.42 + 0.8) * sin(w.z * 0.36 + 2.1) + 0.6 * sin((w.x - w.z) * 0.27));
     // wind-combed contour bands that follow the dunes
     float warp = sin(w.x * 0.045 + sin(w.z * 0.03) * 1.7) * 2.2 + sin(w.z * 0.05 + w.x * 0.02) * 1.6;
-    float bands = sin((hgt * 1.5 + warp) * 2.4 + w.x * 0.10 + w.z * 0.07);
+    float bands = sin((hc * 1.5 + warp) * 2.4 + w.x * 0.10 + w.z * 0.07);
     float bw = fwidth(bands) * 1.2;
     float band = smoothstep(-bw, bw, bands);
     float fadeB = 1.0 - smoothstep(60.0, 160.0, d);
-    vec3 col = mix(sand, cream, smoothstep(-3.0, 1.0, hgt + (band - 0.5) * 1.6 * fadeB + 0.6));
+    vec3 col = mix(sand, cream, smoothstep(-3.0, 1.0, hc + (band - 0.5) * 1.6 * fadeB + 0.6));
     col = mix(col, mint, smoothstep(1.2, 6.0, hgt));
     col = mix(col, teal, smoothstep(9.0, 22.0, hgt));
     col *= 1.0 - 0.07 * (1.0 - band) * fadeB;
