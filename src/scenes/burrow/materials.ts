@@ -336,7 +336,9 @@ function wallUniforms(shared: Shared, o: WallOptions) {
     uSpotGain: { value: o.spotGain ?? 1 },
     uRidgeAmt: { value: o.ridgeAmt ?? 0.7 },
     uRing: { value: new Vector3(...(o.ring ?? [0, 0, 0])) },
-    uPool: { value: o.pool ? new Vector4(o.pool.x, o.pool.y, o.pool.z, 1) : new Vector4() },
+    // w is the pool's strength; a Vector4 starts with w = 1, so a surface without a pool says 0 outright
+    // (left at 1, every wall would carry the hoop's daylight round the world origin, as a grey arch)
+    uPool: { value: o.pool ? new Vector4(o.pool.x, o.pool.y, o.pool.z, 1) : new Vector4(0, 0, 0, 0) },
   };
 }
 
