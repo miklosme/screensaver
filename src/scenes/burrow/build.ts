@@ -53,6 +53,50 @@ const smoothstep = (a: number, b: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 
+// ---------------------------------------------------------------------------------------------
+// the skin: where every scale of the walls lies (the shader in materials.ts draws them)
+// ---------------------------------------------------------------------------------------------
+
+/** world size of one scale across, and the pitch of the rings of scales along the flow, in a bore of scale 1 */
+const SCALE_W = 0.16;
+const SCALE_PITCH = 0.1;
+
+/** how far round the corridor's profile each of its columns lies, by true arc length, as a fraction */
+const PROFILE_ARC = (() => {
+  const at = [0];
+  let [px, py] = profilePoint(0);
+  for (let j = 1; j <= PROFILE_SEGS; j++) {
+    const [x, y] = profilePoint((j / PROFILE_SEGS) * Math.PI * 2);
+    at.push(at[j - 1]! + Math.hypot(x - px, y - py));
+    px = x;
+    py = y;
+  }
+  const total = at[PROFILE_SEGS]!;
+  return { frac: at.map((d) => d / total), total };
+})();
+
+/** scales round one ring of a corridor */
+export const CORRIDOR_SCALES = Math.round(PROFILE_ARC.total / SCALE_W);
+
+/** scales round a chamber at its widest, the rings of them from oculus to floor, and the latitudes of the first and last */
+export const chamberSkin = (ch: Chamber) => {
+  const psi0 = Math.asin(-ch.yc / ch.H);
+  const psi1 = Math.acos(ch.oculus / ch.R);
+  return { round: (Math.PI * 2 * ch.R) / SCALE_W, rings: Math.round(((psi1 - psi0) * (ch.R + ch.H)) / 2 / SCALE_PITCH), psi0, psi1 };
+};
+
+/**
+ * Slow swells through the rock the burrow is dug in, by world position, so the two sides of a
+ * mesh's seam agree: two that push the scales about (in scales across, and in rings), which is what
+ * makes them larger here and smaller there, and how strongly they stand out of the wall (0.5 .. 1).
+ */
+function swell(x: number, y: number, z: number): [number, number, number] {
+  const a = Math.sin(x * 0.57 + 1.3 * Math.sin(z * 0.41 + 0.6)) + Math.sin(y * 0.83 + z * 0.37 + 2.1);
+  const b = Math.sin(z * 0.49 + 1.2 * Math.sin(x * 0.36 + y * 0.3)) + Math.sin(y * 0.71 - x * 0.44 + 0.8);
+  const c = Math.sin(x * 0.29 + z * 0.23 + 1.1 * Math.sin(y * 0.4)) + Math.sin(z * 0.34 - x * 0.19 + y * 0.53 + 4.0);
+  return [0.9 * a, 1.5 * b, 0.75 + 0.125 * c];
+}
+
 function mulberry32(seed: number) {
   let a = seed >>> 0;
   return () => {
@@ -109,6 +153,14 @@ export interface GlowLight {
   p: Vector3;
   c: [number, number, number];
   r: number;
+  /**
+   * The corridor a light hangs in and the chamber that corridor opens into, when the light is shut
+   * in there: nothing is traced, so without this it would shine through the rock on whatever
+   * tunnel passes nearby.
+   */
+  home?: { corridor: number; chamber: Chamber };
+  /** how much of it is the mint of the mushrooms and the thread, which the wet skin gives back whatever its own colour */
+  mint?: number;
 }
 
 /** plan radius at which a chamber's wall meets its floor */
@@ -201,10 +253,15 @@ function buildCorridor(pts: Station[]): BufferGeometry {
   const position = new Float32Array(rows * (cols + 1) * 3);
   const pat = new Float32Array(rows * (cols + 1) * 2);
   const hgt = new Float32Array(rows * (cols + 1));
+  const skin = new Float32Array(rows * (cols + 1) * 3);
   const centres: Vector3[] = [];
   let o = 0;
   let q = 0;
   let h = 0;
+  let sk = 0;
+  // rings of scales are counted along the corridor's own centre line, by true length, and are
+  // spaced as the bore is wide: a scale stays as long as it is broad
+  let ring = 0;
   for (let i = 0; i < rows; i++) {
     const { c: p, side, up, k, rib } = pts[i]!;
     const s = i / RIB_SEGS;
@@ -213,6 +270,7 @@ function buildCorridor(pts: Station[]): BufferGeometry {
     // slow breathing of the bore so no two stretches are quite the same size
     const breathe = 1 + 0.05 * Math.sin(s * 0.9 + p.x * 0.3) + 0.03 * Math.sin(s * 0.37 + 1.7);
     centres.push(p.clone().addScaledVector(up, PROFILE.hc * k));
+    if (i > 0) ring += centres[i]!.distanceTo(centres[i - 1]!) / (SCALE_PITCH * 0.5 * (k + pts[i - 1]!.k));
     for (let j = 0; j <= cols; j++) {
       const [x0, yp] = profilePoint((j / cols) * Math.PI * 2);
       // At a doorway the trough is pressed flat, level with the chamber's floor from foot to foot of
@@ -230,12 +288,17 @@ function buildCorridor(pts: Station[]): BufferGeometry {
       pat[q++] = s;
       pat[q++] = j / cols;
       hgt[h++] = y0m;
+      const [wa, wr, strength] = swell(position[o - 3]!, position[o - 2]!, position[o - 1]!);
+      skin[sk++] = PROFILE_ARC.frac[j]! + wa / CORRIDOR_SCALES;
+      skin[sk++] = ring + wr;
+      skin[sk++] = strength;
     }
   }
   const geo = new BufferGeometry();
   geo.setAttribute("position", new BufferAttribute(position, 3));
   geo.setAttribute("pat", new BufferAttribute(pat, 2));
   geo.setAttribute("hgt", new BufferAttribute(hgt, 1));
+  geo.setAttribute("skin", new BufferAttribute(skin, 3));
   geo.setIndex(gridIndex(rows, cols));
   finish(geo, cols, rows, (i) => centres[i]!);
   return geo;
@@ -271,9 +334,12 @@ function buildChamber(ch: Chamber): BufferGeometry {
   const position = new Float32Array(rows * (cols + 1) * 3);
   const pat = new Float32Array(rows * (cols + 1) * 2);
   const hgt = new Float32Array(rows * (cols + 1));
+  const skin = new Float32Array(rows * (cols + 1) * 3);
+  const { round, rings } = chamberSkin(ch);
   let o = 0;
   let q = 0;
   let k = 0;
+  let sk = 0;
   for (let i = 0; i < rows; i++) {
     const vv = i / (rows - 1);
     const psi = psi0 + (psi1 - psi0) * vv;
@@ -288,12 +354,18 @@ function buildChamber(ch: Chamber): BufferGeometry {
       pat[q++] = s;
       pat[q++] = vv;
       hgt[k++] = y;
+      // rings of scales hang down the dome from the oculus, each ring with as many as fit round it
+      const [wa, wr, strength] = swell(position[o - 3]!, position[o - 2]!, position[o - 1]!);
+      skin[sk++] = j / cols + wa / round;
+      skin[sk++] = (1 - vv) * rings + wr;
+      skin[sk++] = strength;
     }
   }
   const geo = new BufferGeometry();
   geo.setAttribute("position", new BufferAttribute(position, 3));
   geo.setAttribute("pat", new BufferAttribute(pat, 2));
   geo.setAttribute("hgt", new BufferAttribute(hgt, 1));
+  geo.setAttribute("skin", new BufferAttribute(skin, 3));
   geo.setIndex(gridIndex(rows, cols));
   const c = new Vector3(ch.c.x, ch.c.y + ch.yc, ch.c.z);
   finish(geo, cols, rows, () => c);
@@ -302,8 +374,9 @@ function buildChamber(ch: Chamber): BufferGeometry {
 
 /** chamber floor: a shallow dish with concentric ripples in the pattern coordinate, running on under the wall */
 function buildFloor(ch: Chamber): BufferGeometry {
-  const cols = 72;
-  const rows = 18;
+  // fine enough to carry the light and the occlusion baked into its vertices (the dish itself is the same)
+  const cols = 180;
+  const rows = 46;
   const position = new Float32Array(rows * (cols + 1) * 3);
   const normal = new Float32Array(rows * (cols + 1) * 3);
   const pat = new Float32Array(rows * (cols + 1) * 2);
@@ -382,7 +455,7 @@ export function sweepTube(pts: Vector3[], closed: boolean, radius: number, radia
  * it. Its lower run is sunk under the floor, so the two feet rise out of the ground like roots and
  * there is no end to cap.
  */
-function buildDoorFrame(ch: Chamber, door: Door): BufferGeometry {
+function doorLoop(ch: Chamber, door: Door): Vector3[] {
   const pts: Vector3[] = [];
   const K = 0.95 * door.k;
   const n = 84;
@@ -400,7 +473,11 @@ function buildDoorFrame(ch: Chamber, door: Door): BufferGeometry {
     const sunk = y - 0.46 * door.k * (1 - smoothstep(0.04, 0.8, y / door.k));
     pts.push(new Vector3(ch.c.x + qx + t.x * f, ch.c.y + sunk, ch.c.z + qz + t.z * f));
   }
-  const geo = sweepTube(pts, true, 0.27 * Math.sqrt(door.k), 10, t.clone().negate());
+  return pts;
+}
+
+function buildDoorFrame(ch: Chamber, door: Door): BufferGeometry {
+  const geo = sweepTube(doorLoop(ch, door), true, 0.27 * Math.sqrt(door.k), 10, door.t.clone().negate());
   const pos = geo.getAttribute("position") as BufferAttribute;
   const hgt = new Float32Array(pos.count);
   for (let i = 0; i < pos.count; i++) hgt[i] = pos.getY(i) - ch.c.y;
@@ -408,10 +485,24 @@ function buildDoorFrame(ch: Chamber, door: Door): BufferGeometry {
   return geo;
 }
 
-function bake(geo: BufferGeometry, lights: GlowLight[]) {
+/** something standing on a surface: it darkens what is within r of p, by s at most */
+interface Occluder {
+  p: Vector3;
+  r: number;
+  s: number;
+}
+
+/**
+ * Light that does not move, per vertex. `glow` is what the glowing things shed on the surface.
+ * `ground` is what standing things do to it: x is how open the surface is to light at all (1,
+ * falling where something stands on it), y is the mint light pooled on it.
+ */
+function bake(geo: BufferGeometry, all: GlowLight[], occluders: Occluder[], corridor: number, chamber?: Chamber) {
+  const lights = all.filter((L) => !L.home || L.home.corridor === corridor || L.home.chamber === chamber);
   const pos = geo.getAttribute("position") as BufferAttribute;
   const nrm = geo.getAttribute("normal") as BufferAttribute;
   const glow = new Float32Array(pos.count * 3);
+  const ground = new Float32Array(pos.count * 2);
   for (let i = 0; i < pos.count; i++) {
     const px = pos.getX(i);
     const py = pos.getY(i);
@@ -422,6 +513,7 @@ function bake(geo: BufferGeometry, lights: GlowLight[]) {
     let r = 0;
     let g = 0;
     let b = 0;
+    let pool = 0;
     for (let k = 0; k < lights.length; k++) {
       const L = lights[k]!;
       const dx = L.p.x - px;
@@ -436,12 +528,26 @@ function bake(geo: BufferGeometry, lights: GlowLight[]) {
       r += L.c[0] * w;
       g += L.c[1] * w;
       b += L.c[2] * w;
+      // a pool is a tighter thing than the light that fills the tunnel
+      if (L.mint) pool += (L.mint * (0.35 + 0.65 * ndl)) / (1 + (d2 * d2) / (rr * rr));
+    }
+    let open = 1;
+    for (let k = 0; k < occluders.length; k++) {
+      const O = occluders[k]!;
+      const dx = O.p.x - px;
+      const dy = O.p.y - py;
+      const dz = O.p.z - pz;
+      const u = 1 - (dx * dx + dy * dy + dz * dz) / (O.r * O.r);
+      if (u > 0) open *= 1 - O.s * u * u;
     }
     glow[i * 3] = r;
     glow[i * 3 + 1] = g;
     glow[i * 3 + 2] = b;
+    ground[i * 2] = open;
+    ground[i * 2 + 1] = pool;
   }
   geo.setAttribute("glow", new BufferAttribute(glow, 3));
+  geo.setAttribute("ground", new BufferAttribute(ground, 2));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -629,7 +735,7 @@ export function buildWorld(stretch: Stretch) {
     { ch: ch2, heading: 75, curl: -110, over: 14, length: 21, lure: [0.2, 0.75, 1.0] },
   ];
   const lures: GlowLight[] = [];
-  const sideCorridors = forks.map((fork) => {
+  const sideCorridors = forks.map((fork, forkIndex) => {
     const { ch } = fork;
     const start = fork.heading * DEG;
     const dir = ahead(start);
@@ -659,7 +765,12 @@ export function buildWorld(stretch: Stretch) {
     ch.doors.push({ p: new Vector3(ch.c.x, 0, ch.c.z).addScaledVector(dir, ch.R * 0.97), t: dir, dir, k: 1 });
     // the lure hangs just round the first of the curl, where it colours what can be seen from the junction
     const at = pts[Math.floor(pts.length * 0.42)]!.c;
-    lures.push({ p: new Vector3(at.x, at.y + 2.4, at.z), c: [fork.lure[0] * 3.2, fork.lure[1] * 3.2, fork.lure[2] * 3.2], r: 4.5 });
+    lures.push({
+      p: new Vector3(at.x, at.y + 2.4, at.z),
+      c: [fork.lure[0] * 3.2, fork.lure[1] * 3.2, fork.lure[2] * 3.2],
+      r: 4.5,
+      home: { corridor: mainCorridors.length + forkIndex, chamber: ch },
+    });
     return pts;
   });
   const corridorPts = [...mainCorridors, ...sideCorridors];
@@ -728,11 +839,11 @@ export function buildWorld(stretch: Stretch) {
     { p: hoopPos, c: [1.0, 2.2, 1.9], r: 4.2 },
     { p: above(ch3, ch3.yc + ch3.H - 0.8), c: [1.9, 1.0, 1.5], r: 6.5 },
     ...lures,
-    ...groves.map((g): GlowLight => ({ p: new Vector3(g.p.x, g.p.y + 0.9, g.p.z).addScaledVector(g.lean, 0.3), c: [0.5, 2.0, 1.5], r: 1.7 })),
+    ...groves.map((g): GlowLight => ({ p: new Vector3(g.p.x, g.p.y + 0.9, g.p.z).addScaledVector(g.lean, 0.3), c: [0.5, 2.0, 1.5], r: 1.7, mint: 1 })),
   ];
   for (let i = 0; i < threadPts.length; i += 4) {
     const p = threadPts[i]!;
-    lights.push({ p: new Vector3(p.x, p.y + 0.085, p.z), c: [0.07, 0.3, 0.24], r: 0.9 });
+    lights.push({ p: new Vector3(p.x, p.y + 0.085, p.z), c: [0.07, 0.3, 0.24], r: 0.9, mint: 0.12 });
   }
 
   // --- geometry ---------------------------------------------------------------------------------
@@ -740,9 +851,34 @@ export function buildWorld(stretch: Stretch) {
   const shells = chambers.map(buildChamber);
   const floors = chambers.map(buildFloor);
   const frames: BufferGeometry[] = [];
-  for (const ch of chambers) for (const d of ch.doors) frames.push(buildDoorFrame(ch, d));
+  const frameOf: Chamber[] = [];
+  for (const ch of chambers)
+    for (const d of ch.doors) {
+      frames.push(buildDoorFrame(ch, d));
+      frameOf.push(ch);
+    }
   const thread = sweepTube(threadPts, false, 0.04, 6, UP);
-  for (const g of [...corridors, ...shells, ...floors, ...frames]) bake(g, lights);
+  // what stands on the floor shades it: each stand of mushrooms, and the two feet of every doorway's trim
+  const occluders: Occluder[] = [];
+  for (const g of groves) {
+    const p = g.p.clone().addScaledVector(g.lean, -0.1);
+    occluders.push({ p, r: 1.05, s: 0.5 }, { p, r: 0.5, s: 0.4 });
+  }
+  for (const ch of chambers)
+    for (const door of ch.doors) {
+      const loop = doorLoop(ch, door);
+      for (let i = 0; i < loop.length; i++) {
+        const p = loop[i]!;
+        const q = loop[(i + 1) % loop.length]!;
+        // where the bead goes into the ground
+        if (p.y - ch.c.y > 0 !== q.y - ch.c.y > 0)
+          occluders.push({ p: new Vector3((p.x + q.x) / 2, ch.c.y, (p.z + q.z) / 2), r: 1.0 * Math.sqrt(door.k), s: 0.62 });
+      }
+    }
+  corridors.forEach((g, i) => bake(g, lights, occluders, i));
+  shells.forEach((g, i) => bake(g, lights, occluders, -1, chambers[i]));
+  floors.forEach((g, i) => bake(g, lights, occluders, -1, chambers[i]));
+  frames.forEach((g, i) => bake(g, lights, occluders, -1, frameOf[i]));
 
   // hoop: a thin elliptical band, far too thin to hold anything
   const hoopPts: Vector3[] = [];
