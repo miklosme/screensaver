@@ -15,6 +15,7 @@ import {
   createMoteMaterial,
   createShared,
   createTrimMaterial,
+  setShroomLight,
   type Shared,
 } from "./burrow/materials";
 
@@ -408,7 +409,7 @@ export default function Burrow({ index, clock, camera, portalMaterial }: ScenePr
       shared,
       corridor: createCorridorMaterial(shared, world.chambers),
       shells: world.chambers.map((ch) => createChamberMaterial(shared, ch)),
-      floor: createTrimMaterial(shared, { patScale: [1.6, 40], spotK: 36, hTop: 4.6, spotGain: 0.5, ridgeAmt: 0.22, pool: world.hoopPos }),
+      floor: createTrimMaterial(shared, { patScale: [1.6, 40], spotK: 36, hTop: 4.6, spotGain: 0.5, ridgeAmt: 0.22, pool: world.hoopPos, shrooms: true }),
       frame: createTrimMaterial(shared, { patScale: [1.7, 11], spotK: 12, hTop: 4.6, ridgeAll: 0.85 }),
       thread: createGlowMaterial(shared, new Vector3(0.1, 0.95, 0.66), new Vector3(0.3, 1.2, 0.95), 75),
       knot: createGlowMaterial(shared, new Vector3(0.95, 0.16, 0.2), new Vector3(1.5, 0.95, 0.7)),
@@ -426,7 +427,12 @@ export default function Burrow({ index, clock, camera, portalMaterial }: ScenePr
       motes: createMoteMaterial(shared),
     };
   }, [world]);
-  const creatures = useMemo(() => buildCreatures(world, mats.shared), [world, mats]);
+  const creatures = useMemo(() => {
+    const c = buildCreatures(world, mats.shared);
+    // the floors are lit by the mushrooms standing on them
+    for (const m of [mats.corridor, mats.floor]) setShroomLight(m, c.shroomLight);
+    return c;
+  }, [world, mats]);
   const parts = useMemo(
     () => ({
       band: ringBand(BAND_RX, BAND_RY, BAND.a, BAND.b, 1, 288, 24),

@@ -1,4 +1,4 @@
-import { AdditiveBlending, Color, DoubleSide, ShaderMaterial, Vector2, Vector3, Vector4 } from "three";
+import { AdditiveBlending, Color, DoubleSide, ShaderMaterial, Vector2, Vector3, Vector4, type DataTexture } from "three";
 import { CORRIDOR_SCALES, PROFILE, chamberSkin, type Chamber } from "./build";
 
 export const FOG_COLOR = new Color(0.085, 0.012, 0.075);
@@ -13,6 +13,31 @@ export interface Shared {
 export function createShared(): Shared {
   return { uTime: { value: 0 }, uFog: { value: FOG_COLOR }, uFogD: { value: FOG_DENSITY } };
 }
+
+/** how many mushrooms one cell of the floor's light grid can list (creatures.ts) */
+export const SHROOM_SLOTS = 12;
+
+/** the mushrooms' light on the floor: a grid in plan, SHROOM_SLOTS texels per cell (built in creatures.ts) */
+export interface ShroomLight {
+  tex: DataTexture;
+  /** x and z of the grid's corner, cells per unit */
+  grid: Vector4;
+  /** cells across x and z */
+  size: Vector2;
+}
+
+/** hand a floor material the mushrooms' light; until then (size 0) it reads none */
+export function setShroomLight(mat: ShaderMaterial, light: ShroomLight) {
+  mat.uniforms.uShroomTex!.value = light.tex;
+  mat.uniforms.uShroomGrid!.value.copy(light.grid);
+  mat.uniforms.uShroomSize!.value.copy(light.size);
+}
+
+const shroomUniforms = () => ({
+  uShroomTex: { value: null as DataTexture | null },
+  uShroomGrid: { value: new Vector4(0, 0, 0, 0) },
+  uShroomSize: { value: new Vector2(0, 0) },
+});
 
 const FOG_GLSL = /* glsl */ `
   uniform vec3 uFog;
@@ -102,6 +127,11 @@ const WALL_FRAG = /* glsl */ `
   #if POOL
     uniform vec3 uPool;     // the hoop's centre
     uniform vec2 uPoolN;    // the way its face looks, in plan
+  #endif
+  #if SHROOM
+    uniform sampler2D uShroomTex;
+    uniform vec4 uShroomGrid;
+    uniform vec2 uShroomSize;
   #endif
   ${FOG_GLSL}
   #if MODE == 1
@@ -267,6 +297,48 @@ const WALL_FRAG = /* glsl */ `
     float far = dist * dist / (dist * dist + 12.0);
     col += vec3(0.42, 0.05, 0.30) * graze * (0.05 + 0.16 * length(vGlow) + 0.2 * far / (1.0 + dist * dist / 60.0));
 
+    // --- what each mushroom does to the floor it stands on ----------------------------------------
+    // Its foot presses a small dark dot into the floor, the cap shades a wider ring round that, and
+    // the glowing gills throw a pool of its own colour round it, lit as a lamp hung under the cap
+    // would light it: brightest straight below, falling off with the square of the distance and the
+    // slant. The pools add up but saturate, so a whole grove glows and none outshines the hoop.
+    #if SHROOM
+      {
+        vec2 gc = (vW.xz - uShroomGrid.xy) * uShroomGrid.z;
+        // nothing reaches higher than the tallest's pool: walls and vaults skip the lookup
+        if (vH < 1.8 && gc.x >= 0.0 && gc.y >= 0.0 && gc.x < uShroomSize.x && gc.y < uShroomSize.y) {
+          ivec2 ci = ivec2(gc);
+          vec3 pool = vec3(0.0);
+          float shade = 1.0;
+          for (int k = 0; k < ${SHROOM_SLOTS}; k++) {
+            vec4 m = texelFetch(uShroomTex, ivec2(ci.x * ${SHROOM_SLOTS} + k, ci.y), 0);
+            if (m.w <= 0.0) break;
+            float hue = floor(m.w) - 1.0;
+            float h = fract(m.w) * 4.0;
+            vec3 rel = vW - m.xyz;
+            float R = 0.2 + 0.6 * h;
+            float d2 = dot(rel, rel);
+            if (d2 > R * R) continue;
+            float win = 1.0 - smoothstep(0.3 * R * R, R * R, d2);
+            float flat2 = dot(rel.xz, rel.xz);
+            float level = 1.0 - smoothstep(0.08 + 0.1 * h, 0.25 + 0.3 * h, abs(rel.y));
+            // the foot and the cap's shade
+            float foot = 0.065 * h + 0.025;
+            shade *= 1.0 - level * (0.7 * exp(-flat2 / (foot * foot)) + 0.22 * exp(-flat2 / (0.09 * h * h)));
+            // the gills' light
+            vec3 L = vec3(0.0, 0.8 * h, 0.0) - rel;
+            float l2 = dot(L, L);
+            float e = max(dot(nb, L), 0.0) * inversesqrt(l2) * (0.5 * h * h) / l2;
+            vec3 c = hue < 0.5 ? vec3(0.1, 1.0, 0.72) : hue < 1.5 ? vec3(0.75, 0.45, 1.0) : hue < 2.5 ? vec3(1.0, 0.62, 0.2) : vec3(1.0, 0.35, 0.55);
+            pool += c * (e * win);
+          }
+          col *= shade;
+          pool /= 1.0 + 1.6 * max(max(pool.r, pool.g), pool.b);
+          col += pool * 0.2 * (0.55 + 0.45 * shade) * (0.6 + 0.4 * groove);
+        }
+      }
+    #endif
+
     // --- the floor under the hoop ---------------------------------------------------------------
     // The hoop hangs a hand's width above the floor and glows: its mint pools round it, the daylight
     // of the world inside it spills out of both faces and fans out, and the strip right under the band
@@ -326,6 +398,8 @@ interface WallOptions {
   ring?: [number, number, number];
   /** the hoop's centre: the floor round it is lit by it (see "the floor under the hoop" in WALL_FRAG) */
   pool?: Vector3;
+  /** the mushrooms light it (see SHROOM in WALL_FRAG; the light itself comes later, from setShroomLight) */
+  shrooms?: boolean;
 }
 
 function wallUniforms(shared: Shared, o: WallOptions) {
@@ -347,10 +421,12 @@ function wallUniforms(shared: Shared, o: WallOptions) {
  */
 export function createTrimMaterial(shared: Shared, o: WallOptions) {
   return new ShaderMaterial({
-    defines: { MODE: 0, SKIN: 0, POOL: o.pool ? 1 : 0 },
-    uniforms: o.pool
-      ? { ...wallUniforms(shared, o), uPool: { value: o.pool.clone() }, uPoolN: { value: new Vector2(0, 1) } }
-      : wallUniforms(shared, o),
+    defines: { MODE: 0, SKIN: 0, POOL: o.pool ? 1 : 0, SHROOM: o.shrooms ? 1 : 0 },
+    uniforms: {
+      ...wallUniforms(shared, o),
+      ...(o.pool ? { uPool: { value: o.pool.clone() }, uPoolN: { value: new Vector2(0, 1) } } : {}),
+      ...(o.shrooms ? shroomUniforms() : {}),
+    },
     vertexShader: WALL_VERT,
     fragmentShader: WALL_FRAG,
     side: DoubleSide,
@@ -360,8 +436,9 @@ export function createTrimMaterial(shared: Shared, o: WallOptions) {
 /** corridor walls: cut away wherever they reach into a chamber */
 export function createCorridorMaterial(shared: Shared, chambers: Chamber[]) {
   return new ShaderMaterial({
-    defines: { MODE: 1, SKIN: 1, POOL: 0 },
+    defines: { MODE: 1, SKIN: 1, POOL: 0, SHROOM: 1 },
     uniforms: {
+      ...shroomUniforms(),
       ...wallUniforms(shared, { patScale: [2.1, 13.6], spotK: 13, hTop: 4.6, ring: [CORRIDOR_SCALES, 0, 0] }),
       // A hair larger than the chamber, whose shell is the plain spheroid round every doorway
       // (build.ts): the corridor ends just outside the wall, under the doorway's trim.
@@ -380,7 +457,7 @@ export function createChamberMaterial(shared: Shared, ch: Chamber) {
   const meridian = (ch.H * Math.PI) / 2 + ch.yc;
   const skin = chamberSkin(ch);
   return new ShaderMaterial({
-    defines: { MODE: 2, SKIN: 1, POOL: 0 },
+    defines: { MODE: 2, SKIN: 1, POOL: 0, SHROOM: 0 },
     uniforms: {
       ...wallUniforms(shared, {
         patScale: [(Math.PI * 2 * ch.R * 0.8) / ch.ridges, meridian],

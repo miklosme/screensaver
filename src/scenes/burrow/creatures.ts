@@ -1,17 +1,22 @@
 import {
   BufferAttribute,
   BufferGeometry,
+  DataTexture,
+  FloatType,
+  Group,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
-  LatheGeometry,
   Mesh,
+  NearestFilter,
+  RGBAFormat,
   ShaderMaterial,
   SphereGeometry,
   Vector2,
   Vector3,
+  Vector4,
 } from "three";
 import { HOOP, PROFILE, floorY, footRadius, troughY, wallRelief, type Chamber, type Station } from "./build";
-import type { Shared } from "./materials";
+import { SHROOM_SLOTS, type Shared, type ShroomLight } from "./materials";
 
 /**
  * What grows in the burrow: eyes set in the walls, asleep until the traveller's lantern comes
@@ -311,35 +316,112 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
     }
   }
 
-  const shroomGeo = new InstancedBufferGeometry();
-  {
-    const base: BufferGeometry = new LatheGeometry(
-      [
-        [0.055, 0],
-        [0.036, 0.5],
-        [0.03, 0.86],
-        [0.1, 0.8],
-        [0.3, 0.84],
-        [0.33, 0.9],
-        [0.27, 1.02],
-        [0.15, 1.13],
-        [0, 1.17],
-      ].map(([x, y]) => new Vector2(x, y)),
-      18,
-    );
-    shroomGeo.index = base.index;
-    shroomGeo.setAttribute("position", base.getAttribute("position"));
-    shroomGeo.setAttribute("normal", base.getAttribute("normal"));
-    shroomGeo.setAttribute("uv", base.getAttribute("uv") as BufferAttribute);
-    shroomGeo.setAttribute("aPos", new InstancedBufferAttribute(new Float32Array(shroomPos), 4));
-    shroomGeo.setAttribute("aLean", new InstancedBufferAttribute(new Float32Array(shroomLean), 4));
-    shroomGeo.instanceCount = shroomPos.length / 4;
+  // The mushroom, one unit tall: a dark foot buried in the floor, a tapering stalk, the gilled
+  // underside and a domed cap with a thick, rolled rim. Each run of points is smooth; the joins
+  // between them (stalk to gills, gills to rim) are creases. [radius, height] up the profile.
+  const FOOT_STALK = [
+    [0.105, -0.05], [0.1, 0.0], [0.088, 0.035], [0.07, 0.07],
+    [0.062, 0.12], [0.056, 0.22], [0.051, 0.34], [0.046, 0.46], [0.041, 0.58], [0.037, 0.69], [0.034, 0.78], [0.034, 0.835],
+  ];
+  const GILLS = [[0.034, 0.845], [0.09, 0.835], [0.16, 0.822], [0.23, 0.818], [0.285, 0.828], [0.318, 0.848]];
+  const CAP = [
+    [0.318, 0.848], [0.333, 0.862], [0.342, 0.885], [0.341, 0.91], [0.33, 0.94], [0.31, 0.975], [0.283, 1.012], [0.25, 1.048],
+    [0.21, 1.083], [0.165, 1.113], [0.115, 1.138], [0.06, 1.155], [0.0, 1.162],
+  ];
+  /** a lathe with creases: parts 0 foot, 1 stalk, 2 gills, 3 cap; uv = (round, along the part) */
+  const shroomLathe = (radial: number, coarse: boolean) => {
+    const pick = (pts: number[][], keep: (i: number) => boolean) => pts.filter((_, i) => i === 0 || i === pts.length - 1 || keep(i));
+    const chains: { pts: number[][]; part: (i: number, n: number) => number }[] = [
+      { pts: coarse ? pick(FOOT_STALK, (i) => i < 4 || i % 2 === 1) : FOOT_STALK, part: (i) => (i < 3 ? 0 : 1) },
+      { pts: coarse ? pick(GILLS, (i) => i % 2 === 0) : GILLS, part: () => 2 },
+      { pts: coarse ? pick(CAP, (i) => i % 2 === 0 || i < 4) : CAP, part: () => 3 },
+    ];
+    const pos: number[] = [];
+    const nor: number[] = [];
+    const uvs: number[] = [];
+    const parts: number[] = [];
+    const idx: number[] = [];
+    for (const ch of chains) {
+      const pts = ch.pts;
+      const n = pts.length;
+      // arc length along the chain, for the part's own coordinate
+      const arc = [0];
+      for (let i = 1; i < n; i++) arc.push(arc[i - 1]! + Math.hypot(pts[i]![0]! - pts[i - 1]![0]!, pts[i]![1]! - pts[i - 1]![1]!));
+      const base = pos.length / 3;
+      for (let i = 0; i < n; i++) {
+        const a = pts[Math.max(0, i - 1)]!;
+        const b = pts[Math.min(n - 1, i + 1)]!;
+        let nr = b[1]! - a[1]!;
+        let ny = -(b[0]! - a[0]!);
+        const l = Math.hypot(nr, ny) || 1;
+        nr /= l;
+        ny /= l;
+        const [r, y] = pts[i] as [number, number];
+        for (let j = 0; j <= radial; j++) {
+          const th = (j / radial) * Math.PI * 2;
+          const s = Math.sin(th);
+          const c = Math.cos(th);
+          pos.push(r * s, y, r * c);
+          nor.push(nr * s, ny, nr * c);
+          uvs.push(j / radial, arc[i]! / arc[n - 1]!);
+          parts.push(ch.part(i, n));
+        }
+      }
+      for (let i = 0; i < n - 1; i++)
+        for (let j = 0; j < radial; j++) {
+          const a = base + i * (radial + 1) + j;
+          const b = a + radial + 1;
+          idx.push(a, a + 1, b, b, a + 1, b + 1);
+        }
+    }
+    const g = new BufferGeometry();
+    g.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
+    g.setAttribute("normal", new BufferAttribute(new Float32Array(nor), 3));
+    g.setAttribute("uv", new BufferAttribute(new Float32Array(uvs), 2));
+    g.setAttribute("part", new BufferAttribute(new Float32Array(parts), 1));
+    g.setIndex(idx);
+    return g;
+  };
+
+  // Those that come close to the lens get the fine lathe; the rest, never more than a thumb's width
+  // on screen, the coarse one.
+  const nShroom = shroomPos.length / 4;
+  const near: number[] = [];
+  const far: number[] = [];
+  for (let i = 0; i < nShroom; i++) {
+    const x = shroomPos[i * 4]!;
+    const z = shroomPos[i * 4 + 2]!;
+    let d2 = Infinity;
+    for (const q of route) d2 = Math.min(d2, (q.x - x) ** 2 + (q.z - z) ** 2);
+    (shroomPos[i * 4 + 3]! / Math.max(0.4, Math.sqrt(d2)) > 0.3 ? near : far).push(i);
   }
+  const shroomGeos = [
+    { ids: near, base: shroomLathe(40, false) },
+    { ids: far, base: shroomLathe(13, true) },
+  ].map(({ ids, base }) => {
+    const g = new InstancedBufferGeometry();
+    g.index = base.index;
+    for (const a of ["position", "normal", "uv", "part"]) g.setAttribute(a, base.getAttribute(a));
+    const P = new Float32Array(ids.length * 4);
+    const L = new Float32Array(ids.length * 4);
+    ids.forEach((id, k) => {
+      for (let c = 0; c < 4; c++) {
+        P[k * 4 + c] = shroomPos[id * 4 + c]!;
+        L[k * 4 + c] = shroomLean[id * 4 + c]!;
+      }
+    });
+    g.setAttribute("aPos", new InstancedBufferAttribute(P, 4));
+    g.setAttribute("aLean", new InstancedBufferAttribute(L, 4));
+    g.instanceCount = ids.length;
+    return g;
+  });
+
   const shroomMat = new ShaderMaterial({
     uniforms: { ...shared },
     vertexShader: /* glsl */ `
       attribute vec4 aPos;
       attribute vec4 aLean;
+      attribute float part;
       uniform float uTime;
       varying vec3 vW;
       varying vec3 vN;
@@ -347,18 +429,38 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       varying float vY;
       varying float vHue;
       varying float vPhase;
+      varying float vPart;
+      const float TOP = 0.84;   // where the stalk meets the cap
       void main() {
-        vec3 p = position * aPos.w;
-        // stalks lean out from the wall and nod in a draught that is not there
-        float bend = position.y * position.y;
-        vec2 nod = aLean.xy + 0.09 * vec2(sin(uTime * 0.9 + aLean.z), cos(uTime * 0.7 + aLean.z * 1.7));
-        p.xz += nod * bend * aPos.w;
+        vec3 q = position;
+        vec3 nn = normal;
+        float th = uv.x * 6.2831853;
+        float ph = aLean.z;
+        // the cap is not quite round: its rim waves a little in and out, and up and down
+        if (part > 1.5) {
+          float r = length(q.xz);
+          float w = smoothstep(0.08, 0.33, r);
+          q.xz *= 1.0 + w * (0.045 * sin(3.0 * th + ph) + 0.03 * sin(5.0 * th + 2.0 * ph + 1.0));
+          q.y += 0.04 * w * w * sin(4.0 * th + ph * 1.3);
+        }
+        // the stalk bends: an S from the ground to the cap, the way the family leans, and a nod
+        // in a draught that is not there. The cap rides on the top of the stalk, tilted with it.
+        float ys = min(q.y, TOP);
+        vec2 curl = vec2(cos(ph * 3.1), sin(ph * 3.1)) * (0.04 + 0.07 * fract(ph * 5.3));
+        vec2 nod = aLean.xy + 0.09 * vec2(sin(uTime * 0.9 + ph), cos(uTime * 0.7 + ph * 1.7));
+        vec2 off = nod * ys * ys + curl * 0.5 * (1.0 - cos(3.14159265 * ys / TOP));
+        vec2 tilt = 2.0 * TOP * nod;
+        off += tilt * max(q.y - TOP, 0.0);
+        q.xz += off;
+        if (q.y > TOP - 0.02) nn.y -= dot(tilt, nn.xz);
+        vec3 p = q * aPos.w;
         vW = aPos.xyz + p;
-        vN = normal;
+        vN = normalize(nn);
         vUv = uv;
         vY = position.y;
         vHue = aLean.w;
-        vPhase = aLean.z;
+        vPhase = ph;
+        vPart = part;
         gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
       }`,
     fragmentShader: /* glsl */ `
@@ -370,36 +472,150 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       varying float vY;
       varying float vHue;
       varying float vPhase;
+      varying float vPart;
       float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
       void main() {
         vec3 V = cameraPosition - vW;
         float dist = length(V);
         V /= dist;
         vec3 n = normalize(vN);
-        float ndv = abs(dot(n, V));
+        if (!gl_FrontFacing) n = -n;
+        float ndv = clamp(dot(n, V), 0.0, 1.0);
         vec3 glow = vHue < 0.55 ? vec3(0.1, 1.0, 0.72) : vHue < 0.8 ? vec3(0.75, 0.45, 1.0) : vHue < 0.93 ? vec3(1.0, 0.62, 0.2) : vec3(1.0, 0.35, 0.55);
         float breathe = 0.7 + 0.3 * sin(uTime * 1.3 + vPhase);
-        // the lathe's v runs up the profile: stalk, then the gilled underside, then the cap
-        float cap = smoothstep(0.52, 0.58, vUv.y);
-        float gills = step(0.27, vUv.y) * (1.0 - cap);
-        // stalk: pale, lit from the cap above
-        vec3 col = mix(vec3(0.5, 0.2, 0.3), glow * 0.5 + 0.25, smoothstep(0.2, 0.86, vY) * 0.6) * (0.3 + 0.4 * ndv);
-        // underside: bright ribbed gills
-        col = mix(col, glow * (0.9 + 0.5 * sin(vUv.x * 150.0)) * breathe, gills);
-        // cap: translucent, with pale spots, brightest at the rim
-        vec2 sg = vec2(vUv.x * 9.0, vY * 16.0);
-        float spot = smoothstep(0.3, 0.2, length(fract(sg) - 0.5)) * step(0.45, hash(floor(sg) + floor(vPhase * 10.0)));
-        vec3 capCol = glow * (0.42 + 0.75 * pow(1.0 - ndv, 1.5)) * breathe;
-        capCol = mix(capCol, vec3(1.0, 0.97, 0.9) * (0.6 + 0.4 * breathe), spot * 0.85);
-        col = mix(col, capCol, cap);
+        vec3 col;
+        if (vPart < 1.5) {
+          // the stalk: pale and fibrous, in the shade at the bottom, lit by the gills at the top and
+          // a little of the cap's colour through it; the foot it stands on is dark and wet
+          float fx = vUv.x * 26.0;
+          float fib = 0.86 + 0.14 * sin(6.2831853 * fx + 2.6 * sin(vY * 13.0 + vUv.x * 37.0 + vPhase));
+          fib = mix(fib, 0.93, smoothstep(0.25, 0.6, fwidth(fx)));
+          float up = smoothstep(0.08, 0.84, vY);
+          vec3 stalk = vec3(0.9, 0.7, 0.72) * (0.16 + 0.36 * ndv) * fib * (0.35 + 0.65 * up);
+          stalk += glow * (0.03 + 0.32 * up * up * up) * breathe * (0.8 + 0.2 * fib);
+          vec3 foot = vec3(0.06, 0.016, 0.06) * (0.6 + 0.6 * ndv) + glow * 0.025;
+          col = mix(foot, stalk, smoothstep(0.2, 0.95, vPart));
+        } else if (vPart < 2.5) {
+          // the underside: radial gills, and between every two a shorter one from halfway out. Their
+          // edges glow, brightest towards the rim; the slots between them are deep.
+          float g = vUv.y;
+          float x = vUv.x * 60.0;
+          float fw = fwidth(x);
+          float line = 1.0 - smoothstep(0.07, 0.07 + 1.3 * fw, abs(fract(x) - 0.5));
+          float x2 = x + 0.5;
+          float line2 = (1.0 - smoothstep(0.06, 0.06 + 1.3 * fw, abs(fract(x2) - 0.5))) * smoothstep(0.4, 0.55, g);
+          float lines = max(line, line2 * 0.8);
+          lines = mix(lines, 0.22 + 0.1 * g, smoothstep(0.35, 0.8, fw));
+          col = glow * (0.06 + 0.16 * g) + glow * lines * (0.35 + 1.15 * g * g) * breathe;
+          col *= smoothstep(0.0, 0.12, g) * 0.75 + 0.25;
+        } else {
+          // the cap: its own light, deeper where it is thick at the crown, coming through where it
+          // is thin at the rolled rim; pale spots soft at the edge and set into it
+          float s = vUv.y;                       // 0 at the rim's underside, 1 at the crown
+          float thin = 1.0 - smoothstep(0.02, 0.32, s);
+          float t = 1.0 - s;                     // 0 at the crown
+          vec3 body = glow * (0.26 + 0.2 * ndv + 0.12 * thin) * breathe;
+          body += glow * 0.5 * pow(1.0 - ndv, 2.0) * breathe;
+          // the spots: rows round the crown, few at the top and more towards the rim
+          float rows = 5.0;
+          float ri = floor(t * rows);
+          float spot = 0.0;
+          float rad = 0.34 * sin(min(t * 1.4, 1.0) * 1.5707963);
+          // a pixel's size in the spots' own units, for soft edges that never alias
+          float aa = length(vec2(fwidth(vUv.x) * 6.2831853 * rad, fwidth(t) * 0.45));
+          for (int di = -1; di <= 1; di++) {
+            float row = ri + float(di);
+            if (row < 0.0 || row > rows - 1.0) continue;
+            float nr = 1.0 + 6.0 * row;
+            float j0 = floor(vUv.x * nr);
+            for (int dj = -1; dj <= 1; dj++) {
+              float j = mod(j0 + float(dj), nr);
+              vec2 id = vec2(j, row) + floor(vPhase * 10.0) * 7.0;
+              float h1 = hash(id);
+              if (h1 < 0.3) continue;
+              float h2 = hash(id + 13.1);
+              float uc = (j + 0.5 + 0.6 * (h1 - 0.65)) / nr;
+              float tc = (row + 0.5 + 0.5 * (h2 - 0.5)) / rows;
+              float du = fract(vUv.x - uc + 0.5) - 0.5;
+              vec2 d = vec2(du * 6.2831853 * rad, (t - tc) * 0.45);
+              float rs = 0.018 + 0.026 * hash(id + 5.7);
+              float e = length(d);
+              spot = max(spot, 1.0 - smoothstep(0.45 * rs, rs + aa, e));
+            }
+          }
+          spot *= smoothstep(0.12, 0.3, s);
+          vec3 spotCol = mix(vec3(1.0, 0.95, 0.88), glow, 0.25) * (0.35 + 0.45 * ndv) * (0.75 + 0.25 * breathe);
+          col = mix(body, spotCol, spot * 0.9);
+          // the rim lets the light through
+          col += glow * (0.55 + 0.6 * (1.0 - ndv)) * thin * thin * breathe;
+          // and the wet crown catches the lantern
+          float s2 = ndv * ndv, s4 = s2 * s2, s16 = s4 * s4 * s4 * s4;
+          col += vec3(1.0, 0.92, 0.9) * s16 * s16 * 0.18 * (1.0 - spot);
+        }
         col = mix(col, uFog, fogAmount(dist));
         gl_FragColor = vec4(col, 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }`,
   });
-  const shrooms = new Mesh(shroomGeo, shroomMat);
-  shrooms.frustumCulled = false;
+  const shrooms = new Group();
+  for (const g of shroomGeos) {
+    const m = new Mesh(g, shroomMat);
+    m.frustumCulled = false;
+    shrooms.add(m);
+  }
+
+  // --- the light they throw on the floor --------------------------------------------------------
+  // A grid in plan over every mushroom's reach: each cell lists the mushrooms that can light it,
+  // biggest first, as (foot x, foot y, foot z, 1 + colour + height / 4). The floor's shader reads
+  // its cell (materials.ts, SHROOM) and adds a small pool of each one's colour and its dark foot.
+  const CELL = 0.5;
+  const K = SHROOM_SLOTS;
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  const reach = (h: number) => 0.25 + 0.75 * h;
+  for (let i = 0; i < nShroom; i++) {
+    const R = reach(shroomPos[i * 4 + 3]!);
+    x0 = Math.min(x0, shroomPos[i * 4]! - R);
+    x1 = Math.max(x1, shroomPos[i * 4]! + R);
+    z0 = Math.min(z0, shroomPos[i * 4 + 2]! - R);
+    z1 = Math.max(z1, shroomPos[i * 4 + 2]! + R);
+  }
+  const gw = Math.ceil((x1 - x0) / CELL) + 1;
+  const gh = Math.ceil((z1 - z0) / CELL) + 1;
+  const cells: number[][] = Array.from({ length: gw * gh }, () => []);
+  for (let i = 0; i < nShroom; i++) {
+    const x = shroomPos[i * 4]!;
+    const z = shroomPos[i * 4 + 2]!;
+    const R = reach(shroomPos[i * 4 + 3]!);
+    for (let gx = Math.floor((x - R - x0) / CELL); gx <= Math.floor((x + R - x0) / CELL); gx++)
+      for (let gz = Math.floor((z - R - z0) / CELL); gz <= Math.floor((z + R - z0) / CELL); gz++) {
+        // only if the reach touches the cell
+        const cx = Math.min(Math.max(x, x0 + gx * CELL), x0 + (gx + 1) * CELL);
+        const cz = Math.min(Math.max(z, z0 + gz * CELL), z0 + (gz + 1) * CELL);
+        if ((cx - x) ** 2 + (cz - z) ** 2 < R * R) cells[gz * gw + gx]!.push(i);
+      }
+  }
+  const lightData = new Float32Array(gw * K * gh * 4);
+  const hueIndex = (u: number) => (u < 0.55 ? 0 : u < 0.8 ? 1 : u < 0.93 ? 2 : 3);
+  cells.forEach((list, c) => {
+    list.sort((a, b) => shroomPos[b * 4 + 3]! - shroomPos[a * 4 + 3]!);
+    const gx = c % gw;
+    const gz = Math.floor(c / gw);
+    for (let k = 0; k < Math.min(K, list.length); k++) {
+      const i = list[k]!;
+      const o = (gz * gw * K + gx * K + k) * 4;
+      lightData[o] = shroomPos[i * 4]!;
+      lightData[o + 1] = shroomPos[i * 4 + 1]!;
+      lightData[o + 2] = shroomPos[i * 4 + 2]!;
+      lightData[o + 3] = 1 + hueIndex(shroomLean[i * 4 + 3]!) + Math.min(shroomPos[i * 4 + 3]!, 3.9) / 4;
+    }
+  });
+  const lightTex = new DataTexture(lightData, gw * K, gh, RGBAFormat, FloatType);
+  lightTex.minFilter = NearestFilter;
+  lightTex.magFilter = NearestFilter;
+  lightTex.generateMipmaps = false;
+  lightTex.needsUpdate = true;
+  const shroomLight: ShroomLight = { tex: lightTex, grid: new Vector4(x0, z0, 1 / CELL, 0), size: new Vector2(gw, gh) };
 
   return {
     eyes,
@@ -408,11 +624,14 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
     eyeSpots: { pos: eyePos, axis: eyeAxis },
     /** foot + height, and lean + phase + hue, of every mushroom: four numbers each */
     shroomSpots: { pos: shroomPos, lean: shroomLean },
+    /** where their light falls: for the floor's shader (setShroomLight in materials.ts) */
+    shroomLight,
     dispose() {
       eyeGeo.dispose();
       eyeMat.dispose();
-      shroomGeo.dispose();
+      for (const g of shroomGeos) g.dispose();
       shroomMat.dispose();
+      lightTex.dispose();
     },
   };
 }
