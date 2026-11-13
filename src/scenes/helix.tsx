@@ -934,10 +934,8 @@ const CAUSTIC_FN_GLSL = /* glsl */ `
         float hxGyrRidge(vec3 p) {
           float g = dot(sin(p), cos(p.yzx));
           float fw = fwidth(g) + 1e-4;
-          float w = 0.22 + fw;
-          float soft = exp(-g * g / (w * w * 2.0));                // a broad glow either side
-          float core = 1.0 - smoothstep(0.0, 0.07 + fw * 1.2, abs(g)); // the bright thread inside it
-          return (0.72 * soft + 0.28 * core * core) * (1.0 - smoothstep(0.15, 0.5, fw));
+          float w = 0.42 + fw;                                       // broad and soft: no bright thread
+          return exp(-g * g / (w * w * 2.0)) * (1.0 - smoothstep(0.12, 0.4, fw));
         }
         /** two ridge networks, .x teal-white and .y the amber one */
         vec2 hxCaustic(vec3 w, float t) {
@@ -956,11 +954,13 @@ const causticGlsl = (detail: Detail) => {
     keyhole: "0.3",
   };
   const near: Partial<Record<Detail, string>> = {
-    stair: "1.0 - smoothstep(8.0, 24.0, dist)",
-    column: "1.0 - smoothstep(10.0, 28.0, dist)",
-    wall: "1.0 - smoothstep(22.0, 40.0, dist)",
+    stair: "1.0 - smoothstep(4.0, 15.0, dist)",
+    column: "1.0 - smoothstep(3.0, 12.0, dist)",
+    wall: "1.0 - smoothstep(8.0, 22.0, dist)",
     keyhole: "1.0 - smoothstep(10.0, 30.0, dist)",
   };
+  /** the newel is close and lit flat, so it needs more than the soffit to show the same soft lift */
+  const gain: Partial<Record<Detail, string>> = { stair: "0.2", column: "0.3", wall: "0.18", keyhole: "0.18" };
   if (!face[detail]) return "";
   return /* glsl */ `
           {
@@ -972,7 +972,7 @@ const causticGlsl = (detail: Detail) => {
             if (k > 0.004) {
               vec2 c = hxCaustic(vHxW, uHxT);
               vec3 tint = vec3(0.55, 0.95, 0.9) * c.x + vec3(0.95, 0.62, 0.3) * 0.45 * c.y;
-              hxGlow += diffuseColor.rgb * tint * 0.26 * k;
+              hxGlow += diffuseColor.rgb * tint * ${gain[detail]} * k;          // a soft lift of the stone, read second
             }
           }`;
 };
