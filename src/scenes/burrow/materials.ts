@@ -99,6 +99,10 @@ const WALL_FRAG = /* glsl */ `
   uniform float uRidgeAll;  // > 0 paints the whole surface in the ridge colour (trims)
   uniform float uSpotGain;
   uniform float uRidgeAmt;
+  #if POOL
+    uniform vec3 uPool;     // the hoop's centre
+    uniform vec2 uPoolN;    // the way its face looks, in plan
+  #endif
   ${FOG_GLSL}
   #if MODE == 1
     uniform vec4 uCh[3];
@@ -263,6 +267,33 @@ const WALL_FRAG = /* glsl */ `
     float far = dist * dist / (dist * dist + 12.0);
     col += vec3(0.42, 0.05, 0.30) * graze * (0.05 + 0.16 * length(vGlow) + 0.2 * far / (1.0 + dist * dist / 60.0));
 
+    // --- the floor under the hoop ---------------------------------------------------------------
+    // The hoop hangs a hand's width above the floor and glows: its mint pools round it, the daylight
+    // of the world inside it spills out of both faces and fans out, and the strip right under the band
+    // is in its shade. The floor is wet, so all of it rides the ripples: the flank of a ripple that
+    // faces the hoop carries a line of its light. Nothing of it reaches past the dome.
+    #if POOL
+      vec2 dp = vW.xz - uPool.xz;
+      float d2 = dot(dp, dp);
+      float reach = 1.0 - smoothstep(36.0, 72.0, d2);
+      if (reach > 0.0) {
+        float across = dot(dp, uPoolN);
+        float along = dp.x * uPoolN.y - dp.y * uPoolN.x;
+        float under = exp(-across * across / 0.08) * (1.0 - smoothstep(1.2, 2.1, abs(along)));
+        float mint = 1.0 / (1.0 + d2 / 5.0);
+        float x = abs(across);
+        float fan = 1.15 + 0.55 * x;
+        float day = x / (x + 0.45) * exp(-x / 2.3) * exp(-along * along / (fan * fan));
+        // the ripples: lit on the flank towards the hoop, and a glint along it
+        float flank = 1.0 - 4.5 * q * exp(-q * q / 0.04);
+        float glint = exp(-(q + 0.085) * (q + 0.085) / 0.003);
+        vec3 pool = vec3(0.0, 0.7, 0.47) * (mint * mint * 0.8) + vec3(1.3, 0.6, 0.2) * (day * 0.32);
+        pool = pool * flank * (0.4 + 0.6 * groove) + vec3(0.1, 1.3, 0.95) * (glint * mint * mint * 0.3) + vec3(1.5, 0.9, 0.5) * (glint * day * 0.15);
+        col *= 1.0 - 0.6 * under * reach;
+        col += pool * ((1.0 - 0.85 * under) * open * reach);
+      }
+    #endif
+
     // bioluminescent pores along the ribs; a slow wave of light runs ahead along the route
     float row2 = vPat.y * uSpotK;
     vec2 cell = vec2(floor(vPat.x), floor(row2));
@@ -293,6 +324,8 @@ interface WallOptions {
   ridgeAmt?: number;
   /** scales round a ring; for a dome also the latitude of ring 0 and the step per ring */
   ring?: [number, number, number];
+  /** the hoop's centre: the floor round it is lit by it (see "the floor under the hoop" in WALL_FRAG) */
+  pool?: Vector3;
 }
 
 function wallUniforms(shared: Shared, o: WallOptions) {
@@ -308,11 +341,16 @@ function wallUniforms(shared: Shared, o: WallOptions) {
   };
 }
 
-/** plain surface (floors, trims) */
+/**
+ * plain surface (floors, trims). Given `pool`, it is the floor the hoop stands over: `uPoolN` is the
+ * way the hoop's face looks in plan, which the scene writes every frame as the hoop turns.
+ */
 export function createTrimMaterial(shared: Shared, o: WallOptions) {
   return new ShaderMaterial({
-    defines: { MODE: 0, SKIN: 0 },
-    uniforms: wallUniforms(shared, o),
+    defines: { MODE: 0, SKIN: 0, POOL: o.pool ? 1 : 0 },
+    uniforms: o.pool
+      ? { ...wallUniforms(shared, o), uPool: { value: o.pool.clone() }, uPoolN: { value: new Vector2(0, 1) } }
+      : wallUniforms(shared, o),
     vertexShader: WALL_VERT,
     fragmentShader: WALL_FRAG,
     side: DoubleSide,
@@ -322,7 +360,7 @@ export function createTrimMaterial(shared: Shared, o: WallOptions) {
 /** corridor walls: cut away wherever they reach into a chamber */
 export function createCorridorMaterial(shared: Shared, chambers: Chamber[]) {
   return new ShaderMaterial({
-    defines: { MODE: 1, SKIN: 1 },
+    defines: { MODE: 1, SKIN: 1, POOL: 0 },
     uniforms: {
       ...wallUniforms(shared, { patScale: [2.1, 13.6], spotK: 13, hTop: 4.6, ring: [CORRIDOR_SCALES, 0, 0] }),
       // A hair larger than the chamber, whose shell is the plain spheroid round every doorway
@@ -342,7 +380,7 @@ export function createChamberMaterial(shared: Shared, ch: Chamber) {
   const meridian = (ch.H * Math.PI) / 2 + ch.yc;
   const skin = chamberSkin(ch);
   return new ShaderMaterial({
-    defines: { MODE: 2, SKIN: 1 },
+    defines: { MODE: 2, SKIN: 1, POOL: 0 },
     uniforms: {
       ...wallUniforms(shared, {
         patScale: [(Math.PI * 2 * ch.R * 0.8) / ch.ridges, meridian],
