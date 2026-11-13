@@ -996,6 +996,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
           return mix(vec3(1.05, 1.0, 0.94), vec3(0.97, 0.88, 0.8), hxBed);
         }
         ${detail === "column" ? stairAoGlsl() : ""}
+        ${detail === "wall" ? beamGlsl() : ""}
         /** 1 on a line of half width 0.035 at distance d from it, antialiased over px */
         float hxLine(float d, float px) { return 1.0 - smoothstep(0.035, 0.035 + px, d); }
         float hxBand(float x, float a, float b, float px) { return smoothstep(a - px, a + px, x) * (1.0 - smoothstep(b - px, b + px, x)); }
@@ -1014,7 +1015,7 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             vec3 grad = sign(det) * (dFdx(hxH) * r1 + dFdy(hxH) * r2);
             normal = normalize(abs(det) * normal - grad);
           }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (POOLED.includes(detail) ? poolGlsl(detail) : "")
-          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : "") + (detail === "rail" ? RAIL_SHEEN_GLSL : ""),
+          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : "") + (detail === "rail" ? RAIL_SHEEN_GLSL : "") + (detail === "wall" ? BEAM_LIT_GLSL : ""),
       )
       .replace(
         "#include <tonemapping_fragment>",
@@ -1071,6 +1072,10 @@ interface Assets {
   wallMat: MeshLambertMaterial;
   stairMat: MeshLambertMaterial;
   koi: Koi;
+  beams: BufferGeometry;
+  beamMat: ShaderMaterial;
+  dust: BufferGeometry;
+  dustMat: ShaderMaterial;
   glow: MeshBasicMaterial;
   skyMat: ShaderMaterial;
   pointsMat: ShaderMaterial;
@@ -1080,6 +1085,234 @@ interface Assets {
   satellites: Satellite[];
   doorPos: Vector3;
   doorYaw: number;
+}
+
+/**
+ * Shafts of light. Each pours in through one arcade opening high on the wall and slants down across
+ * the shaft to land on the far wall, along a chord that stays at least 22 m from the axis: outside
+ * the stair, its landing and the fly-in, so the camera never comes within 13 m of one, and clear of
+ * the staircases that hang inside the shaft. None crosses in front of the door on the final
+ * approach. The koi swim through them.
+ * [azimuth, height above the landing] where it enters, then the same where it lands. The entry is
+ * moved to the middle of the nearest opening, the landing to the nearest pier under a cornice.
+ * Before moving one, check it against the camera's track and the satellites: both are easy to hit.
+ */
+const BEAMS: [number, number, number, number][] = [
+  [-0.785, 3.4, 1.117, -27.6], // behind the tower in the opening frames; its mouth is left of the door
+  [3.211, 28.4, 1.309, -2.6], // lands ahead of the camera half way up the climb
+  [-1.449, 46.7, -0.604, 24], // higher up and parallel to the first, as if one sun stood behind both
+];
+const BEAM_R0 = 2.8; // radius where it enters: it fits the opening
+const BEAM_R1 = 4.8; // and where it lands
+/** each shaft's axis, from the wall's inner face where it enters; filled in by getAssets */
+interface Beam { a: Vector3; dir: Vector3; len: number }
+const hxBeams: Beam[] = [];
+
+function buildBeams(hend: number) {
+  /** a point on the wall's inner face: the middle of an opening, or a pier at the cornice */
+  const onWall = (az: number, y: number, pier: boolean) => {
+    const turn = (az * WALL_N) / TAU;
+    const phi0 = ((pier ? Math.round(turn - 0.5) + 0.5 : Math.round(turn)) * TAU) / WALL_N;
+    const phi = Math.atan2(Math.sin(phi0), Math.cos(phi0));
+    const local = (pier ? 12.3 : 7.3) + WALL_C * phi; // the arcade is a helix: its tiers shift with azimuth
+    return new Vector3(WALL_R * Math.cos(phi), local + WALL_H * Math.round((y - local) / WALL_H), WALL_R * Math.sin(phi));
+  };
+  hxBeams.length = 0;
+  for (const [az0, y0, az1, y1] of BEAMS) {
+    const a = onWall(az0, hend + y0, false);
+    const dir = onWall(az1, hend + y1, true).sub(a);
+    const len = dir.length();
+    hxBeams.push({ a, dir: dir.normalize(), len });
+  }
+}
+
+const glv = (v: Vector3) => `vec3(${glf(v.x)}, ${glf(v.y)}, ${glf(v.z)})`;
+/** how far outside the wall a shaft starts, and how far behind the far wall it ends */
+const BEAM_LEAD = 8;
+const BEAM_TAIL = 4;
+/**
+ * `hxBeam(w)`: how deep the world point w lies in a shaft of light, 0..1. `hxBeamLit(w, n)` is the
+ * same for a surface with world normal n, which the light has to reach. Called at compile time,
+ * after getAssets has laid the shafts out.
+ */
+function beamGlsl(): string {
+  const one = (b: Beam, lit: boolean) => /* glsl */ `
+      {
+        vec3 q = w - ${glv(b.a)};
+        float s = dot(q, ${glv(b.dir)});
+        float rr = ${glf(BEAM_R0)} + ${glf((BEAM_R1 - BEAM_R0) / b.len)} * clamp(s, 0.0, ${glf(b.len)});
+        float f = 1.0 - (dot(q, q) - s * s) / (rr * rr);
+        if (f > 0.0 && s > ${glf(-BEAM_LEAD)} && s < ${glf(b.len + BEAM_TAIL)})
+          k += f * f * smoothstep(${glf(-BEAM_LEAD)}, 2.0, s)${lit ? ` * max(0.0, 0.2 - 0.8 * dot(n, ${glv(b.dir)}))` : ""};
+      }`;
+  return /* glsl */ `
+    float hxBeam(vec3 w) {
+      float k = 0.0;${hxBeams.map((b) => one(b, false)).join("")}
+      return k;
+    }
+    float hxBeamLit(vec3 w, vec3 n) {
+      float k = 0.0;${hxBeams.map((b) => one(b, true)).join("")}
+      return k;
+    }`;
+}
+/** the arcade's stone inside a shaft is lit by it: where one lands there is a warm soft ellipse */
+const BEAM_LIT_GLSL = /* glsl */ `
+          hxGlow += diffuseColor.rgb * vec3(1.0, 0.6, 0.27) * hxBeamLit(vHxW, normalize(vHxN));`;
+
+/**
+ * The light in the air: one open cone per shaft, drawn additively from outside only. It has no
+ * silhouette: the glow follows how squarely the cone's skin faces the eye, so it is gone at the
+ * rim and when a shaft is seen end-on; it fades in from the opening, thins all the way across and
+ * is gone behind the far wall; and it fades out near the lens. aBeam: metres along the shaft, its
+ * length, and the point's place on the unit circle round it.
+ */
+function beamGeometry(): BufferGeometry {
+  const SEG = 32;
+  const pos: number[] = [], nor: number[] = [], bm: number[] = [], idx: number[] = [];
+  const side = new Vector3(), up = new Vector3();
+  for (const { a, dir, len } of hxBeams) {
+    side.set(0, 1, 0).cross(dir).normalize();
+    up.copy(dir).cross(side).normalize();
+    const base = pos.length / 3;
+    for (let j = 0; j <= 1; j++) {
+      const s = j ? len + BEAM_TAIL : -BEAM_LEAD;
+      const r = j ? BEAM_R1 : BEAM_R0;
+      for (let i = 0; i <= SEG; i++) {
+        const th = (i / SEG) * TAU;
+        const c = Math.cos(th), sn = Math.sin(th);
+        const nx = side.x * c + up.x * sn, ny = side.y * c + up.y * sn, nz = side.z * c + up.z * sn;
+        pos.push(a.x + dir.x * s + nx * r, a.y + dir.y * s + ny * r, a.z + dir.z * s + nz * r);
+        nor.push(nx, ny, nz);
+        bm.push(s, len, c, sn);
+        if (j === 0 && i < SEG) idx.push(base + i, base + i + 1, base + SEG + 1 + i, base + i + 1, base + SEG + 2 + i, base + SEG + 1 + i);
+      }
+    }
+  }
+  const g = new BufferGeometry();
+  g.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute("normal", new BufferAttribute(new Float32Array(nor), 3));
+  g.setAttribute("aBeam", new BufferAttribute(new Float32Array(bm), 4));
+  g.setIndex(idx);
+  return g;
+}
+/** how a shaft's light thins along its length s (metres from the opening), for a shaft `len` long */
+const BEAM_ALONG_GLSL = (s: string, len: string) =>
+  `smoothstep(-5.0, 11.0, ${s}) * mix(1.0, 0.4, smoothstep(0.0, ${len}, ${s})) * (1.0 - smoothstep(${len} - 3.0, ${len} + ${glf(BEAM_TAIL)}, ${s}))`;
+function beamMaterial(): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms: { uT: hxTime },
+    transparent: true,
+    depthWrite: false,
+    blending: AdditiveBlending,
+    fog: false,
+    vertexShader: /* glsl */ `
+      attribute vec4 aBeam;
+      varying vec3 vW;
+      varying vec3 vN;
+      varying vec4 vB;
+      void main() {
+        vW = position;
+        vN = normal;
+        vB = aBeam;
+        gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float uT;
+      varying vec3 vW;
+      varying vec3 vN;
+      varying vec4 vB;
+      void main() {
+        vec3 v = cameraPosition - vW;
+        float d = length(v);
+        float ndv = abs(dot(normalize(vN), v / d));
+        float body = ndv * ndv * (0.4 + 0.6 * ndv);
+        float s = vB.x;
+        float along = ${BEAM_ALONG_GLSL("s", "vB.y")};
+        float near = smoothstep(10.0, 32.0, d);
+        float fog = 1.0 - 0.85 * smoothstep(${glf(FOG_NEAR)}, ${glf(FOG_FAR)}, d);
+        // soft streaks that run the length of the shaft and wander slowly round it
+        float a = atan(vB.w, vB.z);
+        float streak = 0.74 + 0.17 * sin(a * 3.0 + uT * 0.21 + s * 0.03) + 0.09 * sin(a * 7.0 - uT * 0.16 + 1.3);
+        // and slow clouds of dust sinking down it
+        float cloud = 0.84 + 0.16 * sin(s * 0.31 - uT * 0.3 + 1.8 * sin(a + uT * 0.07));
+        gl_FragColor = vec4(vec3(1.0, 0.6, 0.26) * (0.62 * body * along * near * fog * streak * cloud), 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+/**
+ * Dust in the shafts: motes that only show where the light is, drifting slowly down each shaft
+ * and round it, twinkling. Everything is placed from the clock in the vertex shader.
+ * position: where its shaft enters; aRun: the shaft's whole run; aOff: its place across the shaft
+ * in units of the shaft's radius; aMote: start along the shaft 0..1, drift, phase, size.
+ */
+const DUST_PER_BEAM = 420;
+function dustGeometry(): BufferGeometry {
+  const rand = rng(977);
+  const pos: number[] = [], run: number[] = [], off: number[] = [], mote: number[] = [];
+  const side = new Vector3(), up = new Vector3();
+  for (const { a, dir, len } of hxBeams) {
+    side.set(0, 1, 0).cross(dir).normalize();
+    up.copy(dir).cross(side).normalize();
+    for (let i = 0; i < DUST_PER_BEAM; i++) {
+      const r = 0.95 * Math.sqrt(rand()), th = rand() * TAU;
+      const c = r * Math.cos(th), sn = r * Math.sin(th);
+      pos.push(a.x, a.y, a.z);
+      run.push(dir.x * len, dir.y * len, dir.z * len);
+      off.push(side.x * c + up.x * sn, side.y * c + up.y * sn, side.z * c + up.z * sn);
+      mote.push(rand(), (0.12 + 0.3 * rand()) / len, rand() * TAU, 0.05 + 0.09 * rand() * rand());
+    }
+  }
+  const g = new BufferGeometry();
+  g.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute("aRun", new BufferAttribute(new Float32Array(run), 3));
+  g.setAttribute("aOff", new BufferAttribute(new Float32Array(off), 3));
+  g.setAttribute("aMote", new BufferAttribute(new Float32Array(mote), 4));
+  return g;
+}
+function dustMaterial(uScale: { value: number }): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms: { uT: hxTime, uScale },
+    transparent: true,
+    depthWrite: false,
+    blending: AdditiveBlending,
+    fog: false,
+    vertexShader: /* glsl */ `
+      attribute vec3 aRun;
+      attribute vec3 aOff;
+      attribute vec4 aMote;
+      uniform float uT;
+      uniform float uScale;
+      varying float vA;
+      void main() {
+        float u = fract(aMote.x + uT * aMote.y);
+        float len = length(aRun);
+        float s = u * len;
+        float rr = ${glf(BEAM_R0)} + ${glf(BEAM_R1 - BEAM_R0)} * u;
+        vec3 p = position + aRun * u + aOff * rr;
+        // a lazy wander that never leaves the shaft
+        p += 0.35 * vec3(sin(uT * 0.31 + aMote.z), sin(uT * 0.23 + aMote.z * 1.7), cos(uT * 0.27 + aMote.z * 2.3));
+        vec4 mv = viewMatrix * vec4(p, 1.0);
+        float d = -mv.z;
+        gl_Position = projectionMatrix * mv;
+        float size = aMote.w * uScale / max(d, 0.1);
+        gl_PointSize = clamp(size, 1.5, 40.0);
+        float across = 1.0 - dot(aOff, aOff);
+        vA = across * ${BEAM_ALONG_GLSL("s", "len")} * smoothstep(0.0, 0.06, u) * smoothstep(1.0, 0.94, u)
+          * (0.45 + 0.55 * sin(uT * 1.1 + aMote.z * 5.0)) * min(1.0, size / 1.5)
+          * smoothstep(2.0, 8.0, d) * (1.0 - smoothstep(${glf(FOG_NEAR)}, ${glf(FOG_FAR * 0.8)}, d));
+      }`,
+    fragmentShader: /* glsl */ `
+      varying float vA;
+      void main() {
+        float r = length(gl_PointCoord - 0.5) * 2.0;
+        float g = pow(max(1.0 - r, 0.0), 2.0);
+        gl_FragColor = vec4(vec3(1.0, 0.7, 0.36) * g * max(vA, 0.0) * 1.4, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+  });
 }
 
 let cache: Assets | null = null;
@@ -1461,9 +1694,11 @@ function getAssets(): Assets {
   const lampMat = withVoidFog(new MeshBasicMaterial({ color: new Color(1, 1, 1) }), "lamp");
   const postMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "post");
   const keyholeMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "keyhole");
+  buildBeams(HEND);
   // between the stair's flare and the arcade, from far below the camera's start to above the door
   const koi = createKoi({
     count: 84, rMin: 18.5, rMax: 33, yMid: HEND - 22, yRange: 150, fogNear: FOG_NEAR, fogFar: FOG_FAR, skyGlsl: SKY_GLSL,
+    beamGlsl: beamGlsl(),
   });
   const glow = withVoidFog(new MeshBasicMaterial({ color: new Color(1.35, 0.6, 0.16) }), "globe");
   const skyMat = new ShaderMaterial({
@@ -1498,6 +1733,7 @@ function getAssets(): Assets {
       uniform float uT;
       uniform float uScale;
       varying float vA;
+      ${beamGlsl()}
       void main() {
         vec3 p = position;
         p.y += uT * aAnim.x;
@@ -1513,6 +1749,8 @@ function getAssets(): Assets {
         // the arcade's orbs sink into the same haze as the stone around them, half as deep again
         vec3 hv = p - cameraPosition;
         vA *= 1.0 - aPulse.z * ${hazeGlsl("hv")} * 1.5;
+        // a drifting mote flares up while it crosses a shaft of light
+        vA *= 1.0 + 3.0 * hxBeam(p) * step(1e-3, aAnim.x);
       }`,
     fragmentShader: /* glsl */ `
       varying float vA;
@@ -1539,6 +1777,8 @@ function getAssets(): Assets {
     sky: new SphereGeometry(1200, 24, 16),
     points, doorFrame, doorBack, doorPortal,
     railMat, keyholeMat, columnMat, postMat, wallMat, stairMat, koi, glow, skyMat, pointsMat,
+    beams: beamGeometry(), beamMat: beamMaterial(),
+    dust: dustGeometry(), dustMat: dustMaterial(pointsMat.uniforms.uScale as { value: number }),
     balusterM: new Float32Array(balusters),
     postM: new Float32Array(posts),
     lanternM: new Float32Array(lanterns),
@@ -1598,6 +1838,14 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     door.add(new Mesh(A.doorFrame, A.keyholeMat), doorBack, portal);
     root.add(sky, column, stairs, rails, balusters, postMesh, lanterns, wall, sats, A.koi.mesh, points, door);
     root.add(postNear, postFar, globeNear, globeFar);
+    // the shafts of light lie over the stone and the koi they cross
+    const beams = new Mesh(A.beams, A.beamMat);
+    beams.frustumCulled = false;
+    beams.renderOrder = 5;
+    const dust = new Points(A.dust, A.dustMat);
+    dust.frustumCulled = false;
+    dust.renderOrder = 6;
+    root.add(beams, dust);
     const lampOrder = Array.from({ length: nLamps }, (_, i) => i);
     const lampD2 = new Float32Array(nLamps);
     return {
