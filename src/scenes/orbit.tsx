@@ -1390,10 +1390,11 @@ function buildWorld() {
   withAir(roadMat, "road", 0.8, (sh) => {
     Object.assign(sh.uniforms, reflU);
     sh.vertexShader = sh.vertexShader
-      .replace("#include <common>", "#include <common>\nattribute vec4 aRd;\nvarying vec4 vRd;")
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRd = aRd;");
+      .replace("#include <common>", "#include <common>\nattribute vec4 aRd;\nvarying vec4 vRd;\nvarying vec3 vKc;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRd = aRd;")
+      .replace("#include <project_vertex>", "#include <project_vertex>\nvKc = gl_Position.xyw;");
     sh.fragmentShader = sh.fragmentShader
-      .replace("#include <common>", `#include <common>\nvarying vec4 vRd;\n${WET_GLSL}`)
+      .replace("#include <common>", `#include <common>\nvarying vec4 vRd;\nvarying vec3 vKc;\n${WET_GLSL}`)
       .replace(
         "#include <color_fragment>",
         /* glsl */ `#include <color_fragment>
@@ -1438,14 +1439,27 @@ function buildWorld() {
           // from far off the stones merge into a soft lavender band
           vec3 kFar = vec3(0.24, 0.24, 0.55) + diffuseColor.rgb * 0.5;
           vec3 kc = mix(diffuseColor.rgb * ks, kFar, smoothstep(0.12, 0.5, kpx));
+          // Beyond a few metres the luminous lip holds a width on screen (6 px of a 1080-line frame,
+          // whatever the resolution) and brightens, and once the kerb is only a few pixels wide it
+          // floods it: the two edges draw the road through the town from afar and in the portal
+          // thumbnail, while a kerb near the lens and wide on screen stays stone. Both ramp smoothly,
+          // so there is no band.
+          float kRes = 540.0 * fwidth(vKc.y / vKc.z);
+          float kpx1 = kpx / max(kRes, 1e-4);
+          float kNear = smoothstep(4.5, 11.0, 1.0 / gl_FragCoord.w) * smoothstep(0.025, 0.06, kpx1);
+          vec3 kLit = vec3(0.26, 0.27, 0.8) + max(diffuseColor.rgb - vec3(0.084, 0.082, 0.178), 0.0) * 1.5;
+          kc = mix(kc, kLit, smoothstep(0.035, 0.15, kpx1) * kNear);
           // a gutter of shade along the foot of the kerb, on the road side
           float gutter = smoothstep(2.12, 2.4, abs(off)) * inner;
           diffuseColor.rgb *= 1.0 - 0.45 * gutter;
           diffuseColor.rgb = mix(diffuseColor.rgb, kc, 1.0 - inner);
-          // the luminous lip: never thinner than a pixel, a little dimmer when it has to widen
-          float lw = max(0.05, kpx * 1.5);
-          float lip = (1.0 - smoothstep(lw * 0.5 - kpx * 0.5, lw * 0.5 + kpx * 0.5, abs(kx - 0.07))) * sqrt(0.05 / lw) * (1.0 - inner);
-          diffuseColor.rgb += vec3(0.55, 0.55, 1.1) * lip;
+          // the luminous lip: at the lens thin and never thinner than a pixel, a little dimmer when
+          // it has to widen; beyond, a held line on the inner arris
+          float lwN = max(0.05, kpx * 1.5);
+          float lw = mix(lwN, clamp(kpx1 * 6.0, 0.05, 1.0), kNear);
+          float lc = max(0.07, lw * 0.5);
+          float lip = (1.0 - smoothstep(lw * 0.5 - kpx * 0.5, lw * 0.5 + kpx * 0.5, abs(kx - lc))) * mix(sqrt(0.05 / lwN), 1.0, kNear) * (1.0 - inner);
+          diffuseColor.rgb += mix(vec3(0.55, 0.55, 1.1), vec3(0.6, 0.62, 1.3), kNear) * lip;
           float kWet = mix(0.6, kTop * (1.0 - kJoint) * (0.6 + 0.5 * kTone), kFade);
           diffuseColor.rgb += wetSheen(vRd.zw) * mix(kWet * 1.5, wet * 2.4, inner);
         }`,
