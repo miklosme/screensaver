@@ -51,6 +51,8 @@ bun run build    # static build in dist/
 - `dollhouse`: flowers, pinwheels and paper birds (`dollhouse/garden.ts`), patterned trees,
   domes and hoops (`PATTERNS` in `dollhouse.tsx`).
 - `orbit`: a star-freckled whale with her calf and rising paper lanterns (`orbit/sky.ts`).
+- `roost`: a porcelain hen who is the lid of a covered dish (`roost/hen.ts`), painted eggs that drift up
+  through the floor (`roost/eggs.ts`), and stacks of crockery standing on it and hanging under it (`roost/stacks.ts`).
 
 Everything that moves is animated in a vertex shader from the scene clock, one instanced draw per
 kind of creature.
