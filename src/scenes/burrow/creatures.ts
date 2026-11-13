@@ -212,13 +212,14 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       up.normalize();
       sd.crossVectors(up, ax);
       w0.copy(c).addScaledVector(ax, r * 0.3); // where the eye meets the wall
-      // a dome eye in the last chamber wakes as the camera comes in to the hoop: those on the far
-      // wall, behind the hoop, first, and then on round towards the way in
+      // a dome eye in the last chamber wakes as the camera comes in to the hoop: those beside the
+      // way in, which the camera passes closest, first, and then on round to the far wall behind
+      // the hoop, so the waking runs ahead of the camera to where it is going
       let wake = 0;
       if (inChamber([last], c, 0.5)) {
         const hx = c.x - world.hoopPos.x, hz = c.z - world.hoopPos.z;
         const ang = Math.acos(Math.max(-1, Math.min(1, (hx * world.arrive.x + hz * world.arrive.z) / Math.hypot(hx, hz))));
-        wake = 20.2 + 2.2 * (1 - ang / Math.PI) + 0.4 * eyeAxis[e * 4 + 3]!;
+        wake = 19.6 + 1.8 * (ang / Math.PI) + 0.3 * eyeAxis[e * 4 + 3]!;
       }
       eyeUp.set([up.x, up.y, up.z, wake], e * 4);
 
@@ -367,6 +368,7 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       varying vec3 vSeedOpen;   // seed, how open, how bright the eyeball
       varying vec4 vAlb;
       varying vec4 vGlow;
+      varying vec4 vWallN;   // the wall's own normal under this point; w: 1 for a dome eye
 
       float gFlat = 1.0;   // a shut eye lies flatter in the wall than an open one
       float smax(float a, float b, float k) {
@@ -409,13 +411,16 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
           open = awake * (1.0 - blink) * (0.5 + 0.3 * fract(seed * 7.3));
         }
         vSeedOpen = vec3(seed, open, bright);
-        gFlat = mix(0.72, 1.0, smoothstep(0.0, 0.5, open));
+        gFlat = mix(aUp.w > 0.0 ? 0.5 : 0.72, 1.0, smoothstep(0.0, 0.5, open));
         vec2 p = position.xy;
         float z = surf(p);
         const float E = 0.01;
         float zx = (surf(p + vec2(E, 0.0)) - surf(p - vec2(E, 0.0))) / (2.0 * E);
         float zy = (surf(p + vec2(0.0, E)) - surf(p - vec2(0.0, E))) / (2.0 * E);
         vN = normalize(axis - zx * side - zy * up);
+        float wx = aQuadA.y + 2.0 * aQuadA.w * p.x + aQuadB.x * p.y;
+        float wy = aQuadA.z + aQuadB.x * p.x + 2.0 * aQuadB.y * p.y;
+        vWallN = vec4(normalize(axis - wx * side - wy * up), aUp.w > 0.0 ? 1.0 : 0.0);
         vW = aPos.xyz + r * (p.x * side + p.y * up + z * axis);
         vXY = p;
         vC = aPos;
@@ -439,6 +444,7 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
       varying vec3 vSeedOpen;
       varying vec4 vAlb;
       varying vec4 vGlow;
+      varying vec4 vWallN;
 
       float hash12(vec2 p) {
         vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -582,11 +588,18 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
         float meetLine = exp(-d * d / (0.004 + aa * aa)) * step(0.0, s - 1e-3) * sqrt(s);
         ao *= 1.0 - 0.55 * meetLine * (1.0 - apert);
         ao *= 1.0 - 0.4 * exp(-el / 0.14) * step(0.0, -dl) * (1.0 - lidSide) * sqrt(s);
+        // a dome eye that is still shut is a gentle fold in the dome's skin: its socket shade is
+        // half as deep, and it takes the wall's light (below), so it is no darker than the wall
+        float sh = vWallN.w * (1.0 - smoothstep(0.05, 0.35, o));
+        ao = mix(ao, 1.0 - 0.4 * (1.0 - ao), sh);
         albedo *= tone * ao;
 
         // lit as the wall is lit (WALL_FRAG in materials.ts), from the wall's own light here
         float open = vAlb.w;
         float ndl = max(dot(n, V), 0.0);
+        // lit, and hazed at a grazing angle, as the wall under it is, keeping a little of its relief
+        float ndlW = max(dot(normalize(vWallN.xyz), V), 0.0);
+        ndl = mix(ndl, clamp(ndlW + 0.35 * (ndl - max(dot(normalize(vN), V), 0.0)), 0.0, 1.0), sh);
         float lantern = (0.66 + 0.34 * smoothstep(0.5, 4.5, dist)) / (1.0 + dist * dist / 36.0);
         vec3 light = vec3(0.05, 0.018, 0.07) * (0.7 + 0.3 * n.y);
         light += vec3(0.62, 0.34, 0.27) * (0.2 + 0.8 * ndl) * lantern;
@@ -594,6 +607,9 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
         light += vGlow.rgb * (0.5 * (0.5 + 0.5 * open));
         vec3 col = albedo * light;
         col /= 1.0 + 1.3 * max(max(col.r, col.g) - 0.4, 0.0);
+        // the dome's wall carries more light than its averaged colour says (the bands down its
+        // ribs): a shut lid there is lifted to match the skin round it, measured from the frame
+        col *= 1.0 + 0.25 * sh;
         float graze = 1.0 - ndl;
         graze *= graze * graze;
         col = mix(col, vec3(0.08, 0.72, 0.5) * tone * open * (0.12 + 0.34 * ndl + 0.25 * graze), 0.62 * smoothstep(0.2, 1.1, vGlow.w));
@@ -614,7 +630,7 @@ export function buildCreatures(world: CreatureInput, shared: Shared) {
         float fogA = fogAmount(dist);
         col = mix(col, uFog, fogA);
         float cover = 1.0 - smoothstep(1.0, 1.45, rho);
-        float shade = 0.07 * exp(-pow((rho - 1.3) / 0.15, 2.0)) * (1.0 - fogA);
+        float shade = 0.07 * exp(-pow((rho - 1.3) / 0.15, 2.0)) * (1.0 - fogA) * (1.0 - sh);
         float alpha = cover + shade * (1.0 - cover);
         gl_FragColor = vec4(col * cover, alpha);
         #include <tonemapping_fragment>
