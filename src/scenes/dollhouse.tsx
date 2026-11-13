@@ -52,10 +52,13 @@ import { createGarden, glScreen, onScreen } from "./dollhouse/garden";
  *
  * The camera is the rail's (./rail.ts): the dollhouse rides fall, and the garden is laid out round
  * that stretch from what its camera sees (see "the rail" and "layout" below). The ride: the garden
- * opens out with the navy doorway ahead; the camera passes between the navy hall and the dusk
- * avenue, climbs the first dune, dives through a striped arch (an empty frame, from behind) into a
- * hollow with a doorway on either hand, and banks hard left there, which brings the stele into the
- * middle of the picture, framed by the giant hoop on the crest of the second dune, its leaves
+ * opens out with the navy hall ahead, astride the track on the crest of the first dune, a line of
+ * stepping stones leading up to it. Fall bends too little for the camera to round a doorway, so
+ * this one is turned for it: it stands on a turntable, and as the camera comes up the dune the
+ * table turns it half round, front, paper-thin edge, and the same frame from behind, empty. The
+ * camera passes the dusk avenue's doorway on its left, flies through the empty frame and dives into
+ * a hollow with a doorway on either hand, and banks hard left there, which brings the stele into
+ * the middle of the picture, framed by the giant hoop on the crest of the second dune, its leaves
  * beginning to swing. It flies under the hoop and down the stepping stones to the stele.
  */
 
@@ -160,6 +163,29 @@ function frameGeometry(a: number, hs: number, band: number, depth: number, y0 = 
   return g;
 }
 
+/**
+ * The same band as a flat strip in the plane z = 0, from the ground up, cut into short pieces along
+ * its length: each piece of its shadow can then lie on the dune it falls on.
+ */
+function bandGeometry(a: number, hs: number, band: number) {
+  const pos: number[] = [];
+  const idx: number[] = [];
+  const ring = (x: number, y: number, nx: number, ny: number) => pos.push(x, y, 0, x + nx * band, y + ny * band, 0);
+  const JAMB = 10;
+  const ARC = 40;
+  for (let i = 0; i <= JAMB; i++) ring(-a, (hs * i) / JAMB, -1, 0);
+  for (let i = 1; i <= ARC; i++) {
+    const t = Math.PI - (Math.PI * i) / ARC;
+    ring(Math.cos(t) * a, hs + Math.sin(t) * a, Math.cos(t), Math.sin(t));
+  }
+  for (let i = 1; i <= JAMB; i++) ring(a, hs - (hs * i) / JAMB, 1, 0);
+  for (let i = 0; i + 1 < pos.length / 6; i++) idx.push(i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 1, i * 2 + 3, i * 2 + 2);
+  const g = new BufferGeometry();
+  g.setAttribute("position", new BufferAttribute(new Float32Array(pos), 3));
+  g.setIndex(idx);
+  return g;
+}
+
 // ───────────────────────────── the rail ─────────────────────────────
 /**
  * The camera is the rail's (rail.ts). The dollhouse is third in the playing order and rides fall,
@@ -216,22 +242,20 @@ function keyed(keys: [number, number][]) {
 /**
  * All the scene adds to the rail's camera is where it looks while it has the track to itself
  * (FALL.free): degrees to the left of the rail's heading, and above it, by local time, as it looks
- * across at the navy doorway in passing and down the far side of the first dune; and from the
- * left-hander in the hollow on, how far it has turned to the stele (HOLD: 1 is looking straight at
+ * a little way across at the avenue's doorway in passing and down the far side of the first dune;
+ * and from the left-hander in the hollow on, how far it has turned to the stele (HOLD: 1 is looking straight at
  * it), which comes round into the middle of the picture there and is held until the approach.
  */
 const GLANCE_YAW = keyed([
-  [5.6, 0],
-  [7.6, -10],
-  [9.2, -25],
-  [10, -20],
-  [11.2, 0],
+  [6.6, 0],
+  [8.2, 8],
+  [9.5, 0],
 ]);
 const GLANCE_PITCH = keyed([
   [9.6, 0],
   [10.6, -8],
   [11.8, -4],
-  // it does not stare at the sand all the way down the dive through the arch
+  // it does not stare at the sand all the way down the dive into the hollow
   [12.4, 0],
   [13.4, 6],
   [14.4, 6],
@@ -247,10 +271,9 @@ const _pose = createFrame();
 const _aim = new Vector3();
 /** what the camera holds in the middle of the picture from the hollow on: the stele's doorway */
 const EXIT_AIM = new Vector3(0, HERO_Y + PLINTH + 3.2, 0);
-/** the camera at local time t: a pure function of t */
-function cameraAt(t: number, camera: PerspectiveCamera) {
-  const pose = poseAt(t, _pose);
-  camera.position.copy(pose.position);
+/** the rail's frame at local time t with the scene's look in its `quaternion`: where the camera is and which way it faces */
+function lookAt(t: number, pose: RailFrame = _pose) {
+  poseAt(t, pose);
   const free = FALL.free(t);
   const yaw = GLANCE_YAW(t);
   const pitch = GLANCE_PITCH(t);
@@ -262,6 +285,12 @@ function cameraAt(t: number, camera: PerspectiveCamera) {
   }
   const hold = HOLD(t) * free;
   if (hold > 0) lookTowards(pose, EXIT_AIM, hold);
+  return pose;
+}
+/** the camera at local time t: a pure function of t */
+function cameraAt(t: number, camera: PerspectiveCamera) {
+  const pose = lookAt(t);
+  camera.position.copy(pose.position);
   camera.quaternion.copy(pose.quaternion);
   const fov = fovAt(t);
   if (camera.fov !== fov) {
@@ -290,11 +319,15 @@ function beside(d: number, right: number, ahead = 0): XZ {
   const tz = f.tangent.z / l;
   return { x: f.position.x - tz * right + tx * ahead, z: f.position.z + tx * right + tz * ahead };
 }
-/** a point the rail's camera has in view at local time t: `dist` away in plan, `deg` to the right of straight ahead */
+/** the way the camera faces at local time t, in plan */
+function facing(t: number) {
+  return new Vector3(0, 0, -1).applyQuaternion(lookAt(t, createFrame()).quaternion).setY(0).normalize();
+}
+/** a point the camera has in view at local time t: `dist` away in plan, `deg` to the right of the middle of its picture */
 function seen(t: number, deg: number, dist: number): XZ {
-  const f = poseAt(t);
-  const v = f.tangent.setY(0).normalize().applyAxisAngle(Y_UP, -deg * DEG);
-  return { x: f.position.x + v.x * dist, z: f.position.z + v.z * dist };
+  const from = eyeAt(t);
+  const v = facing(t).applyAxisAngle(Y_UP, -deg * DEG);
+  return { x: from.x + v.x * dist, z: from.z + v.z * dist };
 }
 /** where the camera is at local time t, in plan */
 const eyeAt = (t: number): XZ => {
@@ -312,14 +345,15 @@ const GC: XZ = (() => {
 /**
  * How high over the sand the eye rides, by local time. The rail is level through the approach and
  * rises and falls over its two camel-backs; the sand follows it at this distance, so the garden
- * lies in a shallow dish at the start, climbs to the navy doorway, humps up into a dune under each
- * camel-back (where the eye skims the crest) and dips into a hollow between them.
+ * lies in a shallow dish at the start, humps up into a dune under each camel-back (the navy hall
+ * stands on the crest of the first, where the eye passes through its frame) and dips into a hollow
+ * between them.
  */
 const EYE = keyed([
   [0, 4.3],
   [5, 3.3],
   [9.6, 3.0],
-  [11.85, 2.3],
+  [11.85, 2.55],
   [15.1, 3.1],
   [17.25, 2.3],
   [19.6, 2.5],
@@ -389,9 +423,17 @@ function rawGround(x: number, z: number) {
   }
   return h / w;
 }
-/** The dunes. Level under the stele's plinth. */
+/** where the navy hall stands (see "layout"): astride the track on the crest of the first dune, 33 units into fall */
+const HERO_D = FALL.joint + 33;
+const HERO_SCALE = 1.95;
+/** its turntable's radius: the doorway's band stands on it with a little to spare */
+const TABLE_R = (2.2 + 0.42) * HERO_SCALE + 0.45;
+/** the crest is levelled into a round terrace for the table to lie on: where, how high, and from which radius to which it runs back into the dune */
+const MESA = { x: railAt(HERO_D).position.x, z: railAt(HERO_D).position.z, h: 0, r0: TABLE_R + 0.8, r1: TABLE_R + 5 };
+/** The dunes. Level under the stele's plinth and under the navy hall's turntable. */
 function ground(x: number, z: number) {
-  return rawGround(x, z) * smoothstep(9, 17, Math.hypot(x, z));
+  const g = rawGround(x, z) * smoothstep(9, 17, Math.hypot(x, z));
+  return g + (MESA.h - g) * (1 - smoothstep(MESA.r0, MESA.r1, Math.hypot(x - MESA.x, z - MESA.z)));
 }
 {
   const f = createFrame();
@@ -410,6 +452,8 @@ function ground(x: number, z: number) {
     DUNES.forEach((c, i) => (c.g += miss[i]!));
   }
   for (const c of DUNES) c.g = +c.g.toFixed(4);
+  // the terrace lies a little under the crest it is cut from, so the eye clears the table's far rim as the track begins to dive
+  MESA.h = +(rawGround(MESA.x, MESA.z) - 0.7).toFixed(4);
   const nx = Math.ceil((DUNE_BOX.x1 - DUNE_BOX.x0) / DUNE_CELL) + 2;
   const nz = Math.ceil((DUNE_BOX.z1 - DUNE_BOX.z0) / DUNE_CELL) + 2;
   const grid = { nx, nz, w: new Float32Array(nx * nz), h: new Float32Array(nx * nz) };
@@ -441,7 +485,8 @@ const GROUND_GLSL = /* glsl */ `
       w += k;
       h += k * DUNES[i].z;
     }
-    return h / w * smoothstep(9.0, 17.0, length(p));
+    float g = h / w * smoothstep(9.0, 17.0, length(p));
+    return mix(${MESA.h.toFixed(4)}, g, smoothstep(${MESA.r0.toFixed(3)}, ${MESA.r1.toFixed(3)}, length(p - vec2(${MESA.x.toFixed(3)}, ${MESA.z.toFixed(3)}))));
   }
 `;
 
@@ -485,38 +530,54 @@ const door = (at: XZ, to: XZ, scale: number, pal: number, frame: number, room: n
   room,
   hut,
 });
-/** the navy doorway onto the colonnaded hall: the opening looks at it, and the camera passes close by its left jamb */
-const D1 = beside(20, 4.1, 20.8);
-/** the striped arch the camera dives through from behind, on the far side of the first dune, where the left-hander begins */
-const ARCH_D = 61.3;
+/**
+ * THE NAVY HALL, the doorway that tells the scene's joke. It stands astride the track on the crest
+ * of the first dune, on a turntable, so the camera flies straight at it from the scene's first
+ * frame: first its front and the colonnaded hall inside it; then, as the table turns it half round
+ * (HERO_TURN), its paper-thin edge; then the same striped frame from behind, empty, with the
+ * garden beyond showing through it. The camera flies through that frame and dives into the hollow.
+ */
+/** local times between which the table turns the navy hall half round: after the takeover, and done well before the camera reaches it */
+const HERO_TURN = [5.6, 9.8] as const;
+const heroTurn = (t: number) => -Math.PI * smoothstep(HERO_TURN[0], HERO_TURN[1], t);
+/** how far the table's top stands over the terrace it lies on */
+const TABLE_TOP = 0.2;
+const HERO: DoorDef = (() => {
+  const f = railAt(HERO_D);
+  // its front faces back down the track, at the camera coming up the dune
+  return { x: f.position.x, z: f.position.z, fx: -f.tangent.x, fz: -f.tangent.z, scale: HERO_SCALE, pal: 0, frame: 0, room: 0 };
+})();
+/** which way its front faces before the table turns, as a rotation about the vertical */
+const HERO_YAW = Math.atan2(HERO.fx, HERO.fz);
 /** the giant hoop astride the track on the crest of the second dune: from the hollow, the stele is seen through it */
 const HOOP_D = 83;
+/** the doorway passed close on the left before the dune: it faces the track, so the opening sees only its thin edge, and its avenue opens up as the camera comes alongside */
+const SIDE_D = 41;
 const DOORS: DoorDef[] = [
-  door(D1, eyeAt(3.5), 1.35, 0, 0, 0),
-  // beside it in the opening, across the plain
-  door(seen(3, -14, 31), eyeAt(2.5), 1.25, 1, 2, 2),
-  door(beside(24, -8.5), eyeAt(4.5), 0.36, 2, 2, 1, true),
-  door(seen(1, 5, 95), eyeAt(1), 1.9, 0, 3, 1),
+  HERO,
+  door(beside(SIDE_D, -7.4), beside(SIDE_D + 0.4, 0), 1.2, 1, 2, 2),
+  // a hut on either hand in the opening
+  door(beside(25, -9.5), eyeAt(4.5), 0.36, 2, 2, 1, true),
+  door(beside(31, 11.5), eyeAt(4), 0.42, 3, 1, 3, true),
   // across the hollow between the dunes: one to the left of the dive, one to the right
-  door(seen(12, -22, 33), eyeAt(12.2), 1.5, 2, 3, 1),
-  door(seen(12, 26, 24), eyeAt(12.2), 1.2, 3, 1, 3),
-  // the arch across the track: its front faces the way the camera is going
-  door(beside(ARCH_D, 0), beside(ARCH_D + 4, 0), 1.4, 2, 0, 2),
-  // beyond the arch, seen through it from the first dune; and a hut beside the way down to the stele
-  door(seen(12.3, -3, 40), eyeAt(12.3), 1.3, 1, 1, 0),
+  door(seen(12, -31, 33), eyeAt(12.4), 1.5, 2, 3, 1),
+  door(seen(12, 31, 25), eyeAt(12.4), 1.2, 3, 1, 3),
+  // far off to the right of the opening, beyond the hollow
+  door(seen(3.6, 33, 92), eyeAt(2), 1.9, 2, 3, 1),
+  // a hut beside the way down to the stele
   door(beside(87, 9.5), eyeAt(16), 0.4, 3, 3, 3, true),
   // behind and beside the stele, seen on the final approach
   { x: -15, z: -13, fx: 0.25, fz: 1, scale: 1.15, pal: 1, frame: 3, room: 1 },
   { x: 17, z: -24, fx: -0.3, fz: 1, scale: 1.4, pal: 2, frame: 1, room: 0 },
-  { x: 10.5, z: -3, fx: -0.25, fz: 1, scale: 0.34, pal: 0, frame: 2, room: 3, hut: true },
-  { x: -34, z: -44, fx: 0.4, fz: 1, scale: 2.0, pal: 0, frame: 2, room: 0 },
+  { x: 10.5, z: -3, fx: -0.25, fz: 1, scale: 0.34, pal: 3, frame: 2, room: 3, hut: true },
+  { x: -34, z: -44, fx: 0.4, fz: 1, scale: 2.0, pal: 1, frame: 2, room: 2 },
   { x: 40, z: -58, fx: -0.4, fz: 1, scale: 0.6, pal: 1, frame: 0, room: 1, hut: true },
   { x: 30, z: 6, fx: -1, fz: 0.5, scale: 0.9, pal: 3, frame: 3, room: 2 },
 ];
 
 /**
- * The stepping stones: a winding line from the opening's foreground to the navy doorway's
- * threshold, and another under the camera's way from the second dune down to the stele's plinth.
+ * The stepping stones: a winding line from the opening's foreground up the dune to the navy hall's
+ * turntable, and another under the camera's way from the second dune down to the stele's plinth.
  */
 const STONE_AT: XZ[] = (() => {
   const out: XZ[] = [];
@@ -538,23 +599,24 @@ const STONE_AT: XZ[] = (() => {
       n++;
     }
   };
-  const l = Math.hypot(DOORS[0]!.fx, DOORS[0]!.fz);
-  const a = beside(3, 2.6);
-  const b = beside(20, 4.2, 9);
-  const c = { x: D1.x + (DOORS[0]!.fx / l) * 1.0, z: D1.z + (DOORS[0]!.fz / l) * 1.0 };
-  run((k) => ({ x: (1 - k) * (1 - k) * a.x + 2 * k * (1 - k) * b.x + k * k * c.x, z: (1 - k) * (1 - k) * a.z + 2 * k * (1 - k) * b.z + k * k * c.z }), 0.9);
+  // up to the turntable: in from the right of the opening's foreground, then under the track
+  const d0 = 4;
+  const d1 = HERO_D - TABLE_R - 0.9;
+  run((k) => beside(d0 + (d1 - d0) * k, 2.4 * (1 - smoothstep(0, 0.55, k))), 1.0);
   // down to the plinth: under the track, as far as the plinth's edge
-  const d0 = 75;
-  const d1 = FALL.exit - 9.4;
-  run((k) => beside(d0 + (d1 - d0) * k, 0), 1.1);
+  const e0 = 75;
+  const e1 = FALL.exit - 9.4;
+  run((k) => beside(e0 + (e1 - e0) * k, 0), 1.1);
   return out;
 })();
 const STONES = STONE_AT.length;
 
-/** true where no flower may grow: on the stele's plinth, in a doorway's band or a hut, on a stepping stone */
+/** true where no flower may grow: on the stele's plinth, on the turntable, in a doorway's band or a hut, on a stepping stone */
 const flowerBlocked = (x: number, z: number) => {
   if (Math.hypot(x, z) < 9.2) return true;
+  if (Math.hypot(x - HERO.x, z - HERO.z) < TABLE_R + 0.35) return true;
   for (const d of DOORS) {
+    if (d === HERO) continue;
     const l = Math.hypot(d.fx, d.fz);
     const along = ((x - d.x) * d.fz - (z - d.z) * d.fx) / l;
     const out = ((x - d.x) * d.fx + (z - d.z) * d.fz) / l;
@@ -574,23 +636,27 @@ const segmentDistance = (x: number, z: number, a: XZ, b: XZ) => {
 };
 /** lines of sight that nothing tall may stand in: [from, to, half width] */
 const SIGHT_LINES: [XZ, XZ, number][] = [
-  [eyeAt(0), D1, 5],
-  [eyeAt(3), D1, 4.5],
-  [eyeAt(1.5), DOORS[1]!, 4],
+  // the navy hall, from the opening and from the plain
+  [eyeAt(0), HERO, 6],
+  [eyeAt(3), HERO, 6],
+  // and on through its empty frame, down into the hollow
+  [HERO, beside(HERO_D + 16, 0), 7],
+  [eyeAt(8.5), DOORS[1]!, 4],
   [eyeAt(12), DOORS[4]!, 4],
   [eyeAt(12), DOORS[5]!, 4],
-  // through the arch, to the doorway beyond it
-  [eyeAt(12), DOORS[7]!, 5],
-  // the dive from the first dune through the arch, and the floor of the hollow
+  // the dive from the first dune and the floor of the hollow
   [eyeAt(11.8), eyeAt(15.2), 9],
   // the stele, from where it comes into sight in the hollow to the approach
   [eyeAt(14.6), { x: 0, z: 0 }, 6],
   [eyeAt(15.5), { x: 0, z: 0 }, 7],
   [eyeAt(18), { x: 0, z: 0 }, 5],
-  // nothing tall beside the lens as the scene opens, and nothing looming behind the arch in the hollow
-  [eyeAt(0), seen(0, 28, 13), 5],
-  [eyeAt(2.5), seen(2.5, 30, 13), 5],
-  [seen(12, 0, 12), seen(12, 0, 36), 11],
+  // nothing tall beside the lens as the scene opens: a crown cut off by the frame's edge would leave its shadow there without a caster
+  [eyeAt(0), seen(0, 30, 22), 9],
+  [eyeAt(0), seen(0, -30, 22), 9],
+  [eyeAt(2.5), seen(2.5, 32, 20), 9],
+  [eyeAt(2.5), seen(2.5, -32, 20), 9],
+  [eyeAt(5), seen(5, 34, 18), 8],
+  [eyeAt(5), seen(5, -34, 18), 8],
 ];
 /** true where a prop of radius r stands clear of the camera's track, the doors, the stele and the lines of sight */
 const clear = (x: number, z: number, r: number) => {
@@ -601,94 +667,54 @@ const clear = (x: number, z: number, r: number) => {
   return true;
 };
 
-/** beds planted where the opening looks: a stream of them down the dish towards the navy doorway */
+/**
+ * Flower beds are planted from where the camera is: for each of these local times, drifts on
+ * either hand of the line of flight, so many flowers to the square unit, as [degrees right of
+ * straight ahead, distance, half length, half width]. They lie along the line of sight, so that they overlap into broad bands of colour
+ * that flank the way and run off under the lens.
+ */
 const BEDS = (
   [
-    [-19, 7.2, 2.8, 1.3],
-    [-31, 10.5, 2.8, 1.4],
-    [11, 7.8, 2.6, 1.2],
-    [-15, 9.5, 2.2, 1.0],
-    [7, 10.5, 2.4, 1.1],
-    [22, 12.5, 2.0, 1.0],
-    [-5, 14.5, 2.6, 1.0],
-    [13, 17.5, 2.4, 1.1],
-    [-13, 19.5, 2.2, 1.2],
-    [3, 22.5, 2.6, 1.0],
-    [-22, 24, 2.4, 1.1],
-    [20, 25, 2.4, 1.2],
-    [-8, 27, 2.8, 1.1],
-    [9, 30, 2.6, 1.1],
+    [0, 6.5, [[-27, 7.5, 3.4, 1.8], [24, 7.2, 3.2, 1.7], [-14, 10.5, 3.2, 1.6], [12, 11, 3.4, 1.6], [-34, 12, 3.0, 1.6], [33, 12.5, 3.0, 1.6], [-6, 15, 3.0, 1.3], [20, 16.5, 3.2, 1.4], [-21, 17, 3.0, 1.5], [5, 20, 3.0, 1.3]]],
+    [2.5, 5.5, [[-25, 7.5, 3.2, 1.6], [27, 7.8, 3.2, 1.6], [-11, 11, 3.0, 1.4], [14, 11.5, 3.2, 1.4], [-33, 13, 2.8, 1.5], [34, 13.5, 2.8, 1.5]]],
+    [5, 5, [[-24, 7.5, 3.2, 1.6], [25, 7.5, 3.2, 1.6], [-12, 11, 3.0, 1.4], [13, 11.5, 3.0, 1.4], [-32, 13, 2.8, 1.5], [33, 13, 2.8, 1.5], [-18, 17, 2.8, 1.4], [19, 17.5, 2.8, 1.4]]],
+    [8.5, 7, [[-21, 6.5, 3.4, 1.9], [23, 6.5, 3.4, 1.9], [-9, 9, 3.2, 1.5], [12, 9.5, 3.2, 1.5], [-33, 9.5, 3.0, 1.7], [34, 10, 3.0, 1.7], [-17, 13.5, 3.0, 1.5], [20, 14, 3.0, 1.5], [-27, 16, 2.6, 1.4], [29, 16.5, 2.6, 1.4]]],
+    [12, 7, [[-24, 6.5, 3.2, 1.8], [24, 6.5, 3.2, 1.8], [-11, 9.5, 3.2, 1.5], [11, 9.5, 3.2, 1.5], [-33, 11, 2.8, 1.6], [33, 11, 2.8, 1.6], [-19, 14.5, 3.0, 1.5], [19, 14.5, 3.0, 1.5], [-6, 13, 3.0, 1.4], [6, 14, 3.0, 1.4], [-8, 19, 3.0, 1.4], [9, 20, 3.0, 1.4], [-26, 18, 3.2, 1.6], [27, 18.5, 3.2, 1.6], [-15, 24, 3.2, 1.5], [16, 25, 3.2, 1.5], [-3, 26, 3.0, 1.4]]],
+    [15.5, 5.5, [[-27, 7.5, 3.0, 1.5], [26, 7.5, 3.0, 1.5], [-14, 11, 2.8, 1.3], [14, 11, 2.8, 1.3], [-22, 15, 2.6, 1.3], [22, 15, 2.6, 1.3]]],
+    [19, 6.5, [[-23, 6, 3.2, 1.8], [23, 6, 3.2, 1.8], [-12, 9.5, 3.0, 1.5], [12, 9.5, 3.0, 1.5], [-33, 10.5, 2.8, 1.6], [32, 10.5, 2.8, 1.6], [-20, 14, 2.8, 1.4], [20, 14, 2.8, 1.4], [-9, 17, 2.6, 1.2], [9, 17, 2.6, 1.2]]],
   ] as const
-)
-  .map(([deg, dist, along, across]) => {
-    const at = seen(0, deg, dist);
-    const from = eyeAt(0);
+).flatMap(([t, density, beds]) =>
+  beds.map(([deg, dist, along, across]) => {
+    const at = seen(t, deg, dist);
+    const from = eyeAt(t);
     const l = Math.hypot(at.x - from.x, at.z - from.z);
-    return { ...at, tx: (at.x - from.x) / l, tz: (at.z - from.z) / l, along, across };
-  })
-  .concat(
-    // and on the second dune: in the foreground as the camera climbs it under the hoop, and beside
-    // the stones on the way down to the stele
-    (
-      [
-        // beside the way between the two doorways
-        [27.5, -3.4],
-        [30.5, 2.6],
-        [33, -3.8],
-        [36.5, -3.2],
-        [39, -4.4],
-        // ahead between them, and up the first dune
-        [38, 2.1],
-        [41, -2.3],
-        [44, 2.5],
-        [46, -2.6],
-        [49, 2.7],
-        [51.5, -2.8],
-        // down its far side to the arch, and across the hollow
-        [56, 3],
-        [58.5, -3.2],
-        [66, 3.4],
-        [68, -3.6],
-        [70, -4],
-        [73, 3.4],
-        [73, -2.8],
-        [75, 2.6],
-        [76, -3.6],
-        [79, 4.2],
-        [81, -2.8],
-        [86, -3.4],
-        [89, 3.6],
-        [92, -4.6],
-        [94.5, 4.2],
-      ] as const
-    ).map(([d, right]) => {
-      const at = beside(d, right);
-      const on = beside(d + 1, right);
-      const l = Math.hypot(on.x - at.x, on.z - at.z) || 1;
-      return { ...at, tx: (on.x - at.x) / l, tz: (on.z - at.z) / l, along: 2.4, across: 1.0 };
-    }),
-  );
+    return { ...at, tx: (at.x - from.x) / l, tz: (at.z - from.z) / l, along, across, density };
+  }),
+);
 
 /**
  * True where a thing of radius r shows in the middle ground of the picture at local time t: within
  * `reach` of the camera and inside its frame. What stands there is placed on purpose (the
- * doorways, the groves, the skyline's hoops); a dome or a hoop scattered into it would loom over
- * them.
+ * doorways, the hoops, domes and pinwheels of the skyline); a dome or a hoop scattered into it would
+ * loom over them.
  */
-const inPicture = (t: number, reach: number) => {
+const inPicture = (t: number, reach: number, half = 47) => {
   const from = eyeAt(t);
-  const f = poseAt(t).tangent;
-  const l = Math.hypot(f.x, f.z);
+  const f = facing(t);
+  const l = 1;
   return (x: number, z: number, r = 0) => {
     const dx = x - from.x;
     const dz = z - from.z;
     const d = Math.hypot(dx, dz);
-    return d < reach + r && (dx * f.x + dz * f.z) / l / d > Math.cos(47 * DEG + Math.atan2(r, d));
+    return d < reach + r && (dx * f.x + dz * f.z) / l / d > Math.cos(half * DEG + Math.atan2(r, d));
   };
 };
-/** the opening, and the view from the first dune through the arch */
-const inOpening = inPicture(0, 72);
+/** the opening (which swings 26 degrees left as it comes in), the view from the first dune into the hollow, and the approach to the stele */
+const inOpening0 = inPicture(0, 150);
+const inOpening5 = inPicture(4, 150);
+const inOpening = (x: number, z: number, r = 0) => inOpening0(x, z, r) || inOpening5(x, z, r);
 const inHollow = inPicture(12, 66);
+const inApproach = inPicture(19.5, 120, 44);
 
 /**
  * Where on its circle round the garden a flock is when the scene begins, for it to cross the line
@@ -704,34 +730,214 @@ function flockLead(from: XZ, to: XZ, radius: number, speed: number, t: number) {
   const k = -b + Math.sqrt(Math.max(0, b * b - (ox * ox + oz * oz - radius * radius)));
   return Math.atan2(oz + (dz / l) * k, ox + (dx / l) * k) - speed * t;
 }
-/** one flock is over the far garden in the opening, the other over the stele as it comes into sight */
-const FLOCKS: [number, number] = [flockLead(eyeAt(1.5), seen(1.5, 8, 60), 82, 8.25 / 82, 1.5), flockLead(eyeAt(15.5), { x: 0, z: 0 }, 50, -8.25 / 50, 15.5)];
+/** one flock is over the far garden in the opening, the other crosses over the stele as the camera comes down to it */
+const FLOCKS: [number, number] = [flockLead(eyeAt(1.5), seen(1.5, 8, 60), 82, 8.25 / 82, 1.5), flockLead(eyeAt(18), { x: 0, z: 0 }, 50, -8.25 / 50, 18.5)];
 
 /**
- * Lollipop trees planted on purpose: groves along the skyline of the opening, between and behind
- * the doorways, as [degrees right of the opening's view, distance]. The rest are scattered.
+ * THE SKYLINE. What stands behind and beside the navy hall in the opening, and behind the stele on
+ * the approach, is placed on purpose, so that both pictures are layered: giant striped hoops
+ * overlapping one another at different depths, striped domes between them, big pinwheels nearer
+ * the lens. Each is [degrees right of straight ahead, distance, size] from the camera of the
+ * opening once it has straightened out (local time 3.6), or of the approach (local time 20).
  */
+const fromOpening = (deg: number, dist: number) => seen(3.6, deg, dist);
+/** where the opening's skyline is turned to face (its hoops are also the stouter ones: they are seen from further off) */
+const OPENING_EYE = eyeAt(3);
+const fromApproach = (deg: number, dist: number) => seen(20, deg, dist);
+type Placed = XZ & { s: number; face: XZ };
+const placed = (list: readonly (readonly [number, number, number])[], from: (deg: number, dist: number) => XZ, eye: XZ): Placed[] =>
+  list.map(([deg, dist, s]) => ({ ...from(deg, dist), s, face: eye }));
+/** hoops: radius */
+const SKYLINE_HOOPS: Placed[] = [
+  ...placed(
+    [
+      [-14, 76, 15],
+      [10, 104, 24],
+      [-28, 96, 19],
+      [26, 72, 14],
+      [41, 108, 21],
+      [57, 78, 15],
+      [-2, 150, 30],
+      [70, 112, 18],
+    ],
+    fromOpening,
+    OPENING_EYE,
+  ),
+  ...placed(
+    [
+      [-21, 52, 10],
+      [14, 70, 15],
+      [-38, 78, 13],
+      [33, 56, 9],
+      [-6, 104, 20],
+      [-31, 100, 16],
+    ],
+    fromApproach,
+    eyeAt(20),
+  ),
+];
+/** domes: radius */
+const SKYLINE_DOMES: Placed[] = [
+  ...placed(
+    [
+      [17, 88, 14],
+      [-20, 122, 19],
+      [33, 130, 20],
+      [50, 98, 14],
+      [-36, 134, 17],
+      [3, 190, 27],
+      [64, 142, 18],
+    ],
+    fromOpening,
+    OPENING_EYE,
+  ),
+  ...placed(
+    [
+      [-29, 70, 11],
+      [23, 92, 14],
+      [3, 140, 20],
+      [42, 78, 9],
+      [-46, 100, 12],
+    ],
+    fromApproach,
+    eyeAt(20),
+  ),
+];
+/** pinwheels: size (a stalk is 3.2 times it) */
+const SKYLINE_PINWHEELS: Placed[] = [
+  ...placed(
+    [
+      [17, 27, 2.3],
+      [-18, 36, 2.6],
+      [31, 44, 2.9],
+      [-31, 50, 2.4],
+      [47, 36, 2.2],
+      [9, 62, 3.2],
+      [-9, 64, 2.8],
+      [58, 52, 2.6],
+    ],
+    fromOpening,
+    OPENING_EYE,
+  ),
+  ...placed(
+    [
+      [-23, 26, 2.2],
+      [25, 30, 2.6],
+      [-12, 44, 3.0],
+      [37, 46, 2.4],
+      [-36, 40, 2.6],
+      [11, 52, 3.2],
+      [-16, 62, 3.4],
+    ],
+    fromApproach,
+    eyeAt(20),
+  ),
+];
+/** lollipop trees planted on purpose: a few small groves low on the opening's skyline, as [degrees right, distance]. The rest are scattered. */
 const GROVES = (
   [
-    [-33, 50],
-    [-25, 80],
-    [-9, 74],
-    [4, 60],
-    [15, 47],
-    [27, 39],
-    [35, 56],
+    [-23, 62],
+    [22, 55],
+    [40, 62],
   ] as const
-).map(([deg, dist]) => seen(0, deg, dist));
-/** hoops on that skyline: [degrees right of the opening's view, distance, radius] */
-const SKYLINE_HOOPS = (
-  [
-    [-3, 120, 19],
-    [22, 84, 13],
-  ] as const
-).map(([deg, dist, s]) => ({ ...seen(0, deg, dist), s }));
+).map(([deg, dist]) => fromOpening(deg, dist));
+
+const TREES = 200;
+const DOMES = 26;
+const LOOPS = 24;
+/**
+ * The instanced dressing, laid out once: lollipop trees, half-buried pavilion domes and bulbous
+ * hoops. Those of the skyline come first, where they were put on purpose; the rest are scattered
+ * round the garden, but kept out of the three pictures that are composed (the opening, the hollow,
+ * the approach to the stele).
+ */
+const DRESSING = (() => {
+  const rnd = mulberry32(20251);
+  const trees: { x: number; z: number; hgt: number; cr: number; squash: number; ci: number }[] = [];
+  const GROVE = 5;
+  // each grove has its own budget of tries, so that one with no room cannot starve the next
+  const groveTries: number[] = [];
+  for (let tries = 0; trees.length < TREES && tries < 60000; tries++) {
+    const a = rnd() * Math.PI * 2;
+    const r = 10 + Math.pow(rnd(), 0.75) * 190;
+    let x = GC.x + Math.cos(a) * r;
+    let z = GC.z + Math.sin(a) * r;
+    let hgt = (1.4 + rnd() * 3.2) * (1 + r / 160);
+    const gi = Math.floor(trees.length / GROVE);
+    const grove = GROVES[gi];
+    const inGrove = grove !== undefined && (groveTries[gi] = (groveTries[gi] ?? 0) + 1) < 600;
+    if (inGrove) {
+      const gr = 1.5 + Math.sqrt(rnd()) * 6;
+      x = grove.x + Math.cos(a) * gr;
+      z = grove.z + Math.sin(a) * gr;
+      hgt = 2.2 + rnd() * 3.0;
+    }
+    const cr = hgt * (0.26 + rnd() * 0.16);
+    const squash = 0.85 + rnd() * 0.5;
+    const ci = Math.floor(rnd() * 7);
+    if (!clear(x, z, 5 + cr)) continue;
+    // scattered trees keep out of the composed pictures' middle ground: there they would stand in rows along the skyline
+    if (!inGrove && ((inOpening(x, z) && Math.hypot(x - TRACK[20]!.x, z - TRACK[20]!.z) < 95) || inApproach(x, z))) continue;
+    trees.push({ x, z, hgt, cr, squash, ci });
+  }
+  const domes: { x: number; z: number; s: number; tall: number; rot: number; ci: number }[] = [];
+  SKYLINE_DOMES.forEach((d, i) => domes.push({ x: d.x, z: d.z, s: d.s, tall: 0.8 + ((i * 0.37) % 0.7), rot: i * 1.7, ci: (i * 2 + 1) % 6 }));
+  for (let tries = 0; domes.length < DOMES && tries < 20000; tries++) {
+    const a = rnd() * Math.PI * 2;
+    const r = 62 + rnd() * 190;
+    const x = GC.x + Math.cos(a) * r;
+    const z = GC.z + Math.sin(a) * r;
+    const s = 7 + rnd() * 16 + r * 0.03;
+    const tall = 0.7 + rnd() * 0.9;
+    const ci = Math.floor(rnd() * 6);
+    const rot = rnd() * 6;
+    if (!clear(x, z, s + 8) || inOpening(x, z, s) || inApproach(x, z, s)) continue;
+    domes.push({ x, z, s, tall, rot, ci });
+  }
+  const hoops: { x: number; z: number; s: number; rot: number; tall: number; fat: number; ci: number }[] = [];
+  // the first stands astride the track on the crest of the second dune: the camera flies under it
+  const astride = railAt(HOOP_D);
+  hoops.push({ x: astride.position.x, z: astride.position.z, s: 6.4, rot: Math.atan2(astride.tangent.x, astride.tangent.z), tall: 1.05, fat: 1.1, ci: 1 });
+  // the skyline's: square on to the camera that sees them
+  SKYLINE_HOOPS.forEach((h, i) =>
+    hoops.push({ x: h.x, z: h.z, s: h.s, rot: Math.atan2(h.x - h.face.x, h.z - h.face.z) + ((i % 3) - 1) * 0.35, tall: 0.85 + ((i * 0.29) % 0.55), fat: (h.face === OPENING_EYE ? 1.4 : 1.0) + ((i * 0.43) % 1.2), ci: i % 5 }),
+  );
+  for (let tries = 0; hoops.length < LOOPS && tries < 20000; tries++) {
+    const a = rnd() * Math.PI * 2;
+    const r = 38 + rnd() * 170;
+    const x = GC.x + Math.cos(a) * r;
+    const z = GC.z + Math.sin(a) * r;
+    const s = 5 + rnd() * 14 + r * 0.05;
+    const rot = rnd() * Math.PI;
+    const ci = Math.floor(rnd() * 5);
+    const fat = 0.8 + rnd() * 1.6;
+    const tall = 0.8 + rnd() * 0.7;
+    if (inOpening(x, z, s) || inHollow(x, z, s) || inApproach(x, z, s) || !clear(x, z, s + 5) || !clear(x + Math.cos(rot) * s, z - Math.sin(rot) * s, 5) || !clear(x - Math.cos(rot) * s, z + Math.sin(rot) * s, 5)) continue;
+    hoops.push({ x, z, s, rot, tall, fat, ci });
+  }
+  return { trees, domes, hoops };
+})();
 
 /** what a plan of the garden needs (see the worker's plan drawing): the stretch, the camera, the ground and what stands on it */
-export const PLAN = { stretch: FALL, cameraAt, poseAt, track: TRACK, ground, doors: DOORS, stones: STONE_AT, centre: GC, arch: ARCH_D, hoop: HOOP_D, clear };
+export const PLAN = {
+  stretch: FALL,
+  cameraAt,
+  poseAt,
+  track: TRACK,
+  ground,
+  doors: DOORS,
+  hero: { d: HERO_D, turn: heroTurn, table: TABLE_R, window: HERO_TURN },
+  stones: STONE_AT,
+  centre: GC,
+  hoop: HOOP_D,
+  clear,
+  beds: BEDS,
+  hoops: SKYLINE_HOOPS,
+  domes: SKYLINE_DOMES,
+  pinwheels: SKYLINE_PINWHEELS,
+  groves: GROVES,
+  dressing: DRESSING,
+};
 
 /**
  * One sun for everything. Props are lit by a wrapped (half-Lambert) warm key and a cool lavender
@@ -930,7 +1136,6 @@ const PAPER = /* glsl */ `
   }`;
 
 const WHITE = new Color(1, 1, 1);
-const TREES = 220;
 const CONTACTS = 640;
 const TINTS = 160;
 const FRAME_COLORS = ["#f4ead4", "#f6b598", "#a2dcbf", "#a6cbee"];
@@ -1555,9 +1760,12 @@ function makeTerrainMaterial(shadow: DataTexture) {
  * geometry flattened onto the ground along the sun, its edge softened where the surface turns
  * side-on to the sun. FLAT: a flat silhouette flattened the same way, lighter towards its far end.
  * CONTACT: a round dark pool, its strength in the length of the instance's y axis.
- * TINT: not a shadow but the same trick: a round stain of the instance's colour, fallen petals under
- * a drift of flowers, which is what lets a drift read as a patch of colour from far away.
+ * TINT: not a shadow but the same trick: a round stain of the instance's colour, fallen petals and
+ * a little shade under a drift of flowers, which is what lets a drift read as a patch of colour
+ * from far away.
  */
+/** the distance from the eye within which a drift's stain is not drawn (it fades in over the 7 units beyond) */
+const TINT_NEAR = 6.5;
 const SHADOW_FRAG = /* glsl */ `
   varying vec3 vW;
   varying float vA;
@@ -1577,7 +1785,9 @@ const SHADOW_FRAG = /* glsl */ `
       k *= 0.6;
     #endif
     #ifdef TINT
-      a *= 1.0 - smoothstep(0.3, 1.0, length(vQ) * 2.0);
+      a *= 1.0 - smoothstep(0.5, 1.0, length(vQ) * 2.0);
+      // close to the eye every flower has a shadow of its own (see garden.ts), and the stain gives way to them
+      a *= smoothstep(${TINT_NEAR.toFixed(1)}, ${(TINT_NEAR + 7).toFixed(1)}, length(cameraPosition - vW));
       k = vTint;
     #endif
     a *= 1.0 - smoothstep(${FOG_NEAR.toFixed(1)}, ${FOG_FAR.toFixed(1)}, length(cameraPosition - vW));
@@ -1621,6 +1831,11 @@ function makeShadowMaterial(kind: "CAST" | "FLAT" | "CONTACT" | "TINT", vertexSh
         #if defined(TINT)
           vA = length(m[1].xyz);
           vTint = instanceColor;
+          // a stain wholly within the distance at which it has faded out is not drawn at all: near the lens it would cover half the screen
+          if (length(cameraPosition - m[3].xyz) + 0.5 * max(length(m[0].xyz), length(m[2].xyz)) < ${TINT_NEAR.toFixed(1)}) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+          }
         #elif defined(CONTACT)
           vA = length(m[1].xyz);
         #elif defined(FLAT)
@@ -1633,6 +1848,41 @@ function makeShadowMaterial(kind: "CAST" | "FLAT" | "CONTACT" | "TINT", vertexSh
     `,
     fragmentShader: SHADOW_FRAG,
   });
+}
+
+/**
+ * The navy hall's shadow. It turns, so its shadow cannot be baked with the still things': the
+ * doorway's band is drawn again as a flat strip (bandGeometry), turned as it is turned and slid along
+ * the sun onto the dunes.
+ */
+function makeHeroShadowMaterial() {
+  const m = makeShadowMaterial(
+    "CAST",
+    /* glsl */ `
+    uniform float uYaw;
+    varying vec3 vW;
+    varying float vA;
+    varying vec2 vQ;
+    const vec3 SUN = ${glv(SUN_DIR)};
+    ${GROUND_GLSL}
+    void main() {
+      float c = cos(uYaw), s = sin(uYaw);
+      vec3 p = position * ${HERO_SCALE.toFixed(3)};
+      vec3 foot = vec3(${HERO.x.toFixed(3)}, ${ground(HERO.x, HERO.z).toFixed(3)}, ${HERO.z.toFixed(3)});
+      vec3 w0 = foot + vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+      // slid along the sun onto the dune it falls on
+      float k = max(0.0, (w0.y - foot.y) / SUN.y);
+      for (int i = 0; i < 4; i++) k = max(0.0, (w0.y - groundAt(w0.xz - SUN.xz * k) - 0.04) / SUN.y);
+      vec3 w = w0 - SUN * k;
+      vW = w;
+      vA = 1.0;
+      vQ = vec2(0.0);
+      gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+    }`,
+  );
+  m.uniforms.uYaw = { value: 0 };
+  m.side = DoubleSide;
+  return m;
 }
 
 // ───────────────────────────── baked shadows ─────────────────────────────
@@ -2599,6 +2849,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
   const rooms = useRef<(Mesh | null)[]>([]);
   const leafL = useRef<Group>(null);
   const leafR = useRef<Group>(null);
+  const hero = useRef<Group>(null);
   const trunks = useRef<InstancedMesh>(null);
   const crowns = useRef<InstancedMesh>(null);
   const domes = useRef<InstancedMesh>(null);
@@ -2614,6 +2865,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
     // thin doorway
     const frame = frameGeometry(D_A, D_HS, 0.42, 0.26);
+    const band = bandGeometry(D_A, D_HS, 0.42);
     const opening = new ShapeGeometry(archPath(new Shape(), D_A + 0.02, D_HS, -0.6), 28);
     const hutShell = new SphereGeometry(1, 36, 14, 0, Math.PI * 2, 0, Math.PI * 0.62);
     const hutCap = new SphereGeometry(1, 16, 10);
@@ -2662,6 +2914,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     return {
       terrain,
       frame,
+      band,
       opening,
       hutShell,
       hutCap,
@@ -2723,6 +2976,9 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
         defines: { USE_UV: "" },
       }),
       stone: lambert("#ffffff", "stone", PATTERNS.stone),
+      // the turntable: one great lollipop, dark along the foot of the doorway that stands across it
+      table: lambert("#a2dcbf", "table", PATTERNS.stone, `mix(1.0, smoothstep(0.0, ${(0.9 / TABLE_R).toFixed(3)}, abs(vOb.z)), step(0.5, vOb.y) * step(abs(vOb.x), ${(((D_A + 0.5) * HERO_SCALE) / TABLE_R).toFixed(3)}))`),
+      heroShadow: makeHeroShadowMaterial(),
       trunk: lambert("#b98a94", "trunk", "", "smoothstep(0.0, 0.3, vOb.y)"),
       contact: makeShadowMaterial("CONTACT"),
       tint: makeShadowMaterial("TINT"),
@@ -2735,6 +2991,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       ground,
       clear,
       centre: GC,
+      pinwheels: SKYLINE_PINWHEELS,
       flocks: FLOCKS,
       // the beds border the way the camera rides, short of the plinth
       track: TRACK.filter((p) => p.d >= 0 && p.d <= FALL.exit - 9),
@@ -2752,7 +3009,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
 
   // scattered, instanced dressing
   useLayoutEffect(() => {
-    const rnd = mulberry32(20251);
+    const rnd = mulberry32(77003);
     const o = new Object3D();
     const c = new Color();
     const zero = new Matrix4().makeScale(0, 0, 0);
@@ -2778,29 +3035,7 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     const crownCols = ["#7fd2b6", "#a6e0c4", "#f6ae90", "#f2a0b6", "#98c6f0", "#f3e4c4", "#b49eea"].map((h) => paint(h));
     const T = trunks.current!;
     const K = crowns.current!;
-    let n = 0;
-    const GROVE = 6;
-    // each grove has its own budget of tries, so that one with no room cannot starve the next
-    const groveTries: number[] = [];
-    while (n < T.count) {
-      const a = rnd() * Math.PI * 2;
-      const r = 10 + Math.pow(rnd(), 0.75) * 190;
-      let x = GC.x + Math.cos(a) * r;
-      let z = GC.z + Math.sin(a) * r;
-      let hgt = (1.4 + rnd() * 3.2) * (1 + r / 160);
-      // the first few stand in the groves of the opening's skyline
-      const gi = Math.floor(n / GROVE);
-      const grove = GROVES[gi];
-      if (grove && (groveTries[gi] = (groveTries[gi] ?? 0) + 1) < 600) {
-        const gr = 1.5 + Math.sqrt(rnd()) * 7;
-        x = grove.x + Math.cos(a) * gr;
-        z = grove.z + Math.sin(a) * gr;
-        hgt = 2.4 + rnd() * 3.6;
-      }
-      const cr = hgt * (0.26 + rnd() * 0.16);
-      const squash = 0.85 + rnd() * 0.5;
-      const ci = Math.floor(rnd() * crownCols.length);
-      if (!clear(x, z, 5 + cr)) continue;
+    DRESSING.trees.forEach(({ x, z, hgt, cr, squash, ci }, n) => {
       const y = ground(x, z);
       o.position.set(x, y - 0.1, z);
       o.rotation.set(0, 0, 0);
@@ -2815,11 +3050,18 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       K.setColorAt(n, c.setRGB(...crownCols[ci]!));
       casters.push(ellipsoidCaster(x, y + hgt + cr * squash * 0.55, z, cr, cr * squash, cr));
       contact(x + SUN_DIR.x * -0.15, z - SUN_DIR.z * 0.15, 0.35 + hgt * 0.09, 0.35 + hgt * 0.09, 0, 0.8);
-      n++;
+    });
+    for (let i = DRESSING.trees.length; i < T.count; i++) {
+      T.setMatrixAt(i, zero);
+      K.setMatrixAt(i, zero);
     }
-    // every doorway's band, and the domes of the huts
+    // every doorway's band, and the domes of the huts. The navy hall turns, so its shadow is drawn (see heroShadow); its table's is baked.
     for (const d of DOORS) {
       const gy = ground(d.x, d.z);
+      if (d === HERO) {
+        casters.push(ellipsoidCaster(d.x, gy + TABLE_TOP - 0.3, d.z, TABLE_R, 0.3, TABLE_R));
+        continue;
+      }
       casters.push(archCaster(d.x, gy, d.z, Math.atan2(d.fx, d.fz), d.scale, D_A, D_HS, 0.42));
       if (!d.hut) continue;
       const dw = D_A * d.scale;
@@ -2832,10 +3074,11 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     }
     // the stele, standing on its plinth
     casters.push(archCaster(0, DOOR_Y, 0, 0, 1, ST_A, ST_HS, 0));
-    // every doorway darkens the sand along its foot, and the stele's plinth sits in a pool
+    // every doorway darkens the sand along its foot; the turntable and the stele's plinth sit in pools
     for (const d of DOORS) {
       const w = (D_A + 0.42) * d.scale;
-      contact(d.x, d.z, w * 1.25, 0.9 * d.scale + 0.3, Math.atan2(d.fx, d.fz), 0.7);
+      if (d === HERO) contact(d.x, d.z, TABLE_R * 1.3, TABLE_R * 1.3, 0, 0.75);
+      else contact(d.x, d.z, w * 1.25, 0.9 * d.scale + 0.3, Math.atan2(d.fx, d.fz), 0.7);
     }
     contact(0, 0, 9.4, 9.4, 0, 0.75);
     T.instanceMatrix.needsUpdate = true;
@@ -2845,59 +3088,26 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     // big half-buried pavilion domes
     const domeCols = ["#f3e6cc", "#f6b598", "#a2dcbf", "#a6cbee", "#f3d27c", "#f0a2b8"].map((h) => paint(h));
     const Dm = domes.current!;
-    n = 0;
-    while (n < Dm.count) {
-      const a = rnd() * Math.PI * 2;
-      const r = 62 + rnd() * 190;
-      const x = GC.x + Math.cos(a) * r;
-      const z = GC.z + Math.sin(a) * r;
-      const s = 7 + rnd() * 16 + r * 0.03;
-      const tall = 0.7 + rnd() * 0.9;
-      const ci = Math.floor(rnd() * domeCols.length);
-      if (!clear(x, z, s + 8) || inOpening(x, z, s)) continue;
+    DRESSING.domes.forEach(({ x, z, s, tall, rot, ci }, n) => {
       o.position.set(x, ground(x, z) - s * 0.25, z);
-      o.rotation.set(0, rnd() * 6, 0);
+      o.rotation.set(0, rot, 0);
       o.scale.set(s, s * tall, s);
       o.updateMatrix();
       Dm.setMatrixAt(n, o.matrix);
       Dm.setColorAt(n, c.setRGB(...domeCols[ci]!));
       casters.push(ellipsoidCaster(x, ground(x, z) - s * 0.25, z, s, s * tall, s));
       contact(x, z, s * 1.22, s * 1.22, 0, 0.6);
-      n++;
-    }
+    });
+    for (let i = DRESSING.domes.length; i < Dm.count; i++) Dm.setMatrixAt(i, zero);
     Dm.instanceMatrix.needsUpdate = true;
     if (Dm.instanceColor) Dm.instanceColor.needsUpdate = true;
 
     // bulbous hoops leaping over the dunes
     const loopCols = ["#f3e6cc", "#f6b598", "#a2dcbf", "#f3d27c", "#a6cbee"].map((h) => paint(h));
     const L = loops.current!;
-    // the first stands astride the track on the crest of the second dune: the camera flies under it
-    const astride = railAt(HOOP_D);
-    n = 0;
-    while (n < L.count) {
-      const a = rnd() * Math.PI * 2;
-      const r = 38 + rnd() * 170;
-      let x = GC.x + Math.cos(a) * r;
-      let z = GC.z + Math.sin(a) * r;
-      let s = 5 + rnd() * 14 + r * 0.05;
-      let rot = rnd() * Math.PI;
-      const ci = Math.floor(rnd() * loopCols.length);
-      let fat = 0.8 + rnd() * 1.6;
-      const sky = SKYLINE_HOOPS[n - 1];
-      if (n === 0) {
-        x = astride.position.x;
-        z = astride.position.z;
-        s = 6.4;
-        rot = Math.atan2(astride.tangent.x, astride.tangent.z);
-        fat = 1.1;
-      } else if (sky) {
-        // square on to the opening's camera
-        ({ x, z, s } = sky);
-        rot = Math.atan2(x - TRACK[12]!.x, z - TRACK[12]!.z);
-      } else if (inOpening(x, z, s) || inHollow(x, z, s) || !clear(x, z, s + 5) || !clear(x + Math.cos(rot) * s, z - Math.sin(rot) * s, 5) || !clear(x - Math.cos(rot) * s, z + Math.sin(rot) * s, 5)) continue;
+    DRESSING.hoops.forEach(({ x, z, s, rot, tall, fat, ci }, n) => {
       o.position.set(x, ground(x, z) - s * 0.12, z);
       o.rotation.set(0, rot, 0);
-      const tall = n === 0 ? 1.05 : 0.8 + rnd() * 0.7;
       o.scale.set(s, s * tall, s * fat);
       o.updateMatrix();
       L.setMatrixAt(n, o.matrix);
@@ -2905,14 +3115,14 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       casters.push(hoopCaster(x, ground(x, z) - s * 0.12, z, rot, s, s * tall, s * fat, 0.11));
       // both feet
       for (const side of [-1, 1]) contact(x + Math.cos(rot) * s * side, z - Math.sin(rot) * s * side, 0.5 * s * 0.22 * fat + 0.5, 0.5 * s * 0.22 * fat + 0.5, rot, 0.7);
-      n++;
-    }
+    });
+    for (let i = DRESSING.hoops.length; i < L.count; i++) L.setMatrixAt(i, zero);
     L.instanceMatrix.needsUpdate = true;
     if (L.instanceColor) L.instanceColor.needsUpdate = true;
 
     // pill clouds
     const Cl = clouds.current!;
-    n = 0;
+    let n = 0;
     while (n < Cl.count) {
       const a = rnd() * Math.PI * 2;
       const r = 380 + rnd() * 380;
@@ -2954,19 +3164,19 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     St.instanceMatrix.needsUpdate = true;
     if (St.instanceColor) St.instanceColor.needsUpdate = true;
 
-    // the garden's flower drifts and pinwheel stalks
+    // the garden's flower drifts and pinwheel stalks. The sand under a drift is stained with its
+    // colour and a little shade, in one piece the shape of the bed
     const Tn = tints.current!;
     garden.drifts.slice(0, Tn.count).forEach((f, i) => {
-      contact(f.x - SUN_DIR.x * 0.3, f.z - SUN_DIR.z * 0.3, f.r * 1.1, f.r * 1.1, 0, 0.2);
-      // the sand under a drift is stained with its colour
       tilt.setFromUnitVectors(up, groundNormal(f.x, f.z, _n));
-      o.position.set(f.x, ground(f.x, f.z) + 0.04, f.z);
-      o.quaternion.copy(tilt);
-      o.scale.set(f.r * 2.6, 0.3, f.r * 2.6);
+      yawQ.setFromAxisAngle(up, Math.atan2(-f.tz, f.tx));
+      o.position.set(f.x - SUN_DIR.x * 0.2, ground(f.x, f.z) + 0.04, f.z - SUN_DIR.z * 0.2);
+      o.quaternion.copy(tilt).multiply(yawQ);
+      o.scale.set(f.along * 2.05, 0.38, f.across * 2.05);
       o.updateMatrix();
       Tn.setMatrixAt(i, o.matrix);
       const top = Math.max(...f.hue);
-      Tn.setColorAt(i, c.setRGB(f.hue[0] / top, f.hue[1] / top, f.hue[2] / top).lerp(WHITE, 0.35));
+      Tn.setColorAt(i, c.setRGB(f.hue[0] / top, f.hue[1] / top, f.hue[2] / top).lerp(WHITE, 0.35).multiplyScalar(0.82));
     });
     for (let i = garden.drifts.length; i < Tn.count; i++) Tn.setMatrixAt(i, zero);
     Tn.instanceMatrix.needsUpdate = true;
@@ -2989,11 +3199,17 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
     for (const m of mat.interiors) m.uniforms.uT!.value = t;
     // the rail's camera, and where the scene has it look
     cameraAt(t, camera);
+    // the table turns the navy hall round, and its shadow with it
+    const heroYaw = HERO_YAW + heroTurn(t);
+    if (hero.current) hero.current.rotation.y = heroYaw;
+    mat.heroShadow.uniforms.uYaw!.value = heroYaw;
     // a room is drawn only from in front of its doorway: from behind there is nothing there
     for (let i = 0; i < DOORS.length; i++) {
       const d = DOORS[i]!;
       const room = rooms.current[i];
-      if (room) room.visible = (camera.position.x - d.x) * d.fx + (camera.position.z - d.z) * d.fz > 0;
+      if (!room) continue;
+      if (d === HERO) room.visible = (camera.position.x - d.x) * Math.sin(heroYaw) + (camera.position.z - d.z) * Math.cos(heroYaw) > 0;
+      else room.visible = (camera.position.x - d.x) * d.fx + (camera.position.z - d.z) * d.fz > 0;
     }
     // once the camera is placed, rolled and zoomed: the flowers drawn are those in its picture
     garden.update(t, camera);
@@ -3019,7 +3235,8 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
         const ry = Math.atan2(d.fx, d.fz);
         const dw = D_A * d.scale;
         return (
-          <group key={i} position={[d.x, y, d.z]} rotation={[0, ry, 0]}>
+          <group key={i} ref={d === HERO ? hero : undefined} position={[d.x, y, d.z]} rotation={[0, ry, 0]}>
+            {d === HERO && <mesh geometry={geo.disc} material={mat.table} position={[0, TABLE_TOP - 0.6, 0]} scale={[TABLE_R, 0.6, TABLE_R]} />}
             {d.hut ? (
               <>
                 {/* dome sits behind the little porch; far too small for what is inside */}
@@ -3045,6 +3262,9 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
         );
       })}
 
+
+      {/* the navy hall's shadow, turning with it */}
+      <mesh geometry={geo.band} material={mat.heroShadow} frustumCulled={false} />
 
       {/* the stele: the real way out */}
       <group position={[0, HERO_Y, 0]}>
@@ -3072,8 +3292,8 @@ export default function Dollhouse({ clock, camera, portalMaterial }: SceneProps)
       <instancedMesh ref={crowns} args={[geo.ball, mat.crown, TREES]} frustumCulled={false} />
       <instancedMesh ref={contacts} args={[geo.contact, mat.contact, CONTACTS]} frustumCulled={false} />
       <instancedMesh ref={tints} args={[geo.contact, mat.tint, TINTS]} frustumCulled={false} />
-      <instancedMesh ref={domes} args={[geo.bigBall, mat.dome, 22]} frustumCulled={false} />
-      <instancedMesh ref={loops} args={[geo.loop, mat.loop, 16]} frustumCulled={false} />
+      <instancedMesh ref={domes} args={[geo.bigBall, mat.dome, DOMES]} frustumCulled={false} />
+      <instancedMesh ref={loops} args={[geo.loop, mat.loop, LOOPS]} frustumCulled={false} />
       <instancedMesh ref={clouds} args={[geo.ball, mat.cloud, 48]} frustumCulled={false} />
       <instancedMesh ref={stones} args={[geo.disc, mat.stone, STONES]} frustumCulled={false} />
       <primitive object={garden.root} />
