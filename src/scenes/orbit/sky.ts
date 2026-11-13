@@ -264,10 +264,10 @@ function whaleMaterial(o: SkyOptions) {
  *  - 13.5 to 16.5: as it turns to face -z she comes up out of the far end and crosses its view
  *    from left to right, in profile against the open sky;
  *  - 16.5 to 18.5: out of sight above and behind it she sweeps round and up the axis, fast;
- *  - 19 to 24.5: she has slowed to a drift across the moon, heading -s, so that from t = 19 (the
- *    moon at the top left of the turning view) to the portal she and her calf are a silhouette on
- *    its disc. Here she is all but still in the world: the moon is so far off that staying on it
- *    while the camera moves needs no more than that.
+ *  - 19 to 24.5: she has slowed to a drift past the moon's right-hand limb, rising away from the
+ *    hut's crescent finial (which stands on the disc's middle from t = 21 to 22.5) with her calf
+ *    above her, so a strip of bare moon always separates the two silhouettes. Off to the side of
+ *    the axis, her drift round it reads on screen as a slow climb up and to the right.
  */
 const FLIGHT: [number, number, number, number][] = [
   [0, -60, -150, 34],
@@ -277,14 +277,14 @@ const FLIGHT: [number, number, number, number][] = [
   [15.5, 50, -42, 22],
   [16.5, 74, -22, 24],
   [17.4, 74, 30, 29],
-  [18.2, 38, 84, 34],
-  [19, -2, 95, 36],
-  [20, -5, 95, 37],
-  [21, -6, 95, 37],
-  [22, -10, 96, 37],
-  [23, -14, 97, 36],
-  [24.5, -20, 98, 35],
-  [26, -26, 99, 34],
+  [18.2, 10, 100, 36],
+  [19, -40, 128, 40],
+  [20, -52, 137, 41],
+  [21, -62, 140, 42],
+  [22, -70, 142, 41.5],
+  [23, -77, 144, 40],
+  [24.5, -86, 146, 37],
+  [26, -95, 148, 34],
 ];
 
 /** Catmull-Rom through the keys, with tangents from the actual key spacing in time */
@@ -336,7 +336,7 @@ export function createSky(o: SkyOptions, pointsMat: THREE.Material): Sky {
   const MOTHER = 30;
   const swimmers: Swimmer[] = [
     { size: MOTHER, off: [0, 0, 0] as [number, number, number], lag: 0, phase: 0 },
-    { size: MOTHER * 0.42, off: [-0.12, 0.32, 0.12] as [number, number, number], lag: 0.12, phase: 1.9 },
+    { size: MOTHER * 0.42, off: [0.05, 0.3, 0.3] as [number, number, number], lag: 0.12, phase: 1.9 },
   ].map((s) => {
     const mesh = new THREE.Mesh(geo, mat);
     mesh.frustumCulled = false;
@@ -537,14 +537,27 @@ export function moonMaterial(o: { R: number; fogColor: THREE.Color }) {
     uniforms: { uFog: { value: o.fogColor } },
     vertexShader: /* glsl */ `
       varying vec2 vP;
+      varying float vCut;
+      vec2 ndc(vec3 p) {
+        vec4 c = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+        return c.xy / max(c.w, 1e-4);
+      }
       void main() {
         vP = position.xy / ${o.R.toFixed(1)};
+        // how far the frame's edge cuts into the disc: the room between its centre and the nearer
+        // edge, in disc radii (1 = just whole). It is the same for every vertex.
+        const float RW = ${(0.335 * o.R).toFixed(2)};
+        vec2 c = ndc(vec3(0.0));
+        vec2 rad = vec2(length(ndc(vec3(RW, 0.0, 0.0)) - c), length(ndc(vec3(0.0, RW, 0.0)) - c));
+        vec2 room = (1.0 - abs(c)) / max(vec2(max(rad.x, rad.y)), vec2(1e-4));
+        vCut = smoothstep(1.3, 0.55, min(room.x, room.y));
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: /* glsl */ `
       uniform vec3 uFog;
       varying vec2 vP;
+      varying float vCut;
       float mHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
       float mNoise(vec2 p) {
         vec2 i = floor(p);
@@ -570,7 +583,10 @@ export function moonMaterial(o: { R: number; fogColor: THREE.Color }) {
         float rings = 0.5 + 0.5 * cos(r * 60.0);
         vec3 sky = uFog * (1.0 + 0.2 * rings * smoothstep(0.34, 0.5, r) * smoothstep(1.1, 0.6, r));
         float d = max(r - RD, 0.0);
-        sky += vec3(0.2, 0.36, 0.6) * (0.55 * exp(-d * 14.0) + 0.4 * exp(-d * 4.5) + 0.2 * exp(-d * 1.6));
+        sky += vec3(0.2, 0.36, 0.6) * (0.55 * exp(-d * 14.0) + 0.4 * exp(-d * 4.5) + 0.2 * exp(-d * 1.6)) * (1.0 - 0.55 * vCut);
+        // cut by the frame's edge the moon is a fragment, not the whole disc: it dims to below the
+        // bloom's reach, so the corner of the frame is moonlit rather than a blown-out patch
+        col *= 1.0 - 0.5 * vCut;
         gl_FragColor = vec4(mix(sky, col, disc), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
