@@ -109,3 +109,42 @@ Learned:
 - The fable reviewer asked for director-level bloom as an opportunity, which exists since pass
   001: the reviewers do not know what is already built. Nothing in the brief tells them.
 
+## Pass 003 (2026-11-13)
+
+Slices:
+- B5 burrow · Rebuilt around summer, second try (fable) kept: the first scene on the rail. Fable
+  alone reported regressions (the dome's near mushrooms gone at t=22, a pale near wall at t=19);
+  queued on B4 and B1.
+- D5 dollhouse · Every door is bigger inside (opus) kept, no regressions; the panel wants the
+  interiors deeper (D7).
+- H5 helix · Rebuilt around spring (fable, sent back once as H5b) reverted: all three reviewers
+  reported the opening as a regression, two the cramped climb.
+- O2 orbit · The moon-gate hut (opus) reverted: astra and sol reported the overhead town merging
+  into the sky, caused by the rim rider, not by the hut.
+Gate: frame cost worst 3.06 ms (orbit), loop worst 12 ms, seams 0.00–0.33% RMSE, bundle 265 kB
+Panel: astra, sol, fable
+Scores (mean of the panel): helix 7.0, burrow 6.0, dollhouse 6.3, orbit 7.0. The helix and orbit
+scores were given to the reverted versions (`loop/out/pass-003/reviewed/`); on `loop` those two
+scenes are as at pass 002.
+Learned:
+- I accepted H5 after its second return although its own worker called the opening short, and
+  the panel reverted it for exactly that. LOOP.md's rule (short twice: drop it) was right. When
+  the worker and the brief agree a frame is short, the panel will too.
+- A rider that changes a different part of the picture puts the whole slice at risk: O2's hut
+  went down with its rim change. Riders get their own commit, so a revert can take one.
+- The panel called the tower rims too strong in pass 002 and too weak in pass 003. On a taste
+  dial like that, move half as far as a reviewer asks.
+- The rail shapes what a scene can show. Where a season's body starts decides the opening, and
+  no placement of props fixes a bad arrival. Reshape a season with the scene that rides it
+  (K7), freezing the approach, the joints and any season already ridden.
+- What made B5 land where the pilot failed: the brief listed frame by frame what had to be on
+  screen, named the legacy sheet as the thing to beat, and the worker drew a plan and a
+  per-second frame table first. Its tunnel is offset from the rail and wider where a sightline
+  needed it: the world need not be centred on the track.
+- A rail scene beside a legacy one is fine when its opening was composed for that (the burrow
+  through the helix's keyhole reads as arches and knot).
+- H5b's worker saved about 0.2 ms with a depth-only pass for big occluders and by drawing the
+  backdrop last; worth trying in the other scenes when the budget tightens.
+- Two reviewers scored the dollhouse 7 and one 5 on the same frames: the fable reviewer weighs
+  the scene's gimmick heavily. Its top problem is a good guide to what a premise still lacks.
+

@@ -53,6 +53,38 @@ other work in the meantime.
 6. **`AGENTS.md`'s camera section** will be wrong the day a scene lands on the rail. I will put
    replacement text here for you when that happens instead of editing the file.
 
+**From pass 003:**
+
+7. **The rail and the picture pull against each other.** The burrow now rides summer and the
+   panel accepts it. The helix on spring was reverted by all three reviewers: spring turns left
+   straight after its joint, so the camera arrives too close to the stair to see it whole, and
+   the scene's strongest image (the spiral standing in the shaft) was lost. My plan for pass 004
+   is to reshape spring with a run-up towards the stair, built together with the helix, leaving
+   summer untouched (K7). That means the rail is shaped season by season with its scene instead
+   of being designed once. If you would rather the rail stay as it is and a scene's old best
+   view be given up for it, say so: I would then keep rail migrations even when the panel calls
+   them regressions.
+8. **`AGENTS.md`, "Before touching a camera, a track, or scene timing".** A scene rides the rail
+   now, so that section is out of date. Suggested replacement, for you to paste or change:
+
+   > Read the header of `src/scenes/rail.ts` and the timeline in `src/scenes/types.ts`.
+   >
+   > - The camera of a scene on the rail (the burrow so far) is the rail's: its pose is
+   >   `season(index).pose(clock.t)`, and its world is built along `stretch.frame(distance)`. It
+   >   may turn the camera only through `lookTowards`, weighted by `stretch.free(t)`.
+   > - The rail's shape is the data in `design()`. Changing a season moves every world built on
+   >   it; changing the approach or a joint changes all four seasons. After any change, re-plot
+   >   the rail and check the seam state at all four joints.
+   > - Place things by distance along the stretch and ask `stretch.timeAt(d)` for the beat. Draw
+   >   a plan and a per-second table of what the camera sees before building.
+   > - Helix, dollhouse and orbit still have their own tracks and hold the legacy seam state
+   >   (same header) from t = 0 to `RAIL.release` and from `RAIL.settle` to the end. Their track
+   >   parameter is often not true distance; `createRide` works in world units.
+   >
+   > A camera change is done when both seams hold, frames at `t` = 0, 5, 12, 20 and 24.5 show a
+   > clear line of flight, the portal fills the screen at the end, and no frame of the sheet is
+   > worse than before.
+
 ## Handled
 
 Notes the director has acted on, each with the pass number.
