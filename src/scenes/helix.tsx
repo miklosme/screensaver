@@ -74,6 +74,8 @@ const DOOR_FRAME = 0.8;
 const IVORY: [number, number, number] = [0.95, 0.83, 0.64];
 const SAND: [number, number, number] = [0.92, 0.72, 0.5];
 const AMBER: [number, number, number] = [0.8, 0.47, 0.2];
+/** the void's colour at eye level, which far stone hazes into (linear) */
+const VOID_TEAL = "vec3(0.022, 0.13, 0.145)";
 
 const smooth = (a: number, b: number, x: number) => {
   const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
@@ -479,9 +481,9 @@ const SKY_GLSL = /* glsl */ `
   }
 `;
 
-type Detail = "plain" | "strata" | "wall" | "stair" | "column" | "post" | "globe" | "lamp" | "keyhole" | "satellite";
+type Detail = "plain" | "strata" | "wall" | "stair" | "column" | "post" | "globe" | "lamp" | "keyhole" | "satellite" | "rail";
 /** details lit by the stair lamps' warm pools */
-const POOLED: Detail[] = ["stair", "column", "post", "strata"];
+const POOLED: Detail[] = ["stair", "column", "post", "strata", "rail"];
 /** details that carve the surface: they write a height into `hxH` and the normal follows it */
 const BUMPED: Detail[] = ["stair", "column", "post", "keyhole"];
 
@@ -848,6 +850,8 @@ const DETAIL_GLSL: Record<Detail, string> = {
       vec3 glass = mix(vec3(0.22, 0.06, 0.01), vec3(0.72, 0.3, 0.07), smoothstep(0.0, 0.9, ndv));
       diffuseColor.rgb = glass + vec3(2.4, 1.5, 0.75) * core + vec3(0.5, 0.22, 0.06) * pow(1.0 - ndv, 8.0);
     }`,
+  // the hand rail: plain bronze; its sheen comes after the normal is known (RAIL_SHEEN_GLSL)
+  rail: "",
   // the hanging stairs: the same sandstone, cooler and bluer the further off they hang
   satellite: /* glsl */ `
     diffuseColor.rgb *= vec3(1.04, 0.93, 0.8) * (0.93 + 0.07 * sin(vHxW.y * 2.6 + sin(vHxW.x * 0.7 + vHxW.z * 0.9) * 1.5));`,
@@ -883,11 +887,45 @@ const KEYHOLE_LAMPS_GLSL = /* glsl */ `
             }
           }`;
 
+/**
+ * The arcade's haze, as a 0..1 weight from `hv`, the vector from the eye: tiers further off, and
+ * further above or below the eye, sink into the void's teal, so the near arches stay warm and crisp
+ * while the middle and far shaft fall away by value. The orbs in the openings use the same weight.
+ */
+const hazeGlsl = (hv: string) =>
+  `clamp(smoothstep(32.0, 85.0, length(${hv})) * 0.37 + smoothstep(4.0, 40.0, abs(${hv}.y)) * 0.33, 0.0, 0.6)`;
+const WALL_HAZE_GLSL = /* glsl */ `
+        {
+          vec3 hv = vHxW - cameraPosition;
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, ${VOID_TEAL}, ${hazeGlsl("hv")});
+        }`;
+
+/**
+ * The hand rail stays slim beside the lens but swells towards twice that girth further off, so the
+ * spiral's outline still carries when the whole tower is a thumbnail in the previous portal.
+ */
+const RAIL_GROW_GLSL = /* glsl */ `#include <begin_vertex>
+        {
+          float rd = distance((modelMatrix * vec4(transformed, 1.0)).xyz, cameraPosition);
+          transformed += objectNormal * ${glf(0.1 - RAIL_R)} * smoothstep(5.0, 24.0, rd);
+        }`;
+/** a warm, thin highlight along the rail that grows with distance, so the bronze reads as a line */
+const RAIL_SHEEN_GLSL = /* glsl */ `
+          {
+            vec3 rv = normalize(vViewPosition);
+            vec3 rl = normalize((viewMatrix * vec4(-0.35, 1.0, -0.6, 0.0)).xyz);
+            float spec = pow(max(dot(normal, normalize(rl + rv)), 0.0), 28.0);
+            float rim = 1.0 - abs(dot(normal, rv));
+            float far = smoothstep(5.0, 24.0, length(vViewPosition));
+            hxGlow += vec3(1.0, 0.64, 0.3) * (0.3 * spec + far * (0.14 + 0.4 * spec + 0.2 * rim * rim));
+          }`;
+
 function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
   mat.onBeforeCompile = (s) => {
     s.uniforms.uHxT = hxTime;
     s.uniforms.uHxLamp = hxLamps;
     s.uniforms.uHxPool = hxPool;
+    if (detail === "rail") s.vertexShader = s.vertexShader.replace("#include <begin_vertex>", RAIL_GROW_GLSL);
     s.vertexShader = s.vertexShader
       .replace(
         "#include <common>",
@@ -976,13 +1014,14 @@ function withVoidFog<T extends Material>(mat: T, detail: Detail = "plain"): T {
             vec3 grad = sign(det) * (dFdx(hxH) * r1 + dFdy(hxH) * r2);
             normal = normalize(abs(det) * normal - grad);
           }` + (detail === "keyhole" ? KEYHOLE_LAMPS_GLSL : "") + (POOLED.includes(detail) ? poolGlsl(detail) : "")
-          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : ""),
+          : "#include <normal_fragment_maps>" + (POOLED.includes(detail) ? poolGlsl(detail) : "") + (detail === "rail" ? RAIL_SHEEN_GLSL : ""),
       )
       .replace(
         "#include <tonemapping_fragment>",
         /* glsl */ `
         gl_FragColor.rgb += hxGlow;
         ${detail === "satellite" ? "gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * vec3(0.3, 0.78, 0.86) + vec3(0.0, 0.035, 0.045), smoothstep(12.0, 110.0, length(vHxW - cameraPosition)) * 0.75);" : ""}
+        ${detail === "wall" ? WALL_HAZE_GLSL : ""}
         #ifdef USE_FOG
           float hxf = smoothstep(fogNear, fogFar, vFogDepth);
           gl_FragColor.rgb = mix(gl_FragColor.rgb, hxSky(normalize(vHxW - cameraPosition)), hxf * 0.97);
@@ -1015,7 +1054,7 @@ interface Assets {
   doorFrame: BufferGeometry;
   doorBack: BufferGeometry;
   doorPortal: BufferGeometry;
-  stone: MeshLambertMaterial;
+  railMat: MeshLambertMaterial;
   keyholeMat: MeshLambertMaterial;
   columnMat: MeshLambertMaterial;
   postMat: MeshLambertMaterial;
@@ -1380,16 +1419,24 @@ function getAssets(): Assets {
   const doorYaw = Math.atan2(-T.x, -T.z);
 
   // ---- points: wall lamps, lantern halos, drifting motes ----
-  const pp: number[] = [], ps: number[] = [], pa: number[] = [];
+  // aPulse: rate and depth of a slow breath, and how much the arcade's haze takes the light
+  const pp: number[] = [], ps: number[] = [], pa: number[] = [], pu: number[] = [];
+  const orbRand = rng(311);
   for (let i = 0; i < wallLamps.length; i += 3) {
+    const phase = rand() * TAU; // drawn even for dropped orbs, so the motes below keep their places
+    // about a third of the openings stay dark; the rest differ in size and strength
+    if (orbRand() < 0.34) continue;
+    const big = orbRand();
     pp.push(wallLamps[i]!, wallLamps[i + 1]!, wallLamps[i + 2]!);
-    ps.push(5.5);
-    pa.push(0, 0, rand() * TAU, 0.75);
+    ps.push(3.2 + 4.2 * big * big);
+    pa.push(0, 0, phase, 0.3 + 0.75 * orbRand());
+    pu.push(0.18 + 0.32 * orbRand(), 0.55, 1);
   }
   for (let i = 0; i < lanternPos.length; i += 3) {
     pp.push(lanternPos[i]!, lanternPos[i + 1]!, lanternPos[i + 2]!);
     ps.push(haloSize[i / 3]!);
     pa.push(0, 0, rand() * TAU, 0.55);
+    pu.push(1.7, 0.3, 0);
   }
   for (let i = 0; i < 520; i++) {
     const r = 4 + 32 * Math.sqrt(rand());
@@ -1397,14 +1444,16 @@ function getAssets(): Assets {
     pp.push(r * Math.cos(a), HEND - 70 + rand() * 110, r * Math.sin(a));
     ps.push(0.18 + rand() * 0.3);
     pa.push(0.25 + rand() * 0.8, (rand() - 0.5) * 0.03, rand() * TAU, 1.2);
+    pu.push(1.7, 0.3, 0);
   }
   const points = new BufferGeometry();
   points.setAttribute("position", new BufferAttribute(new Float32Array(pp), 3));
   points.setAttribute("aSize", new BufferAttribute(new Float32Array(ps), 1));
   points.setAttribute("aAnim", new BufferAttribute(new Float32Array(pa), 4));
+  points.setAttribute("aPulse", new BufferAttribute(new Float32Array(pu), 3));
 
   // ---- materials ----
-  const stone = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "strata");
+  const railMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "rail");
   const wallMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "wall");
   const stairMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "stair");
   const columnMat = withVoidFog(new MeshLambertMaterial({ vertexColors: true }), "column");
@@ -1445,6 +1494,7 @@ function getAssets(): Assets {
     vertexShader: /* glsl */ `
       attribute float aSize;
       attribute vec4 aAnim;
+      attribute vec3 aPulse;
       uniform float uT;
       uniform float uScale;
       varying float vA;
@@ -1459,7 +1509,10 @@ function getAssets(): Assets {
         gl_Position = projectionMatrix * mv;
         gl_PointSize = min(aSize * uScale / max(d, 0.1), 220.0);
         vA = aAnim.w * (1.0 - smoothstep(${FOG_NEAR.toFixed(1)}, ${(FOG_FAR * 1.15).toFixed(1)}, d))
-          * smoothstep(0.6, 3.0, d) * (0.85 + 0.15 * sin(uT * 1.7 + aAnim.z));
+          * smoothstep(0.6, 3.0, d) * (1.0 - aPulse.y + aPulse.y * (0.5 + 0.5 * sin(uT * aPulse.x + aAnim.z)));
+        // the arcade's orbs sink into the same haze as the stone around them, half as deep again
+        vec3 hv = p - cameraPosition;
+        vA *= 1.0 - aPulse.z * ${hazeGlsl("hv")} * 1.5;
       }`,
     fragmentShader: /* glsl */ `
       varying float vA;
@@ -1485,7 +1538,7 @@ function getAssets(): Assets {
     lantern: new SphereGeometry(0.22, 28, 16),
     sky: new SphereGeometry(1200, 24, 16),
     points, doorFrame, doorBack, doorPortal,
-    stone, keyholeMat, columnMat, postMat, wallMat, stairMat, koi, glow, skyMat, pointsMat,
+    railMat, keyholeMat, columnMat, postMat, wallMat, stairMat, koi, glow, skyMat, pointsMat,
     balusterM: new Float32Array(balusters),
     postM: new Float32Array(posts),
     lanternM: new Float32Array(lanterns),
@@ -1517,7 +1570,7 @@ export default function Helix({ clock, camera, portalMaterial }: SceneProps) {
     sky.renderOrder = -10;
     const column = new Mesh(A.column, A.columnMat);
     const stairs = new Mesh(A.stairs, A.stairMat);
-    const rails = new Mesh(A.rails, A.stone);
+    const rails = new Mesh(A.rails, A.railMat);
     const balusters = instanced(A.baluster, A.postMat, A.balusterM);
     const postMesh = instanced(A.post, A.postMat, A.postM);
     const lanterns = instanced(A.lantern, A.glow, A.lanternM);
